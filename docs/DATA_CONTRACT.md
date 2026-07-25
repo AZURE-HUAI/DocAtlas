@@ -1,15 +1,19 @@
-# UE 5.8 文档知识库数据合同
+# DocAtlas 数据合同
 
-版本：2  
-适用范围：Epic Developer Community 的 Unreal Engine 5.8 英文官方文档
+版本：3  
+适用范围：任何数据集。下文以内置的 `epic-ue-5.8`
+（Epic Developer Community 的 Unreal Engine 5.8 英文官方文档）为例。
+
+站点特有的部分（站点地图数量、接口形式、分类名）由来源适配器和
+`datasets/*.toml` 决定；分层、字段和保证是所有数据集共同遵守的。
 
 ## 1. 处理阶段
 
 ### 阶段 A：页面目录（Inventory）
 
-只读取 Epic 官方站点地图，不抓正文。必须满足：
+只读取官方站点地图，不抓正文。必须满足：
 
-- 424 个 UE 子站点地图全部成功。
+- 适配器认领的子站点地图全部成功（`epic-ue-5.8` 是 424 个）。
 - 页面按规范化 `path` 去重。
 - 每条页面记录包含 `url`、`path`、分类、版本、语言、父路径、路由深度和所属站点地图。
 - 生成 `site_inventory.jsonl`、摘要和 SHA-256；失败站点地图为 0 时才标记 `complete`。
@@ -18,8 +22,8 @@
 
 ### 阶段 B：原始正文（Raw / Bronze）
 
-- 使用 Epic 网页自身调用的结构化 `document.json` 接口。
-- 原始 JSON 以 zlib 压缩保存。
+- 使用适配器指定的取内容方式（`epic_ue` 用网页自身调用的 `document.json` 接口）。
+- 原始响应以 zlib 压缩保存。
 - 以 `page_id + content_hash` 追加留档；更新页面不会覆盖历史原文。
 - 保存抓取时间、原始页面 URL 和内容哈希。
 
@@ -52,15 +56,16 @@
 | `title` | 官方标题 |
 | `description` | 官方摘要 |
 | `category` | `guides`、`blueprint_api`、`cpp_api` 等 |
-| `source_type` | Epic 数据源类型 |
+| `source_type` | 官方标注的数据源类型 |
 | `document_type` | landing、article、API 等官方类型 |
-| `ue_version` | 固定为 `5.8` |
-| `locale` | 固定为 `en-US` |
+| `ue_version` | 数据集的版本（`epic-ue-5.8` 是 `5.8`） |
+| `locale` | 数据集的语言（`epic-ue-5.8` 是 `en-US`） |
 | `parent_path` | 路由父级 |
 | `route_depth` | 路由深度 |
 | `sitemap_url` | 发现该页的官方站点地图 |
-| `updated_at` | Epic 文档更新时间 |
-| `content_hash` | 原始 JSON 哈希 |
+| `updated_at` | 官方标注的文档更新时间 |
+| `content_hash` | 原始响应哈希 |
+| `parser_version` | 这一页由哪版切分规则加工的 |
 | `status/error` | 抓取状态和可观察错误 |
 
 ## 3. 知识点类型
@@ -83,11 +88,18 @@
 ## 4. 分块规则
 
 - 先按官方 H1–H6 标题拆逻辑小节。
+- **同一父标题下相邻的小段落先合并**，再考虑切分：单独一个只有表头的
+  `Inputs` 段落成不了一条能用的知识。合并时保留子标题，不抹掉结构。
 - 每个知识块目标约 550 tokens，**硬上限 900 tokens**（`validate --phase content` 会强制检查）。
 - 优先在段落边界切分。
+- 切分后剩下的一小截并回上一块，不留孤块。
+- 导航类小节不产出知识块——它的信息 `heading_path` 里已经完整表达了。
 - Markdown 表格保持表头并按行拆分，不把单行参数拆开。
 - 代码块尽量保持完整；超长代码才按行拆，并补回 fenced code 标记。
-- 不用大段重叠复制正文；每块只重复短小的 `context_prefix`。
+- **不做上下文重叠**：重叠会让 `content_hash` 失去唯一性，破坏上下文包的去重，
+  还会把全文索引撑大。需要相邻内容时顺着 `prev_chunk_id` / `next_chunk_id` 取。
+  每块只重复短小的 `context_prefix`。
+- 每块记录 `parser_version`，改规则时能精确查出哪些还没升级。
 - 每块保存页面标题、完整标题路径、知识类型、版本、分类和精确来源 URL。
 - 每块末尾重复 `DOC 原出处`，避免脱离页面后丢失证据。
 
@@ -142,7 +154,7 @@
 
 ### 上下文包：硬预算
 
-默认预算 3000 tokens，规则如下（`ue_kb/context.py`）：
+默认预算 3000 tokens，规则如下（`docatlas/context.py`）：
 
 1. 主结果使用 80% 预算；**累计超预算即停止，不允许最后一条越界**。
 2. 同一页面最多取 2 个知识块，避免一篇长文占满上下文。
@@ -158,10 +170,10 @@
 调用方式：
 
 ```powershell
-python ue58_docs.py ask "Set Timer" --token-budget 3000      # Markdown，AI 默认入口
-python ue58_docs.py ask "Set Timer" --json                   # 结构化
-python ue58_docs.py context "Set Timer" --token-budget 3000  # 等价于上一行
-python ue58_docs.py related "Set Timer by Function Name"     # 全部关系与证据
+python -m docatlas ask "Set Timer" --token-budget 3000      # Markdown，AI 默认入口
+python -m docatlas ask "Set Timer" --json                   # 结构化
+python -m docatlas context "Set Timer" --token-budget 3000  # 等价于上一行
+python -m docatlas related "Set Timer by Function Name"     # 全部关系与证据
 ```
 
 ## 7. 质量要求

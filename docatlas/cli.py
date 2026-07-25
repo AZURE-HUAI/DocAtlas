@@ -132,7 +132,9 @@ def command_assets(args: argparse.Namespace) -> int:
 def command_reprocess(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
-    processed = reprocess_stored_documents(connection, limit=args.limit)
+    processed = reprocess_stored_documents(
+        connection, limit=args.limit, force=args.force
+    )
     stats = write_reports(connection)
     print(
         json.dumps(
@@ -494,6 +496,13 @@ def command_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_mcp(_: argparse.Namespace) -> int:
+    """以 MCP 服务器的方式跑，给支持 MCP 的 AI 客户端用。"""
+    from .mcpserver import serve  # 只有真要跑 MCP 时才加载
+
+    return serve()
+
+
 def command_paths(_: argparse.Namespace) -> int:
     """告诉调用方数据在哪。PowerShell 脚本靠它定位日志和数据库，
     这样路径规则只在 config.py 写一次，别处不再各写一遍。"""
@@ -592,6 +601,11 @@ def build_parser() -> argparse.ArgumentParser:
         "reprocess", help="使用本地原始 JSON 重新拆分知识点，不访问网络"
     )
     reprocess.add_argument("--limit", type=int, default=0)
+    reprocess.add_argument(
+        "--force",
+        action="store_true",
+        help="连已经是当前切分版本的页面也重做（默认只补没做过的，可断点续传）",
+    )
     reprocess.set_defaults(func=command_reprocess)
 
     fetch_pages = subparsers.add_parser(
@@ -691,6 +705,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     paths = subparsers.add_parser("paths", help="打印数据集与数据目录的实际位置")
     paths.set_defaults(func=command_paths)
+
+    mcp = subparsers.add_parser(
+        "mcp", help="以 MCP 服务器方式运行（给 Claude Desktop / Cursor 等客户端用）"
+    )
+    mcp.set_defaults(func=command_mcp)
     return parser
 
 
