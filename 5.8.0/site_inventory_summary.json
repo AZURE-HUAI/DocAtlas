@@ -1,0 +1,19 @@
+{
+  "status": "complete",
+  "generated_at": "2026-07-25T05:41:19+00:00",
+  "ue_version": "5.8",
+  "language": "en-US",
+  "sitemap_count": 424,
+  "failed_sitemaps": 0,
+  "page_count": 199883,
+  "categories": {
+    "blueprint_api": 56895,
+    "community_docs": 754,
+    "cpp_api": 139269,
+    "guides": 1866,
+    "node_reference": 1098,
+    "python_api": 1
+  },
+  "sha256": "f53dcfe1e984046504d41410d022b2d7bcc22c0147f061b122f7a7f0c318aa1f",
+  "inventory_file": "site_inventory.jsonl"
+}
