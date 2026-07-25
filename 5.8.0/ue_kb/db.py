@@ -6,7 +6,14 @@ from pathlib import Path
 import sqlite3
 import urllib.parse
 
-from .config import DB_PATH, DOC_PREFIX, LANGUAGE, SITEMAP_INDEX_URL, VERSION
+from .config import (
+    CHUNKER_VERSION,
+    DB_PATH,
+    DOC_PREFIX,
+    LANGUAGE,
+    SITEMAP_INDEX_URL,
+    VERSION,
+)
 from .util import utc_now
 
 
@@ -263,6 +270,15 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     add_column_if_missing(
         connection, "sections", "quality_score", "REAL NOT NULL DEFAULT 1.0"
     )
+    # 加列的那一刻，库里已有的块必然都是加列之前的规则产出的，统一标 v1。
+    # 只在真正加列时回填一次：之后写入都自带版本号，再回填反而会覆盖真相。
+    if add_column_if_missing(connection, "chunks", "parser_version", "TEXT"):
+        connection.execute(
+            "UPDATE chunks SET parser_version='v1' WHERE parser_version IS NULL"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_parser ON chunks(parser_version)"
+    )
     try:
         connection.execute(
             """
@@ -351,14 +367,15 @@ def add_column_if_missing(
     table: str,
     column: str,
     definition: str,
-) -> None:
+) -> bool:
+    """加列；返回 True 表示这次真的加了（可据此做一次性回填）。"""
     columns = {
         row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
     }
-    if column not in columns:
-        connection.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        )
+    if column in columns:
+        return False
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    return True
 
 
 def route_metadata(path: str) -> tuple[int, str | None]:

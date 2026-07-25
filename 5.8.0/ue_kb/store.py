@@ -7,7 +7,7 @@ import sqlite3
 from typing import Any
 import zlib
 
-from .config import VERSION
+from .config import CHUNKER_VERSION, VERSION
 from .util import utc_now
 from .chunking import normalize_name
 
@@ -230,8 +230,8 @@ def store_document_result(
                 knowledge_type, title, heading_path, context_prefix,
                 content_md, content_text, source_url, source_anchor,
                 token_estimate, content_hash, quality_score,
-                created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, parser_version
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 section_id,
@@ -251,6 +251,7 @@ def store_document_result(
                 chunk["quality_score"],
                 stored_at,
                 stored_at,
+                CHUNKER_VERSION,
             ),
         )
         chunk_id = chunk_cursor.lastrowid

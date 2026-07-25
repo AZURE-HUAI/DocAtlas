@@ -9,6 +9,9 @@ import re
 
 VERSION = "5.8"
 LANGUAGE = "en-US"
+# 切块规则的版本号。规则一改就要 +1，chunks.parser_version 记录每块由哪版产出，
+# 中途换规则时才分得清哪些块是旧的、需要重切。
+CHUNKER_VERSION = "v1"
 USER_AGENT = "UE58OfflineDocs/1.0 (+local educational archive)"
 SITEMAP_INDEX_URL = "https://dev.epicgames.com/documentation/sitemap.xml"
 DOCUMENT_API_URL = (
