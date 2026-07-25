@@ -7,7 +7,15 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, DATA_DIR, EXPORT_DIR, URL_RE, VERSION
+from .config import (
+    CATEGORY_LABELS,
+    CATEGORY_PATTERNS,
+    DATA_DIR,
+    DATASET,
+    EXPORT_DIR,
+    URL_RE,
+    VERSION,
+)
 from .util import log
 
 
@@ -66,7 +74,7 @@ def export_markdown(
                     output_path = category_dir / f"part-{shard_number:04d}.md"
                     output_file = output_path.open("w", encoding="utf-8", newline="\n")
                     output_file.write(
-                        f"# UE {VERSION} {CATEGORY_LABELS[category]} — "
+                        f"# {DATASET.name} — {CATEGORY_LABELS[category]} — "
                         f"分片 {shard_number}\n\n"
                     )
                     current_size = output_file.tell()
