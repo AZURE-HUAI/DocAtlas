@@ -46,9 +46,10 @@ TOOLS: list[dict[str, Any]] = [
                 "query": {
                     "type": "string",
                     "description": (
-                        "要查的东西。库里是英文原文，中文提问一般先落成官方英文名"
-                        "再查（\"定时器\" → Set Timer）。专有名词和 K2_ 开头的符号"
-                        "直接原样查即可；命中不好就换个说法再试一次。"
+                        f"要查的东西。本数据集原文语言是 {DATASET.language}，"
+                        "用户用别的语言提问时，一般先落成原文里的官方写法再查。"
+                        "专有名词、报错原文、代码符号原样查往往更准；"
+                        "命中不好就换个说法再试一次。"
                     ),
                 },
                 "token_budget": {
@@ -81,7 +82,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "关键词。同 docatlas_ask，英文原名命中最好。",
+                    "description": f"关键词。同 docatlas_ask，用原文语言（{DATASET.language}）命中最好。",
                 },
                 "limit": {"type": "integer", "description": "最多几条", "default": 10},
                 "category": {
@@ -176,7 +177,10 @@ def tool_search(arguments: dict[str, Any]) -> str:
             category=arguments.get("category"),
         )
         if not rows:
-            return "没有找到结果。英文原文库建议优先使用英文关键词。"
+            return (
+                f"没有找到结果。原文语言是 {DATASET.language}，"
+                "换成原文里的写法往往能命中。"
+            )
         lines = []
         for index, row in enumerate(rows, 1):
             label = DATASET.category_labels.get(row["category"], row["category"])

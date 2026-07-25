@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import tempfile
@@ -693,6 +694,30 @@ class EvidenceCoverageTests(unittest.TestCase):
         source = (Path(unreal.__file__)).read_text(encoding="utf-8")
         for kind in unreal.DERIVED_EVIDENCE_KINDS:
             self.assertIn(f"'{kind}'", source, f"{kind} 没有任何地方写入")
+
+
+class SkillTemplateTests(unittest.TestCase):
+    """技能原本里的占位符，装的时候必须真被填掉。
+
+    漏填不会报错，只会让 AI 读到字面的 {{...}} 然后照着找不存在的路径。
+    """
+
+    def test_every_placeholder_is_filled_by_the_installer(self):
+        root = Path(__file__).resolve().parent.parent
+        skill = (root / "skills" / "docatlas" / "SKILL.md").read_text(encoding="utf-8")
+        installer = (root / "scripts" / "install-skill.ps1").read_text(encoding="utf-8")
+        placeholders = set(re.findall(r"\{\{([A-Z_]+)\}\}", skill))
+        self.assertTrue(placeholders, "占位符一个都没有？那模板机制已经失效了")
+        for name in placeholders:
+            self.assertIn(
+                f"'{{{{{name}}}}}'", installer, f"{name} 没人替换，装出来会是字面量"
+            )
+
+    def test_language_comes_from_the_dataset_not_the_code(self):
+        # 用户母语和原文语言都不该被写死：中文用户查英文库只是当前这一种情况。
+        root = Path(__file__).resolve().parent.parent
+        skill = (root / "skills" / "docatlas" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("{{DATASET_LANGUAGE}}", skill)
 
 
 class TargetTypeResolutionTests(unittest.TestCase):

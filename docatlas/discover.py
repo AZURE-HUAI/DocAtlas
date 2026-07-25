@@ -170,7 +170,7 @@ def discover_sitemaps(
             if completed % 20 == 0 or completed == len(pending):
                 log(
                     f"站点地图 {completed:,}/{len(pending):,}；"
-                    f"本轮列出英文页面 {discovered_pages:,}"
+                    f"本轮列出页面 {discovered_pages:,}"
                 )
     connection.commit()
     total_pages = connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]

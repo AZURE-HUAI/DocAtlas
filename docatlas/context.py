@@ -16,7 +16,7 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS, KNOWLEDGE, VERSION
+from .config import CATEGORY_LABELS, KNOWLEDGE, LANGUAGE, VERSION
 from .dataset import knowledge_hook
 from .search import search_chunks
 
@@ -240,7 +240,10 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
         "",
     ]
     if not pack["primary_knowledge"]:
-        lines.append("本地库中没有命中。可以换英文关键词，或确认该页面是否已抓取。")
+        lines.append(
+            f"本地库中没有命中。可以换成原文语言（{LANGUAGE}）的写法再试，"
+            "或确认该页面是否已抓取。"
+        )
         return "\n".join(lines)
 
     for index, item in enumerate(pack["primary_knowledge"], 1):
