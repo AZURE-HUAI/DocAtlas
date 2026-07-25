@@ -1,6 +1,6 @@
 ---
 name: docatlas
-description: 查询本地 DocAtlas 技术文档知识库（当前数据集：Unreal Engine 5.8 官方文档——教程、蓝图 API、C++ API、Python API、节点参考、社区文档，全部带原出处 URL）。任何涉及 UE / Unreal Engine / 虚幻引擎的问题都应先用它，而不是联网搜索或凭记忆回答——包括：某个蓝图节点怎么用、某个 C++ 类/函数的参数与返回值、蓝图节点对应哪个 C++ API、某个功能（Nanite、Lumen、GAS、Niagara、Chaos、Sequencer…）怎么配置、某个 UPROPERTY/UFUNCTION 说明符含义、报错信息里出现的 UE 符号。触发词包括：UE5、UE 5.8、虚幻、Unreal、蓝图、Blueprint、AActor/UObject 等 UE 类型名、K2_ 开头的函数名。
+description: 查询本地 DocAtlas 技术文档知识库（当前数据集：Unreal Engine 5.8 官方文档——教程、蓝图 API、C++ API、Python API、节点参考、社区文档，全部带原出处 URL）。任何涉及 UE / Unreal Engine / 虚幻引擎的问题都应先用它，而不是联网搜索或凭记忆回答——包括：某个蓝图节点怎么用、某个 C++ 类/函数的参数与返回值、蓝图节点对应哪个 C++ API、某个功能（Nanite、Lumen、GAS、Niagara、Chaos、Sequencer…）怎么配置、某个 UPROPERTY/UFUNCTION 说明符含义、报错信息里出现的 UE 符号。触发词包括：UE5、UE 5.8、虚幻、Unreal、蓝图、Blueprint、AActor/UObject 等 UE 类型名、K2_ 开头的函数名。此外，用户想**新建或维护知识库**时也用它——"加一个 X 的文档库""升到新版本""把某某站也收进来""重新加工一遍""体检一下"——建库流程写在同目录的 WORKFLOWS.md 里。
 ---
 
 # DocAtlas 本地文档知识库
@@ -12,6 +12,10 @@ description: 查询本地 DocAtlas 技术文档知识库（当前数据集：Unr
 
 所有命令都在这个目录下执行。数据存在别处，`python -m docatlas paths` 会告诉你在哪
 （一般不需要关心）。
+
+**这份只讲怎么查。** 用户要新建知识库、加版本、加站点、改完加工规则要重来、
+或者做体检——**先读同目录的 `WORKFLOWS.md`**，照那里的固定流程做，不要自己
+现编步骤。用户不该需要知道 TOML 长什么样、哪个命令该先跑。
 
 ## 怎么查（按这个顺序）
 

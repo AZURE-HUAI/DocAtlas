@@ -738,27 +738,47 @@ class FetchedLanguageTests(unittest.TestCase):
 
 
 class SkillTemplateTests(unittest.TestCase):
-    """技能原本里的占位符，装的时候必须真被填掉。
+    """技能文档是 AI 的操作手册，写错了不会报错，只会让 AI 照着做错事。"""
 
-    漏填不会报错，只会让 AI 读到字面的 {{...}} 然后照着找不存在的路径。
-    """
+    SKILL_DIR = Path(__file__).resolve().parent.parent / "skills" / "docatlas"
+
+    def _docs(self):
+        files = sorted(self.SKILL_DIR.glob("*.md"))
+        self.assertTrue(files, "技能目录里一个 .md 都没有")
+        return {path.name: path.read_text(encoding="utf-8") for path in files}
 
     def test_every_placeholder_is_filled_by_the_installer(self):
-        root = Path(__file__).resolve().parent.parent
-        skill = (root / "skills" / "docatlas" / "SKILL.md").read_text(encoding="utf-8")
-        installer = (root / "scripts" / "install-skill.ps1").read_text(encoding="utf-8")
-        placeholders = set(re.findall(r"\{\{([A-Z_]+)\}\}", skill))
-        self.assertTrue(placeholders, "占位符一个都没有？那模板机制已经失效了")
-        for name in placeholders:
-            self.assertIn(
-                f"'{{{{{name}}}}}'", installer, f"{name} 没人替换，装出来会是字面量"
-            )
+        # 漏填不报错，只会让 AI 读到字面的 {{...}} 然后照着找不存在的路径。
+        installer = (
+            self.SKILL_DIR.parent.parent / "scripts" / "install-skill.ps1"
+        ).read_text(encoding="utf-8")
+        found = False
+        for name, text in self._docs().items():
+            for placeholder in set(re.findall(r"\{\{([A-Z_]+)\}\}", text)):
+                found = True
+                self.assertIn(
+                    f"'{{{{{placeholder}}}}}'",
+                    installer,
+                    f"{name} 里的 {placeholder} 没人替换，装出来会是字面量",
+                )
+        self.assertTrue(found, "占位符一个都没有？那模板机制已经失效了")
 
     def test_language_comes_from_the_dataset_not_the_code(self):
         # 用户母语和原文语言都不该被写死：中文用户查英文库只是当前这一种情况。
-        root = Path(__file__).resolve().parent.parent
-        skill = (root / "skills" / "docatlas" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("{{DATASET_LANGUAGE}}", skill)
+        self.assertIn("{{DATASET_LANGUAGE}}", self._docs()["SKILL.md"])
+
+    def test_skill_points_at_the_build_workflows(self):
+        # 不指过去，AI 就只会查、不会建，用户又得自己去碰 TOML。
+        self.assertIn("WORKFLOWS.md", self._docs()["SKILL.md"])
+
+    def test_documented_commands_all_exist(self):
+        # 手册里写一条不存在的命令，AI 会照着跑然后失败——而且没人会先发现。
+        from docatlas.cli import build_parser
+
+        real = set(build_parser()._subparsers._group_actions[0].choices)
+        for name, text in self._docs().items():
+            for command in set(re.findall(r"python -m docatlas ([a-z-]+)", text)):
+                self.assertIn(command, real, f"{name} 写了不存在的命令：{command}")
 
 
 class TargetTypeResolutionTests(unittest.TestCase):
