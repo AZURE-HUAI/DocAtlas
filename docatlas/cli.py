@@ -45,6 +45,19 @@ from .ondemand import (
 from .validate import validate_contract
 
 
+def require_inventory(connection: sqlite3.Connection) -> None:
+    """库是空的就直接说清楚下一步做什么，而不是给一个空结果让人猜。"""
+    if connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]:
+        return
+    raise SystemExit(
+        f"数据集 {DATASET_ID} 还没有页面清单（数据目录：{DATA_DIR}）。\n"
+        "先枚举一次全站清单，只读站点地图、不抓正文：\n"
+        "    python -m docatlas crawl --discovery-only\n"
+        "枚举完就能直接查了——查到本地没有的页面会当场补抓，"
+        "不用先把全站下载下来。"
+    )
+
+
 def print_stats(stats: dict[str, Any]) -> None:
     print(json.dumps(stats, ensure_ascii=False, indent=2))
 
@@ -132,6 +145,7 @@ def command_assets(args: argparse.Namespace) -> int:
 def command_reprocess(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     processed = reprocess_stored_documents(
         connection, limit=args.limit, force=args.force
     )
@@ -204,6 +218,7 @@ def command_export(args: argparse.Namespace) -> int:
 def command_search(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     rows = search_docs(
         connection, args.query, limit=args.limit, category=args.category
     )
@@ -237,6 +252,7 @@ def command_search(args: argparse.Namespace) -> int:
 def command_show(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     raw_id = str(args.section_id)
     numeric_id = int(raw_id[1:] if raw_id[:1].casefold() == "k" else raw_id)
     row = connection.execute(
@@ -276,6 +292,7 @@ def command_context(args: argparse.Namespace) -> int:
     """机器可读的上下文包（JSON）。给程序用。"""
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     payload = build_context_pack(
         connection,
         args.query,
@@ -294,6 +311,7 @@ def command_ask(args: argparse.Namespace) -> int:
     """
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     REQUEST_LIMITER.configure(0)
 
     def build() -> dict[str, Any]:
@@ -336,6 +354,7 @@ def command_get(args: argparse.Namespace) -> int:
     """按需抓取：只把用得上的那几页取回本地。"""
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     REQUEST_LIMITER.configure(0)
     candidates = find_uncrawled_candidates(
         connection, args.query, limit=args.limit, category=args.category
@@ -386,6 +405,7 @@ def command_cross_index(_: argparse.Namespace) -> int:
 def command_related(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
+    require_inventory(connection)
     value = str(args.subject).strip()
     entities: list[sqlite3.Row]
     if re.fullmatch(r"[Kk]?\d+", value):
