@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+import collections
+import json
 import sqlite3
 from typing import Any
+import zlib
 
-from .config import CHUNKER_VERSION, KNOWLEDGE
+from .config import CHUNKER_VERSION, KNOWLEDGE, LANGUAGE, SOURCE
 from .dataset import knowledge_hook
 from .util import utc_now
+
+# 抽查多少篇原文来核对语言。全量解压太慢，而"要错就整批错"，抽样足够。
+LOCALE_SAMPLE_SIZE = 300
+
+
+def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
+    """服务器实际回了哪些语言版本，按篇数统计。
+
+    数据集里的 `language` 是指令不是事实：站点没有你要的语言时，多半不报错，
+    只不声不响回默认语言。不对一遍，就会得到一个标着德语的英文库。
+    """
+    read_locale = getattr(SOURCE, "document_locale", None)
+    if read_locale is None:
+        return collections.Counter()
+    seen: collections.Counter = collections.Counter()
+    for (blob,) in connection.execute(
+        "SELECT raw_json FROM raw_documents WHERE raw_json IS NOT NULL"
+        " ORDER BY RANDOM() LIMIT ?",
+        (LOCALE_SAMPLE_SIZE,),
+    ):
+        try:
+            payload = json.loads(zlib.decompress(blob))
+        except (zlib.error, ValueError):
+            continue  # 坏掉的存档由别的检查去管，这里只看语言
+        locale = read_locale(payload)
+        if locale:
+            seen[locale.lower()] += 1
+    return seen
 
 
 def expected_evidence_kinds() -> list[str]:
@@ -159,6 +190,19 @@ def validate_contract(
             len(missing),
             "本应产出的每类关系证据都要真的有："
             + ("、".join(missing) + " 一条都没有" if missing else "、".join(expected)),
+        )
+        # 语言是**选的**不是猜的，所以没法自动填；但"选的有没有生效"能自动查。
+        locales = fetched_locales(connection)
+        wrong = sum(n for code, n in locales.items() if code != LANGUAGE.lower())
+        add(
+            "fetched_language_matches_declaration",
+            wrong,
+            f"抓回来的正文应当都是声明的 {LANGUAGE}"
+            + (
+                "，实际抽到：" + "、".join(f"{c}×{n}" for c, n in locales.most_common())
+                if wrong
+                else ""
+            ),
         )
     failed = sum(1 for check in checks if check["status"] == "fail")
     return {

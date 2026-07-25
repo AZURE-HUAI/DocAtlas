@@ -117,6 +117,16 @@ def asset_base_url(dataset) -> str:
 
 # ── 3. 拿回来的东西怎么解析 ──────────────────────────────────────
 
+def document_locale(payload: dict[str, Any]) -> str | None:
+    """服务器实际给的是哪个语言版本。字段名各站不同，所以由适配器认。
+
+    数据集里的 `language` 是**指令**（去要哪一版），不是事实。站点没有那个
+    语言时多半不会报错，只会不声不响回默认语言——于是你得到一个标着德语的
+    英文库，AI 还被告知去查德语词。所以要拿这个回声跟声明对一遍。
+    """
+    locale = payload.get("locale")
+    return str(locale) if locale else None
+
 def _document_list_to_markdown(block: dict[str, Any]) -> str:
     lines: list[str] = []
     for item in block.get("items") or []:
