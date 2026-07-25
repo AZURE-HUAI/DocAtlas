@@ -21,21 +21,30 @@ param([switch]$RetireLegacy)
 
 . (Join-Path $PSScriptRoot '_common.ps1')
 
-$source = Join-Path $RepoRoot 'skills\docatlas\SKILL.md'
-if (-not (Test-Path -LiteralPath $source)) { throw "找不到技能原本：$source" }
+$sourceDir = Join-Path $RepoRoot 'skills\docatlas'
+if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'SKILL.md'))) {
+    throw "找不到技能原本：$sourceDir\SKILL.md"
+}
 
 $skillsHome = Join-Path $HOME '.claude\skills'
 $target = Join-Path $skillsHome 'docatlas'
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 
-# 反斜杠路径写进 Markdown 就是原样文本，不需要转义。
-$content = (Get-Content -LiteralPath $source -Raw).
-    Replace('{{DOCATLAS_ROOT}}', $RepoRoot).
-    Replace('{{DATASET_LANGUAGE}}', $DatasetLanguage)
-$targetFile = Join-Path $target 'SKILL.md'
-$content | Set-Content -LiteralPath $targetFile -Encoding UTF8 -NoNewline
+# 装整个目录，不只是 SKILL.md：建库流程在 WORKFLOWS.md 里，漏掉它 AI 就只会查、
+# 不会建。以后再加参考文件也不用回来改这个脚本。
+$installed = @()
+foreach ($file in Get-ChildItem -LiteralPath $sourceDir -Filter *.md) {
+    # 反斜杠路径写进 Markdown 就是原样文本，不需要转义。
+    $content = (Get-Content -LiteralPath $file.FullName -Raw).
+        Replace('{{DOCATLAS_ROOT}}', $RepoRoot).
+        Replace('{{DATASET_LANGUAGE}}', $DatasetLanguage)
+    $targetFile = Join-Path $target $file.Name
+    $content | Set-Content -LiteralPath $targetFile -Encoding UTF8 -NoNewline
+    $installed += $file.Name
+}
 
-Write-Host "已安装技能：$targetFile" -ForegroundColor Green
+Write-Host "已安装技能：$target" -ForegroundColor Green
+Write-Host "  文件：$($installed -join '、')"
 Write-Host "  程序位置写为：$RepoRoot"
 Write-Host "  当前数据集：$DatasetId（原文语言 $DatasetLanguage）"
 
