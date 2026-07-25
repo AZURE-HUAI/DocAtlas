@@ -1,0 +1,83 @@
+# 数据集 = 一个产品的一个版本。一个数据集独占一个目录、一个数据库。
+#
+# 加 UE 5.9：复制本文件改名 epic-ue-5.9.toml，把 id 和 version 改掉，
+# 其余一行不用动，程序代码一行不用改。
+#
+# 加别的产品（Unity / Blender）：新写一份 toml，并在 docatlas/sources/
+# 下加一个同名适配器模块，告诉程序那个站点怎么列页、怎么解析。
+
+id = "epic-ue-5.8"
+name = "Unreal Engine 5.8 官方文档"
+product = "unreal-engine"
+version = "5.8"
+language = "en-US"
+
+# 用哪个来源适配器（docatlas/sources/<source>.py）——站点怎么抓、怎么解析。
+source = "epic_ue"
+# 挂哪个领域知识包（docatlas/knowledge/<knowledge>.py）——可留空。
+# 它负责 Unreal 特有的东西：K2_ 前缀、蓝图↔C++ 对应关系等。
+knowledge = "unreal"
+
+# API 参考类的页面，第一段是"摘要"而不是"概述"；检索时也更偏向签名和参数。
+api_categories = ["blueprint_api", "cpp_api", "python_api", "node_reference"]
+
+# ── 以下都是分组配置。TOML 规定：表头之后的键都属于那个表，
+#    所以顶层的键（上面那些）必须写在所有 [表] 前面。──────────────
+
+[source_options]
+base_url = "https://dev.epicgames.com"
+sitemap_index = "https://dev.epicgames.com/documentation/sitemap.xml"
+document_api = "https://dev.epicgames.com/community/api/documentation/document.json"
+doc_prefix = "/documentation/unreal-engine/"
+# 文档首页，写进 ROUTER.md 当官方入口。
+home_path = "/documentation/unreal-engine/unreal-engine-5-8-documentation"
+# 这个路径是文档根，本身不是一篇文档，枚举时跳过。
+skip_paths = ["/documentation/unreal-engine"]
+
+# 站点地图 URL 里含有左边的片段，就归到右边这一类。
+[categories]
+guides = "/unreal_engine/external/"
+community_docs = "/unreal_engine/epic_developer_community/"
+blueprint_api = "/unreal_engine/ue_blueprint_api_external/"
+cpp_api = "/unreal_engine/ue_cpp_api_external/"
+python_api = "/unreal_engine/ue_python_api_external/"
+node_reference = "/unreal_engine/ue_noderef_api_external/"
+
+[category_labels]
+guides = "教程与功能文档"
+community_docs = "Epic 社区维护文档"
+blueprint_api = "蓝图 API"
+cpp_api = "C++ API"
+python_api = "Python API"
+node_reference = "节点参考"
+
+# 每一类页面代表哪种知识实体。
+[entity_types]
+guides = "guide"
+community_docs = "document"
+blueprint_api = "blueprint_node"
+cpp_api = "cpp_symbol"
+python_api = "python_api"
+node_reference = "editor_node"
+
+# 按需抓取时，同名的候选先抓哪一类。数字越小越优先：
+# 用户问一个名字，多半是想看教程或蓝图节点，而不是 C++ 的总目录页。
+[category_priority]
+guides = 1
+community_docs = 2
+blueprint_api = 3
+node_reference = 4
+python_api = 5
+cpp_api = 6
+
+[search]
+# 这些分类爱出大段成员罗列，很占 token 又很少直接回答问题，排序时压一压。
+verbose_categories = ["cpp_api"]
+# 问"这是什么、怎么做"时，教程和社区文档优先于 API 参考。
+[search.concept_category_bonus]
+guides = 4.5
+community_docs = 4.5
+node_reference = 0.0
+blueprint_api = -2.0
+python_api = -2.0
+cpp_api = -3.0

@@ -1,18 +1,17 @@
-"""站点地图枚举：把 Epic 全站页面清单写进 pages 表。"""
+"""站点地图枚举：把全站页面清单写进 pages 表。
+
+"这个站点有哪些页面"由来源适配器回答，这里只负责并发下载、落库和进度。
+"""
 
 from __future__ import annotations
 
 import concurrent.futures
-import html
-import re
 import sqlite3
 from typing import Any
-import urllib.error
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 
-from .config import CATEGORY_PATTERNS, DOC_PREFIX, LANGUAGE, SITEMAP_INDEX_URL, VERSION
+from .config import DATASET, LANGUAGE, SOURCE, VERSION
 from .util import log, utc_now
 from .net import fetch_bytes
 from .db import route_metadata
@@ -27,52 +26,19 @@ def xml_locations(xml_bytes: bytes) -> list[str]:
     ]
 
 
-def category_for_sitemap(url: str) -> str | None:
-    for category, pattern in CATEGORY_PATTERNS.items():
-        if pattern in url:
-            return category
-    return None
-
-
-def canonical_source_url(path: str) -> str:
-    quoted_path = urllib.parse.quote(path, safe="/:@-._~")
-    return (
-        f"https://dev.epicgames.com{quoted_path}"
-        f"?application_version={VERSION}&lang={LANGUAGE}"
-    )
-
-
-def normalize_document_location(location: str) -> tuple[str, str] | None:
-    parsed = urllib.parse.urlsplit(html.unescape(location))
-    query = urllib.parse.parse_qs(parsed.query)
-    languages = query.get("lang", [])
-    if languages and languages[0] not in {LANGUAGE, ""}:
-        return None
-    path = urllib.parse.unquote(parsed.path)
-    locale_prefix = re.match(r"^/documentation/[a-z]{2}-[a-z]{2}/", path, re.I)
-    if locale_prefix:
-        path = "/documentation/" + path[locale_prefix.end() :]
-    if not path.lower().startswith(DOC_PREFIX.lower()):
-        return None
-    path = path.rstrip("/")
-    if path.lower() == "/documentation/unreal-engine":
-        return None
-    return path, canonical_source_url(path)
-
-
 def discover_sitemaps(
     connection: sqlite3.Connection,
     *,
     workers: int,
     refresh: bool,
 ) -> int:
-    log("读取 Epic 官方文档站点地图索引…")
-    index_body, _, _ = fetch_bytes(SITEMAP_INDEX_URL)
+    log(f"读取 {DATASET.name} 的站点地图索引…")
+    index_body, _, _ = fetch_bytes(SOURCE.sitemap_index_url(DATASET))
     all_sitemaps = xml_locations(index_body)
     selected = [
         (url, category)
         for url in all_sitemaps
-        if (category := category_for_sitemap(url)) is not None
+        if (category := SOURCE.categorize_sitemap(DATASET, url)) is not None
     ]
     connection.executemany(
         """
@@ -87,7 +53,7 @@ def discover_sitemaps(
             "UPDATE sitemaps SET status='pending', error=NULL WHERE 1=1"
         )
     connection.commit()
-    log(f"已找到 {len(selected):,} 个 UE 文档子站点地图")
+    log(f"已找到 {len(selected):,} 个子站点地图")
 
     pending = list(
         connection.execute(
@@ -144,7 +110,7 @@ def discover_sitemaps(
                     ]
                 ] = []
                 for location in result["locations"]:
-                    normalized = normalize_document_location(location)
+                    normalized = SOURCE.normalize_location(DATASET, location)
                     if normalized:
                         path, source_url = normalized
                         route_depth, parent_path = route_metadata(path)

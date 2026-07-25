@@ -16,7 +16,8 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS, VERSION
+from .config import CATEGORY_LABELS, KNOWLEDGE, VERSION
+from .dataset import knowledge_hook
 from .search import search_chunks
 
 MAX_CHUNKS_PER_PAGE = 2
@@ -24,25 +25,38 @@ PRIMARY_BUDGET_RATIO = 0.8
 # 低于这个置信度的关系不进上下文：宁可不给，也不能让 AI 把猜测当官方对应。
 MIN_RELATION_CONFIDENCE = 0.8
 
+# 通用关系的中文说法。领域知识包可以补自己那几种（蓝图↔C++ 之类）。
 RELATION_LABELS = {
-    "blueprint_cpp_api": "对应 C++ API",
-    "blueprint_cpp_candidate": "候选 C++ API（需核对签名）",
-    "node_api_candidate": "候选 API（需核对签名）",
-    "targets_type": "Target 类型",
     "belongs_to": "所属",
     "parameter_type": "参数类型",
     "return_type": "返回值类型",
     "signature_reference": "签名引用",
     "example_reference": "示例引用",
     "official_reference": "官方相关文档",
+    **knowledge_hook(KNOWLEDGE, "RELATION_LABELS", {}),
 }
 
 EVIDENCE_LABELS = {
-    "official_link": "Epic 官方链接",
-    "unreal_display_name_metadata": "Unreal DisplayName 元数据",
-    "document_statement": "文档正文声明",
-    "exact_normalized_name": "名称标准化后一致",
+    "official_link": "官方文档链接",
+    **knowledge_hook(KNOWLEDGE, "EVIDENCE_LABELS", {}),
 }
+
+# 相关项的排序：领域特有的关系（有实锤证据的对应）排在通用关系前面。
+_RELATION_PRIORITY = {
+    **knowledge_hook(KNOWLEDGE, "RELATION_PRIORITY", {}),
+    "parameter_type": 3,
+    "return_type": 4,
+    "belongs_to": 7,
+}
+_PRIORITY_BRANCHES = " ".join(
+    f"WHEN '{name}' THEN {rank}"
+    for name, rank in sorted(_RELATION_PRIORITY.items(), key=lambda kv: kv[1])
+)
+_RELATION_PRIORITY_SQL = (
+    f"CASE r.relation_type {_PRIORITY_BRANCHES} ELSE 8 END"
+    if _PRIORITY_BRANCHES
+    else "0"
+)
 
 
 def _select_primary(
@@ -120,15 +134,7 @@ def _one_hop_relations(
         WHERE ke.chunk_id IN ({placeholders})
           AND r.confidence >= ?
         ORDER BY
-            CASE r.relation_type
-                WHEN 'blueprint_cpp_api' THEN 1
-                WHEN 'targets_type' THEN 2
-                WHEN 'parameter_type' THEN 3
-                WHEN 'return_type' THEN 4
-                WHEN 'blueprint_cpp_candidate' THEN 5
-                WHEN 'node_api_candidate' THEN 6
-                WHEN 'belongs_to' THEN 7
-                ELSE 8 END,
+            {_RELATION_PRIORITY_SQL},
             r.confidence DESC,
             p.route_depth DESC,
             related.canonical_name

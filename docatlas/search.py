@@ -21,6 +21,8 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
+from .config import DATASET, KNOWLEDGE
+from .dataset import knowledge_hook
 from .db import chunk_fts_mode, fts_mode
 
 # 只在"任含"档剔除，避免 how/what 这类词淹没真正的关键词。
@@ -62,22 +64,18 @@ CONCEPT_TYPE_BONUS = {
     "navigation": -4.0,
 }
 
-# 概念性提问优先看教程和社区文档，而不是 API 参考。
-CONCEPT_CATEGORY_BONUS = {
-    # 教程和社区文档都是"讲清楚一件事"的文档，不分高下，让其他信号来决定。
-    "guides": 4.5,
-    "community_docs": 4.5,
-    "node_reference": 0.0,
-    "blueprint_api": -2.0,
-    "python_api": -2.0,
-    "cpp_api": -3.0,
-}
+# 概念性提问时各分类的加减分，由数据集配置。没配就全是 0——
+# 检索照常工作，只是没有针对这个站点调过优。
+CONCEPT_CATEGORY_BONUS = DATASET.concept_category_bonus
 
 # 旧名称，保留给外部调用方。
 KNOWLEDGE_TYPE_BONUS = API_TYPE_BONUS
 
+# 什么样的词算"标识符"。通用规则认得 `::`、下划线和驼峰；
+# 领域知识包可以补充自己的形状（比如 Unreal 的 AActor、FVector）。
+_DEFAULT_IDENTIFIER_PATTERN = r"::|_[A-Za-z]|[a-z][A-Z]"
 _IDENTIFIER_RE = re.compile(
-    r"::|_[A-Za-z]|[a-z][A-Z]|^[UAFIETS][A-Z][A-Za-z]+$"
+    knowledge_hook(KNOWLEDGE, "IDENTIFIER_PATTERN", _DEFAULT_IDENTIFIER_PATTERN)
 )
 
 
@@ -236,9 +234,9 @@ def _score(
         elif normalized_title.startswith(normalized_query):
             score += 6.0
 
-    # 大段的 C++ 成员罗列几乎从不直接回答问题，但很占 token。
+    # 大段的成员罗列几乎从不直接回答问题，但很占 token。
     if (
-        row["category"] == "cpp_api"
+        row["category"] in DATASET.verbose_categories
         and row["knowledge_type"] in {"details", "navigation"}
         and (row["token_estimate"] or 0) > 300
     ):
