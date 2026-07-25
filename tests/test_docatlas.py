@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -692,6 +693,61 @@ class EvidenceCoverageTests(unittest.TestCase):
         source = (Path(unreal.__file__)).read_text(encoding="utf-8")
         for kind in unreal.DERIVED_EVIDENCE_KINDS:
             self.assertIn(f"'{kind}'", source, f"{kind} 没有任何地方写入")
+
+
+class TargetTypeResolutionTests(unittest.TestCase):
+    """`Target is X` 里的 X 到哪个词为止，只能靠别名表定，不能靠标点。
+
+    合并小节之后，正文里紧跟着 X 的就是下一段内容，中间没有句号也没有换行：
+    原先靠"这句正好是小节结尾"收边的写法，一夜之间从 1,336 命中掉到 4。
+    """
+
+    def _connection(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE entities(id INTEGER PRIMARY KEY, entity_type TEXT);"
+            "CREATE TABLE entity_aliases(entity_id INTEGER, normalized_alias TEXT);"
+        )
+        connection.execute("INSERT INTO entities VALUES(1, 'cpp_symbol')")
+        connection.execute("INSERT INTO entities VALUES(2, 'cpp_symbol')")
+        connection.executemany(
+            "INSERT INTO entity_aliases VALUES(?, ?)",
+            [(1, "actor"), (2, "actorcomponent")],
+        )
+        return connection
+
+    def test_name_ends_where_the_alias_table_says_it_does(self):
+        connection = self._connection()
+        # 真实形状：名字后面直接接下一段正文，没有任何标点。
+        name, targets = unreal._resolve_target_entity(
+            connection, "Actor Component Inputs Type Name Description"
+        )
+        self.assertEqual(name, "Actor Component")
+        self.assertEqual([row["id"] for row in targets], [2])
+
+    def test_longer_name_wins_over_its_own_prefix(self):
+        # "Actor" 也在表里。从短往长试的话会停在它，指错实体。
+        connection = self._connection()
+        name, _ = unreal._resolve_target_entity(connection, "Actor Component Inputs")
+        self.assertEqual(name, "Actor Component")
+
+    def test_unknown_target_links_to_nothing(self):
+        # 绝大多数 Target 指向还没抓的 C++ 页；认不出来就该老实不连。
+        connection = self._connection()
+        name, targets = unreal._resolve_target_entity(
+            connection, "Gameplay Ability Blueprint Library Inputs"
+        )
+        self.assertEqual((name, targets), ("", []))
+
+    def test_prose_containing_the_words_is_not_a_declaration(self):
+        # "When Flatten Target is enabled..." 不是声明，别硬连。
+        connection = self._connection()
+        match = unreal.TARGET_IS_PATTERN.search(
+            "When Flatten Target is enabled you can show a preview grid"
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(unreal._resolve_target_entity(connection, match.group(1))[1], [])
 
 
 class McpProtocolTests(unittest.TestCase):

@@ -304,6 +304,46 @@ def _link_display_names(
     return len(rows)
 
 
+# `Target is` 之后先粗抓一段，具体到哪个词结束由 _resolve_target_entity 定。
+TARGET_IS_PATTERN = re.compile(r"\bTarget is ([A-Za-z][A-Za-z0-9_ ]{2,80})")
+
+# 目标类型名最长几个词（`Ability System Blueprint Library` 是 4 个）。
+# 给到 8 是留余量，再长基本就是抓进了后面的正文。
+MAX_TARGET_WORDS = 8
+
+
+def _resolve_target_entity(
+    connection: sqlite3.Connection, tail: str
+) -> tuple[str, list[sqlite3.Row]]:
+    """从 `Target is` 后面那串词里认出目标类型名。
+
+    难点是名字到哪儿结束。正文里紧跟着的就是下一段内容，中间**没有标点**：
+
+        ...are blocked Target is Ability System Component Inputs Type Name...
+
+    所以边界只能靠别名表来定：从长到短试，第一个对得上已知实体的就是它。
+    从长到短是必须的——"Actor Component" 得赢过 "Actor"。
+    """
+    words = tail.split()[:MAX_TARGET_WORDS]
+    for size in range(len(words), 1, -1):
+        candidate = " ".join(words[:size])
+        targets = list(
+            connection.execute(
+                """
+                SELECT DISTINCT e.id FROM entity_aliases a
+                JOIN entities e ON e.id=a.entity_id
+                WHERE a.normalized_alias=?
+                  AND e.entity_type='cpp_symbol'
+                LIMIT 8
+                """,
+                (normalize_name(candidate),),
+            )
+        )
+        if targets:
+            return candidate, targets
+    return "", []
+
+
 def _link_target_types(connection: sqlite3.Connection, now: str) -> None:
     """蓝图文档正文写着 "Target is Actor"，说明这个节点作用在 AActor 上。"""
     target_rows = list(
@@ -321,26 +361,10 @@ def _link_target_types(connection: sqlite3.Connection, now: str) -> None:
         )
     )
     for row in target_rows:
-        match = re.search(
-            r"\bTarget is ([A-Za-z][A-Za-z0-9_ ]{2,80}?)(?:[.!]|\s{2,}|$)",
-            row["content_text"],
-        )
+        match = TARGET_IS_PATTERN.search(row["content_text"])
         if not match:
             continue
-        target_name = match.group(1).strip()
-        normalized_target = normalize_name(target_name)
-        targets = list(
-            connection.execute(
-                """
-                SELECT DISTINCT e.id FROM entity_aliases a
-                JOIN entities e ON e.id=a.entity_id
-                WHERE a.normalized_alias=?
-                  AND e.entity_type='cpp_symbol'
-                LIMIT 8
-                """,
-                (normalized_target,),
-            )
-        )
+        target_name, targets = _resolve_target_entity(connection, match.group(1))
         for target in targets:
             connection.execute(
                 """
