@@ -1,0 +1,57 @@
+name: 提议增强
+description: 提出能力、体验、架构或协作流程上的改进方向
+title: "[Enhancement] "
+labels:
+  - enhancement
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        增强建议描述希望改善的结果，不要求提交者预先设计最终方案。
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 当前能力或限制是什么，为什么值得讨论？
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 描述希望改善的用户结果，不预先绑定具体实现。
+    validations:
+      required: true
+
+  - type: textarea
+    id: directions
+    attributes:
+      label: 可能方向
+      description: 可选；记录帮助思考的方向及权衡，不把它们写成既定方案。
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: 非目标
+      description: 当前不要求解决什么，以避免范围失控。
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: 验证思路
+      description: 将来怎样判断这个增强确实有效？
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索现有 Issues，暂未发现相同建议。
+          required: true
+        - label: 这份建议说明的是目标和约束，而不是要求采用唯一实现。
+          required: true
