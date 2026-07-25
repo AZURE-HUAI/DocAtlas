@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, EXPORT_DIR, SCRIPT_DIR, URL_RE, VERSION
+from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, DATA_DIR, EXPORT_DIR, URL_RE, VERSION
 from .util import log
 
 
@@ -24,7 +24,7 @@ def replace_remote_assets(
             (url,),
         ).fetchone()
         if row:
-            absolute_asset = SCRIPT_DIR / row["local_path"]
+            absolute_asset = DATA_DIR / row["local_path"]
             mapping[url] = os.path.relpath(
                 absolute_asset, export_file.parent
             ).replace("\\", "/")

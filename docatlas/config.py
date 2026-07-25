@@ -19,13 +19,20 @@ DOCUMENT_API_URL = (
 )
 DOC_PREFIX = "/documentation/unreal-engine/"
 
-# 知识库根目录：数据库、导出、图片、报告都放在这里。
-# 默认是本包的上一级（也就是 5.8.0 目录），可用环境变量 UE_KB_HOME 覆盖。
-DATA_DIR = Path(
-    os.environ.get("UE_KB_HOME") or Path(__file__).resolve().parent.parent
+# 代码根：本包的上一级，也就是 Git 仓库根。放程序，不放数据。
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# 数据根：所有数据集的家。默认 <仓库>/data，可用 DOCATLAS_HOME 挪到别的盘。
+# 代码目录和数据目录从此各归各的，加一个新版本不需要复制一份程序。
+DATA_ROOT = Path(
+    os.environ.get("DOCATLAS_HOME") or REPO_ROOT / "data"
 ).resolve()
-SCRIPT_DIR = DATA_DIR  # 兼容旧名称
-DB_PATH = DATA_DIR / "ue58_docs.sqlite3"
+
+# 一个数据集 = 一个产品的一个版本，独占一个目录、一个数据库。
+# 不合并成大库：删除、备份、出问题时的隔离都简单得多。
+DATASET_ID = os.environ.get("DOCATLAS_DATASET") or "epic-ue-5.8"
+DATA_DIR = DATA_ROOT / DATASET_ID
+DB_PATH = DATA_DIR / "knowledge.sqlite3"
 EXPORT_DIR = DATA_DIR / "exports"
 ASSET_DIR = DATA_DIR / "assets"
 

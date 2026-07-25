@@ -6,13 +6,11 @@ param(
     [string]$Mode = 'discover'
 )
 
-$ErrorActionPreference = 'Stop'
-$env:PYTHONIOENCODING = 'utf-8'
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$crawler = Join-Path $scriptDir 'ue58_docs.py'
-$logPath = Join-Path $scriptDir 'crawl.log'
-$errorLogPath = Join-Path $scriptDir 'crawl-error.log'
-$statePath = Join-Path $scriptDir 'background-state.json'
+. (Join-Path $PSScriptRoot '_common.ps1')
+
+$logPath = $LogPath
+$errorLogPath = $ErrorLogPath
+$statePath = $StatePath
 
 function Write-State {
     param(
@@ -53,7 +51,7 @@ if (Test-Path -LiteralPath $errorLogPath) {
     Clear-Content -LiteralPath $errorLogPath
 }
 
-$arguments = @($crawler, 'crawl')
+$arguments = @('-m', 'docatlas', 'crawl')
 if ($Mode -eq 'discover') {
     $arguments += @(
         '--sitemap-workers', 1,
