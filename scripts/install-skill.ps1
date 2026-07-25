@@ -32,12 +32,13 @@ New-Item -ItemType Directory -Force -Path $target | Out-Null
 
 # 装整个目录，不只是 SKILL.md：建库流程在 WORKFLOWS.md 里，漏掉它 AI 就只会查、
 # 不会建。以后再加参考文件也不用回来改这个脚本。
+#
+# 占位符由 Python 填（render-skill）：只有它认识数据集。这个脚本只管把文件
+# 放对地方——换个平台重写一个安装脚本，也不用把数据集那套知识再抄一遍。
 $installed = @()
 foreach ($file in Get-ChildItem -LiteralPath $sourceDir -Filter *.md) {
-    # 反斜杠路径写进 Markdown 就是原样文本，不需要转义。
-    $content = (Get-Content -LiteralPath $file.FullName -Raw).
-        Replace('{{DOCATLAS_ROOT}}', $RepoRoot).
-        Replace('{{DATASET_LANGUAGE}}', $DatasetLanguage)
+    $content = & python.exe -m docatlas render-skill $file.FullName | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "填充 $($file.Name) 失败" }
     $targetFile = Join-Path $target $file.Name
     $content | Set-Content -LiteralPath $targetFile -Encoding UTF8 -NoNewline
     $installed += $file.Name

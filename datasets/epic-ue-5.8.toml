@@ -70,6 +70,17 @@ node_reference = 4
 python_api = 5
 cpp_api = 6
 
+# 用户问题里出现这些词，AI 就该想到查这个库。装技能时填进技能描述。
+# 换数据集就换这一串——程序不认识其中任何一个词。
+[skill]
+triggers = [
+    "UE5", "UE 5.8", "虚幻", "Unreal", "Unreal Engine",
+    "蓝图", "Blueprint", "K2_ 开头的函数名",
+    "AActor / UObject 等 UE 类型名",
+    "Nanite", "Lumen", "Niagara", "GAS", "Chaos", "Sequencer",
+    "UPROPERTY / UFUNCTION 说明符",
+]
+
 [search]
 # 这些分类爱出大段成员罗列，很占 token 又很少直接回答问题，排序时压一压。
 verbose_categories = ["cpp_api"]

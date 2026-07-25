@@ -4,7 +4,10 @@
 或者要做体检。日常查资料不需要读这份，`SKILL.md` 就够了。
 
 **为什么要有这份**：用户不该需要知道 TOML 长什么样、`reprocess` 和 `cross-index`
-谁先谁后。他只说"帮我加个 UE 5.9 的库"，剩下的照下面做。
+谁先谁后。他只说"帮我加个某某文档库"，剩下的照下面做。
+
+当前装着的是《{{DATASET_NAME}}》（id 为 `{{DATASET_ID}}`）。下面拿它当参照，
+但流程本身跟具体是哪个产品无关。
 
 程序位置：`{{DOCATLAS_ROOT}}`。所有命令在这个目录下执行。
 
@@ -28,14 +31,14 @@
 
 ## 流程 A：加同一个站点的新版本
 
-**触发**：用户说"加个 UE 5.9 的库""升到新版本"。
+**触发**：用户说"升到新版本""再加一个 X.Y 版的库"。
 
-这是最省事的一种，**不用写任何代码**。
+这是最省事的一种，**不用写任何代码**——同一个站点的新版本，页面结构一般不变。
 
 1. 复制现成的配置，只改 4 个地方：
 
-   ```bash
-   cp datasets/epic-ue-5.8.toml datasets/epic-ue-5.9.toml
+   ```powershell
+   Copy-Item datasets/{{DATASET_ID}}.toml datasets/<新 id>.toml
    ```
 
    改 `id`、`name`、`version`，以及 `[source_options]` 里的 `home_path`
@@ -44,17 +47,17 @@
 2. 枚举全站清单（只读站点地图，不抓正文，几分钟）：
 
    ```powershell
-   $env:DOCATLAS_DATASET='epic-ue-5.9'; python -m docatlas crawl --discovery-only
+   $env:DOCATLAS_DATASET='<新 id>'; python -m docatlas crawl --discovery-only
    ```
 
 3. 验收清单阶段：
 
    ```powershell
-   $env:DOCATLAS_DATASET='epic-ue-5.9'; python -m docatlas validate --phase inventory
+   $env:DOCATLAS_DATASET='<新 id>'; python -m docatlas validate --phase inventory
    ```
 
 4. **到这里就能用了。** 查到本地没有的页面会当场补抓，不必先下载全站。
-   告诉用户切换方式：`$env:DOCATLAS_DATASET='epic-ue-5.9'`。
+   告诉用户切换方式：`$env:DOCATLAS_DATASET='<新 id>'`。
 
 5. 用户明确要求"全都下下来"时才跑全量 `crawl`（很慢，建议后台跑）。
 
@@ -65,7 +68,7 @@
 
 ## 流程 B：加一个新的文档站点
 
-**触发**：用户说"把 Godot / Unity / React 的文档也收进来"。
+**触发**：用户说"把某某站的文档也收进来"（另一个产品、另一个官网）。
 
 **先跟用户说清楚：这一个不是一条命令的事**，需要先摸清那个站怎么组织，
 再写一个适配器模块。摸不清就先别动手，不要瞎猜着写。
@@ -75,12 +78,14 @@
 要弄明白三件事，弄不明白就问用户或直接去看那个站：
 
 - **怎么知道有哪些页面**：有没有 `sitemap.xml`？没有的话有没有目录页可以爬？
-- **正文怎么拿**：有没有像 Epic 那样的 JSON 接口？没有就得解析 HTML。
-- **语言怎么选**：URL 里带 `lang=`？还是路径前缀 `/zh-cn/`？还是压根只有一种语言？
+- **正文怎么拿**：有没有返回结构化数据的接口（那最省事）？没有就得解析 HTML。
+- **语言怎么选**：URL 里带 `lang=` 参数？还是路径前缀（`/<语言码>/…`）？
+  还是这个站压根只有一种语言？
 
 ### B2. 写适配器
 
-新建 `docatlas/sources/<名字>.py`，核心会调这些函数（照 `epic_ue.py` 抄结构）：
+新建 `docatlas/sources/<名字>.py`，核心会调这些函数
+（照 `docatlas/sources/` 里现成的那个抄结构最快）：
 
 | 函数 | 干什么 |
 |---|---|
@@ -96,16 +101,19 @@
 | `document_locale(payload)` | **服务器实际给的是哪个语言**，没有就返回 `None` |
 
 最后一个别省。`language` 是"我要哪一版"的指令，站点没有那个语言时多半
-不报错、只默默回默认语言——不对一遍，就会得到一个标着德语的英文库。
+不报错、只默默回它的默认语言——不对一遍，就会得到一个**标着甲语言、
+装着乙语言**的库，而且所有检查都会通过。
 
 ### B3. 写配置
 
-新建 `datasets/<id>.toml`，照 `epic-ue-5.8.toml` 的结构。必填：
+新建 `datasets/<id>.toml`，照 `datasets/{{DATASET_ID}}.toml` 的结构。必填：
 `id` / `name` / `product` / `version` / `language` / `source`，
 以及 `[categories]`（站点地图 URL 片段 → 分类）和 `[entity_types]`。
+别忘了 `[skill] triggers`——AI 靠它判断该不该唤起这个知识库。
 
 `knowledge` 可以留空——**没有领域知识包一样能抓能搜**，只是少了该领域特有的
-线索（比如 Unreal 的 `K2_` 前缀、蓝图↔C++ 对应）。先跑通再考虑要不要加。
+线索（比如把同一个东西的两种叫法认成一个，或者从正文里读出"这个作用在什么
+类型上"）。先跑通再考虑要不要加，`docatlas/knowledge/` 下有现成的可以参照。
 
 ### B4. 小样验收（这一步不能跳）
 
@@ -168,7 +176,7 @@ python -m docatlas ask "<那个站里一定有的东西>"
 
 ```powershell
 .\docatlas.ps1 status                          # 抓了多少、失败多少
-python -m docatlas validate --phase content    # 12 项数据合同
+python -m docatlas validate --phase content    # 逐项过数据合同
 ```
 
 `validate` 有任何一项 `fail`，把那一项的 `requirement` 原文念给用户听——

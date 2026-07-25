@@ -747,25 +747,41 @@ class SkillTemplateTests(unittest.TestCase):
         self.assertTrue(files, "技能目录里一个 .md 都没有")
         return {path.name: path.read_text(encoding="utf-8") for path in files}
 
-    def test_every_placeholder_is_filled_by_the_installer(self):
-        # 漏填不报错，只会让 AI 读到字面的 {{...}} 然后照着找不存在的路径。
-        installer = (
-            self.SKILL_DIR.parent.parent / "scripts" / "install-skill.ps1"
-        ).read_text(encoding="utf-8")
+    def test_every_placeholder_has_a_filler(self):
+        # 漏填不报错，只会让 AI 读到字面的 {{...}} 然后照着找不存在的东西。
+        from docatlas.cli import skill_substitutions
+
+        fillers = skill_substitutions()
         found = False
         for name, text in self._docs().items():
             for placeholder in set(re.findall(r"\{\{([A-Z_]+)\}\}", text)):
                 found = True
                 self.assertIn(
-                    f"'{{{{{placeholder}}}}}'",
-                    installer,
-                    f"{name} 里的 {placeholder} 没人替换，装出来会是字面量",
+                    placeholder, fillers, f"{name} 里的 {placeholder} 没人认识"
                 )
         self.assertTrue(found, "占位符一个都没有？那模板机制已经失效了")
 
-    def test_language_comes_from_the_dataset_not_the_code(self):
-        # 用户母语和原文语言都不该被写死：中文用户查英文库只是当前这一种情况。
-        self.assertIn("{{DATASET_LANGUAGE}}", self._docs()["SKILL.md"])
+    def test_fillers_are_not_empty(self):
+        # 填成空字符串比不填还糟：AI 读到的是一句缺了主语的话。
+        from docatlas.cli import skill_substitutions
+
+        for name, value in skill_substitutions().items():
+            self.assertTrue(value.strip(), f"{name} 填出来是空的")
+
+    def test_skill_does_not_hardcode_the_current_dataset(self):
+        """措辞必须通用：装什么库由数据集填，不能写死成当前这一份。
+
+        写死了就等于假定所有人装的都是同一份文档、说同一种语言。
+        """
+        for placeholder in ("DATASET_NAME", "DATASET_TRIGGERS", "DATASET_LANGUAGE"):
+            self.assertIn("{{" + placeholder + "}}", self._docs()["SKILL.md"])
+        product = config.DATASET.product
+        for name, text in self._docs().items():
+            self.assertNotIn(
+                product,
+                text,
+                f"{name} 里写死了当前产品名 {product!r}，换个数据集就不对了",
+            )
 
     def test_skill_points_at_the_build_workflows(self):
         # 不指过去，AI 就只会查、不会建，用户又得自己去碰 TOML。

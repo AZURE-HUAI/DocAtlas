@@ -1,12 +1,15 @@
 ---
 name: docatlas
-description: 查询本地 DocAtlas 技术文档知识库（当前数据集：Unreal Engine 5.8 官方文档——教程、蓝图 API、C++ API、Python API、节点参考、社区文档，全部带原出处 URL）。任何涉及 UE / Unreal Engine / 虚幻引擎的问题都应先用它，而不是联网搜索或凭记忆回答——包括：某个蓝图节点怎么用、某个 C++ 类/函数的参数与返回值、蓝图节点对应哪个 C++ API、某个功能（Nanite、Lumen、GAS、Niagara、Chaos、Sequencer…）怎么配置、某个 UPROPERTY/UFUNCTION 说明符含义、报错信息里出现的 UE 符号。触发词包括：UE5、UE 5.8、虚幻、Unreal、蓝图、Blueprint、AActor/UObject 等 UE 类型名、K2_ 开头的函数名。此外，用户想**新建或维护知识库**时也用它——"加一个 X 的文档库""升到新版本""把某某站也收进来""重新加工一遍""体检一下"——建库流程写在同目录的 WORKFLOWS.md 里。
+description: 查询本机的 DocAtlas 离线文档知识库。当前装的是《{{DATASET_NAME}}》，含{{DATASET_CATEGORIES}}，每条都带原出处 URL。凡是这份文档覆盖得到的问题，都应先查它，再考虑联网搜索或凭记忆回答——本地库有确切的版本、确切的原文和确切的出处，记忆没有。适用于：某个功能怎么配置、某个接口的参数与返回值、某个符号是什么意思、报错信息里出现的名字、两个东西之间怎么对应。触发词：{{DATASET_TRIGGERS}}。此外，用户想**新建或维护知识库**时也用它——"加一个 X 的文档库""升到新版本""把某某站也收进来""重新加工一遍""体检一下"——建库流程写在同目录的 WORKFLOWS.md 里。
 ---
 
 # DocAtlas 本地文档知识库
 
 用户在本机建了一份官方文档的完整离线知识库。**回答相关问题必须先查它**，
 不要凭记忆，也不要联网——本地库有确切的版本、确切的原文和确切的出处 URL。
+
+当前这一份是《{{DATASET_NAME}}》，分这几类：{{DATASET_CATEGORIES}}。
+用户可能装了别的库，`python -m docatlas paths` 告诉你现在生效的是哪个。
 
 程序位置：`{{DOCATLAS_ROOT}}`
 
@@ -22,7 +25,7 @@ description: 查询本地 DocAtlas 技术文档知识库（当前数据集：Unr
 ### 第一步：`ask` —— 默认就用这个
 
 ```bash
-python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
+python -m docatlas ask "<用户想知道的东西>" --token-budget 3000
 ```
 
 它直接返回**已经整理好、已经按预算裁剪过**的 Markdown：命中的知识块正文 +
@@ -35,9 +38,9 @@ python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
 不是硬规矩：专有名词、报错原文、代码符号直接原样查往往更准；用户母语的词
 碰上译文页或社区内容也可能命中。命中不好就换个说法再试一次。
 
-**本地没有的页面它会自动补抓。** 全站 199,883 页的清单早就抓完并冻结了，
-所以即使某页正文还没取，也知道它存在、在哪、URL 是什么——`ask` 会当场把
-那一页取回来再回答，通常一两秒。所以：
+**本地没有的页面它会自动补抓。** 全站页面清单早就枚举完并冻结了（有多少页
+`python -m docatlas stats` 会说），所以即使某页正文还没取，也知道它存在、
+在哪、URL 是什么——`ask` 会当场把那一页取回来再回答，通常一两秒。所以：
 
 - 不要因为"可能还没抓到"就不查，**直接查就行**。
 - 不要自己去联网找官方文档，`ask` 已经会取了。
@@ -45,25 +48,25 @@ python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
 参数：
 - `--token-budget N`：上下文预算，默认 3000。问题简单用 1500，需要通读用 6000。
   **这是保护上下文的主要手段，不要省略。**
-- `--category`：限定 `guides` / `blueprint_api` / `cpp_api` / `python_api` /
-  `node_reference` / `community_docs`。知道要查哪一类时加上，结果更干净。
+- `--category`：限定分类。这个库有 {{DATASET_CATEGORY_IDS}}。
+  知道要查哪一类时加上，结果更干净。
 - `--no-fetch`：禁止联网补抓，只用已有内容。离线时或只想看本地覆盖率时用。
 - `--fetch-limit N`：补抓时最多取几页，默认 5。
 
 ### 需要显式抓某一页时：`get`
 
 ```bash
-python -m docatlas get "ACharacter"
-python -m docatlas get "UCharacterMovementComponent" --limit 3
+python -m docatlas get "<名字>"
+python -m docatlas get "<名字>" --limit 3
 ```
 
-用在"要连着查一个类的一批成员"这种场景——先 `get` 把页面备齐，后面的 `ask`
-就都是本地命中了。日常问答不需要，`ask` 会自己处理。
+用在"要连着查同一个东西的一批相关页"这种场景——先 `get` 把页面备齐，
+后面的 `ask` 就都是本地命中了。日常问答不需要，`ask` 会自己处理。
 
 ### 第二步：`search` —— 只要目录，不要正文
 
 ```bash
-python -m docatlas search "nanite tessellation" --limit 10
+python -m docatlas search "<关键词>" --limit 10
 ```
 
 返回标题、知识类型、匹配档位、得分、原出处，**不返回正文**。用在：
@@ -81,15 +84,15 @@ python -m docatlas show K9290
 ### 第四步：`related` —— 交叉关系
 
 ```bash
-python -m docatlas related "Set Timer by Function Name"
+python -m docatlas related "<名字>"
 ```
 
-返回 JSON：这个蓝图节点对应哪个 C++ API、Target 是什么类型、属于哪个模块，
-**每条关系都带证据类型和置信度**。
+返回 JSON：这一条跟别的东西怎么关联——属于哪个上级、对应哪个接口、
+作用在什么类型上，**每条关系都带证据类型和置信度**。
 
 ## 上下文纪律（重要）
 
-这个库有 20 万页。以下做法会瞬间吃光上下文，**不要做**：
+这种库动辄十几万页。以下做法会瞬间吃光上下文，**不要做**：
 
 - ❌ 直接读 `exports/` 里的 Markdown 分片（单个分片 8MB）
 - ❌ 用 Read 打开 `knowledge.sqlite3`、`manifest.jsonl`、`site_inventory.jsonl`
@@ -105,16 +108,17 @@ python -m docatlas related "Set Timer by Function Name"
 
 ## 关系的可信度怎么读
 
-`related` / `ask` 给出的每条关系都有 `evidence_kind` 和 `confidence`：
+`related` / `ask` 给出的每条关系都有 `evidence_kind`（凭什么这么说）和
+`confidence`（有多确定）。当前这个库会产出这几类证据：{{DATASET_EVIDENCE_KINDS}}。
 
-| 证据 | 置信度 | 含义 |
-|---|---|---|
-| `official_link` | 1.0 | 官方页面里真实存在的链接 |
-| `unreal_display_name_metadata` | 1.0 | C++ 侧 `DisplayName` 元数据与蓝图节点名完全一致 |
-| `document_statement` | 0.92 | 正文明确写了 `Target is X` |
-| `exact_normalized_name` | 0.82~0.9 | 只是名字标准化后一致，**属于候选，需核对签名** |
+怎么读，只要记一条分界线：
 
-置信度 < 1.0 的关系，转述时要说明是"推断"或"候选"，不能说成官方对应。
+- **`confidence` 等于 1.0** —— 官方页面里白纸黑字有的（比如页面之间真实存在的
+  链接、官方元数据完全一致）。可以当事实转述。
+- **`confidence` 小于 1.0** —— 程序**推断**出来的。转述时必须说明是"推断"
+  或"候选"，**不能说成官方对应**。名字对得上不等于就是同一个东西。
+
+每条关系还带 `note` 和 `source_url`，说不准的时候把出处给用户，让他自己核对。
 
 ## 查不到怎么办
 
@@ -123,9 +127,8 @@ python -m docatlas related "Set Timer by Function Name"
 
 处理顺序：
 
-1. 换官方写法再试一次。用户说的是口语名，官方可能是别的：
-   `角色移动组件` → `UCharacterMovementComponent`；`定时器` → `Set Timer`。
-2. 用 `search` 扫一眼有没有近似的：`python -m docatlas search "movement" --limit 10`
+1. 换官方写法再试一次。用户说的多半是口语名或译名，官方可能另有正式写法。
+2. 用 `search` 扫一眼有没有近似的，关键词砍到只剩词根往往就命中了。
 3. 还是没有，就**如实说官方文档里没有这一页**，不要用记忆编一个答案。
 
 只有在明确要看本地覆盖率时才跑：
@@ -136,13 +139,13 @@ python -m docatlas stats
 
 ## 版本纪律
 
-答案要限定在当前数据集的版本内。`python -m docatlas paths` 会告诉你是哪个
-（例如 `epic-ue-5.8` 就是 UE 5.8）。不要把其他版本的行为混进来。
+答案要限定在当前数据集的版本内——`python -m docatlas paths` 会告诉你是哪个。
+不要把其他版本的行为混进来：文档写的就是那一版的事实。
 
-如果用户装了多个版本的数据集，切换方式是设环境变量再跑：
+用户装了多个数据集时，切换方式是设环境变量再跑：
 
-```bash
-DOCATLAS_DATASET=epic-ue-5.9 python -m docatlas ask "Nanite"
+```powershell
+$env:DOCATLAS_DATASET='<别的数据集 id>'; python -m docatlas ask "<问题>"
 ```
 
 ## 给用户的简易入口
@@ -150,7 +153,7 @@ DOCATLAS_DATASET=epic-ue-5.9 python -m docatlas ask "Nanite"
 用户自己不用记命令，可以直接跑：
 
 ```powershell
-.\docatlas.ps1              # 交互式搜索
-.\docatlas.ps1 ask "Nanite"
-.\docatlas.ps1 status       # 抓取进度
+.\docatlas.ps1                # 交互式搜索
+.\docatlas.ps1 ask "<问题>"
+.\docatlas.ps1 status         # 抓取进度
 ```
