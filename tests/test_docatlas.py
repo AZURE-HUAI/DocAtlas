@@ -589,17 +589,31 @@ class ChunkMergingTests(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(chunk["token_estimate"], 900)
 
-    def test_navigation_sections_produce_no_chunks(self):
-        # 面包屑的信息 heading_path 里已经有了，进索引只会稀释检索结果。
+    def test_navigation_content_is_kept_but_does_not_label_the_chunk(self):
+        # Epic 蓝图页的 `Navigation` 名不副实：面包屑之外还装着节点描述和
+        # `Target is X`，是全页最有用的信息，不能丢。但也不能让它给整块
+        # 贴上"导航"标签——那会让这块在检索里被一路扣分。
         sections = [
-            make_section("Navigation", "Home > API > Thing", position=0,
-                         knowledge_type="navigation"),
+            make_section(
+                "Navigation",
+                "Home > API > Thing\n\nReturns true if blocked\n\nTarget is Ability System Component",
+                position=0, knowledge_type="navigation",
+            ),
             make_section("Inputs", "real content here", position=1,
                          knowledge_type="parameters"),
         ]
         chunks = self.chunk(sections)
         self.assertEqual(len(chunks), 1)
-        self.assertNotEqual(chunks[0]["knowledge_type"], "navigation")
+        self.assertIn("Returns true if blocked", chunks[0]["content_text"])
+        self.assertIn("Target is Ability System Component", chunks[0]["content_text"])
+        self.assertEqual(chunks[0]["knowledge_type"], "parameters")
+
+    def test_navigation_alone_still_keeps_its_own_label(self):
+        sections = [
+            make_section("Navigation", "Home > API", position=0,
+                         knowledge_type="navigation"),
+        ]
+        self.assertEqual(self.chunk(sections)[0]["knowledge_type"], "navigation")
 
     def test_no_runt_tail_chunk_is_left_behind(self):
         # 一段刚好切成"一大块 + 一小截"，小截必须并回去。
