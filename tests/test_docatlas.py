@@ -18,12 +18,13 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # config 在导入时就固定路径，所以必须先指到临时目录，避免动到真实知识库。
-_TEMP_HOME = tempfile.mkdtemp(prefix="ue_kb_test_")
-os.environ["UE_KB_HOME"] = _TEMP_HOME
+_TEMP_HOME = tempfile.mkdtemp(prefix="docatlas_test_")
+os.environ["DOCATLAS_HOME"] = _TEMP_HOME
+os.environ["DOCATLAS_DATASET"] = "test-dataset"
 
-from ue_kb import chunking, context, net, ondemand, search, store  # noqa: E402
-from ue_kb.db import connect_db, initialize_db  # noqa: E402
-from ue_kb.documents import transform_document  # noqa: E402
+from docatlas import chunking, context, net, ondemand, search, store  # noqa: E402
+from docatlas.db import connect_db, initialize_db  # noqa: E402
+from docatlas.documents import transform_document  # noqa: E402
 
 
 def make_document(title: str, blocks: list[dict]) -> bytes:
@@ -98,7 +99,7 @@ class ChunkingTests(unittest.TestCase):
 
 
 def chunking_entity(*, title: str, path: str, category: str) -> dict:
-    from ue_kb.documents import entity_descriptor
+    from docatlas.documents import entity_descriptor
 
     return entity_descriptor(
         title=title,
@@ -367,7 +368,7 @@ class RedirectHandlingTests(unittest.TestCase):
 
 class HtmlCleanupTests(unittest.TestCase):
     def test_inline_html_in_text_fields_becomes_markdown(self):
-        from ue_kb.htmlmd import collect_strings
+        from docatlas.htmlmd import collect_strings
 
         block = {
             "type": "custom",
@@ -378,7 +379,7 @@ class HtmlCleanupTests(unittest.TestCase):
         self.assertNotIn("<strong>", rendered)
 
     def test_code_keeps_angle_brackets(self):
-        from ue_kb.htmlmd import collect_strings, maybe_html_to_markdown
+        from docatlas.htmlmd import collect_strings, maybe_html_to_markdown
 
         self.assertEqual(
             maybe_html_to_markdown("TArray<int32> Values;"), "TArray<int32> Values;"
@@ -387,7 +388,7 @@ class HtmlCleanupTests(unittest.TestCase):
         self.assertIn("TMap<FName, TSubclassOf<AActor>> Map;", collect_strings(block))
 
     def test_plain_text_leaves_no_tag_fragments(self):
-        from ue_kb.htmlmd import plain_text
+        from docatlas.htmlmd import plain_text
 
         cleaned = plain_text("<strong>VSM</strong> is <em>new</em>")
         self.assertNotIn("<", cleaned)

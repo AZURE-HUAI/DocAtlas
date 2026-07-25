@@ -6,11 +6,11 @@ param(
     [string]$Mode = 'discover'
 )
 
-$ErrorActionPreference = 'Stop'
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$runner = Join-Path $scriptDir 'background-runner.ps1'
-$pidPath = Join-Path $scriptDir 'background-runner.pid'
-$inventorySummaryPath = Join-Path $scriptDir 'site_inventory_summary.json'
+. (Join-Path $PSScriptRoot '_common.ps1')
+
+$runner = Join-Path $PSScriptRoot 'background-runner.ps1'
+$pidPath = $PidPath
+$inventorySummaryPath = $InventorySummaryPath
 
 if ($Mode -eq 'content') {
     if (-not (Test-Path -LiteralPath $inventorySummaryPath)) {
@@ -43,10 +43,10 @@ $argumentList = @(
 
 $process = Start-Process -FilePath 'powershell.exe' `
     -ArgumentList $argumentList `
-    -WorkingDirectory $scriptDir `
+    -WorkingDirectory $RepoRoot `
     -WindowStyle Hidden `
     -PassThru
 
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ASCII
 Write-Host "后台 $Mode 阶段已排队，PID：$($process.Id)"
-Write-Host "查看进度：.\status.ps1"
+Write-Host '查看进度：.\docatlas.ps1 status'

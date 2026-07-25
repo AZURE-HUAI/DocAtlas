@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, DB_PATH, LANGUAGE, SCRIPT_DIR, VERSION
+from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, DATA_DIR, DB_PATH, LANGUAGE, VERSION
 from .util import utc_now
 from .discover import canonical_source_url
 
@@ -65,7 +65,7 @@ def write_manifest(connection: sqlite3.Connection) -> Path:
     这是一个近 100 MB 的全量导出文件，只在真正需要时生成——以前它挂在
     `write_reports` 里，导致每次看一眼进度都要重写 100 MB。
     """
-    manifest_path = SCRIPT_DIR / "manifest.jsonl"
+    manifest_path = DATA_DIR / "manifest.jsonl"
     with manifest_path.open("w", encoding="utf-8", newline="\n") as manifest:
         for row in connection.execute(
             """
@@ -83,7 +83,7 @@ def write_reports(
     connection: sqlite3.Connection, *, manifest: bool = False
 ) -> dict[str, Any]:
     stats = database_stats(connection)
-    report_path = SCRIPT_DIR / "report.json"
+    report_path = DATA_DIR / "report.json"
     report_path.write_text(
         json.dumps(stats, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -148,14 +148,14 @@ def write_reports(
             "",
         ]
     )
-    (SCRIPT_DIR / "ROUTER.md").write_text(
+    (DATA_DIR / "ROUTER.md").write_text(
         "\n".join(router_lines), encoding="utf-8"
     )
     return stats
 
 
 def write_site_inventory(connection: sqlite3.Connection) -> dict[str, Any]:
-    inventory_path = SCRIPT_DIR / "site_inventory.jsonl"
+    inventory_path = DATA_DIR / "site_inventory.jsonl"
     digest = hashlib.sha256()
     total = 0
     categories: dict[str, int] = {}
@@ -194,11 +194,11 @@ def write_site_inventory(connection: sqlite3.Connection) -> dict[str, Any]:
         "sha256": inventory_hash,
         "inventory_file": inventory_path.name,
     }
-    (SCRIPT_DIR / "site_inventory_summary.json").write_text(
+    (DATA_DIR / "site_inventory_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    (SCRIPT_DIR / "site_inventory.sha256").write_text(
+    (DATA_DIR / "site_inventory.sha256").write_text(
         f"{inventory_hash}  {inventory_path.name}\n",
         encoding="ascii",
     )

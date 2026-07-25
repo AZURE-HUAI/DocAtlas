@@ -10,7 +10,16 @@ import re
 import sqlite3
 from typing import Any
 
-from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, SCRIPT_DIR, VERSION
+from .config import (
+    CATEGORY_LABELS,
+    CATEGORY_PATTERNS,
+    DATA_DIR,
+    DATA_ROOT,
+    DATASET_ID,
+    DB_PATH,
+    REPO_ROOT,
+    VERSION,
+)
 from .util import log, set_log_file
 from .net import REQUEST_LIMITER
 from .db import connect_db, initialize_db
@@ -41,7 +50,7 @@ def print_stats(stats: dict[str, Any]) -> None:
 
 
 def command_crawl(args: argparse.Namespace) -> int:
-    SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     set_log_file(args.log_file)
     REQUEST_LIMITER.configure(args.requests_per_second)
     connection = connect_db()
@@ -485,9 +494,29 @@ def command_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_paths(_: argparse.Namespace) -> int:
+    """告诉调用方数据在哪。PowerShell 脚本靠它定位日志和数据库，
+    这样路径规则只在 config.py 写一次，别处不再各写一遍。"""
+    print(
+        json.dumps(
+            {
+                "dataset": DATASET_ID,
+                "repo_root": str(REPO_ROOT),
+                "data_root": str(DATA_ROOT),
+                "data_dir": str(DATA_DIR),
+                "database": str(DB_PATH),
+                "exists": DB_PATH.exists(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"UE {VERSION} 官方文档本地知识库"
+        description=f"DocAtlas 本地文档知识库（当前数据集：{DATASET_ID}）"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -659,6 +688,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="同时重写逐页清单 manifest.jsonl（近 100 MB，默认不写）",
     )
     stats.set_defaults(func=command_stats)
+
+    paths = subparsers.add_parser("paths", help="打印数据集与数据目录的实际位置")
+    paths.set_defaults(func=command_paths)
     return parser
 
 

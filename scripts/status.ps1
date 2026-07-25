@@ -1,12 +1,11 @@
-$ErrorActionPreference = 'Stop'
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$crawler = Join-Path $scriptDir 'ue58_docs.py'
-$statePath = Join-Path $scriptDir 'background-state.json'
-$pidPath = Join-Path $scriptDir 'background-runner.pid'
-$logPath = Join-Path $scriptDir 'crawl.log'
-$errorLogPath = Join-Path $scriptDir 'crawl-error.log'
+. (Join-Path $PSScriptRoot '_common.ps1')
 
-Write-Host '=== 后台状态 ==='
+$statePath = $StatePath
+$pidPath = $PidPath
+$logPath = $LogPath
+$errorLogPath = $ErrorLogPath
+
+Write-Host "=== 后台状态（数据集 $DatasetId）==="
 if (Test-Path -LiteralPath $statePath) {
     Get-Content -LiteralPath $statePath -Raw
 }
@@ -24,7 +23,7 @@ else {
 }
 
 Write-Host '=== 覆盖率 ==='
-python.exe $crawler stats
+Invoke-DocAtlas @('stats')
 
 if (Test-Path -LiteralPath $logPath) {
     Write-Host '=== 最近进度 ==='

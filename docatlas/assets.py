@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .config import ASSET_DIR, IMAGE_EXTENSIONS, SCRIPT_DIR
+from .config import ASSET_DIR, DATA_DIR, IMAGE_EXTENSIONS
 from .util import log, utc_now
 from .net import fetch_bytes
 
@@ -46,7 +46,7 @@ def fetch_asset(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "ok": True,
             "id": row["id"],
-            "local_path": path.relative_to(SCRIPT_DIR).as_posix(),
+            "local_path": path.relative_to(DATA_DIR).as_posix(),
             "content_type": content_type,
             "bytes": len(body),
         }
