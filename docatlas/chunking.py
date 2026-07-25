@@ -208,10 +208,13 @@ def markdown_units(markdown: str, max_chars: int) -> list[str]:
     return units
 
 
-# 导航类小节是面包屑，内容已经由 heading_path 和层级关系完整表达了，
-# 检索里也一直在给它扣分。既不合并、也不单独成块——直接不进知识库，
-# 省掉几千条纯噪音的索引。小节本身保留：页面链接和层级关系靠它。
-SKIP_CHUNK_TYPES = frozenset({"navigation"})
+# 有些小节的标题名对不上它的内容，不能拿标题名当结论。
+#
+# 典型例子是 Epic 蓝图页的 `Navigation`：名字像面包屑，实际上除了面包屑，
+# 还装着**这个节点是干嘛的**那句描述，以及 `Target is X`——全页最有用的信息
+# 都在里面。所以这类小节不能丢，但也不该由它来决定合并后那一块算什么类型，
+# 否则整块会被当成导航，在检索里被扣分扣到底。
+WEAK_TYPE_LABELS = frozenset({"navigation"})
 
 # 切分后剩下的尾巴短于这个字符数，就并回上一块，别留一条二十来字的孤块。
 RUNT_TAIL_CHARS = 400
@@ -265,6 +268,19 @@ def group_sections_for_chunking(
     return groups
 
 
+def _group_knowledge_type(group: list[dict[str, Any]]) -> str:
+    """合并后这一块算什么类型。
+
+    取第一个"名副其实"的类型。像 `navigation` 这种标题名和内容对不上的，
+    不该代表整块——一块含着节点描述、参数和返回值的内容被标成"导航"，
+    检索时会被一路扣分扣到底。
+    """
+    for section in group:
+        if section["knowledge_type"] not in WEAK_TYPE_LABELS:
+            return section["knowledge_type"]
+    return group[0]["knowledge_type"]
+
+
 def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
     """把一组小节拼成一个"合成小节"，交给原来的切块逻辑处理。
 
@@ -289,7 +305,7 @@ def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
         "title": parent.rpartition(" > ")[2] or first["title"],
         "heading_level": min(section["heading_level"] for section in group),
         "body_md": "\n\n".join(parts),
-        "knowledge_type": first["knowledge_type"],
+        "knowledge_type": _group_knowledge_type(group),
         "source_url": first["source_url"],
         "source_anchor": first["source_anchor"],
         "quality_score": min(section["quality_score"] for section in group),
@@ -307,8 +323,7 @@ def chunk_sections(
 ) -> list[dict[str, Any]]:
     """一整页的切块入口：先攒小的，再切大的。"""
     chunks: list[dict[str, Any]] = []
-    keepers = [s for s in sections if s["knowledge_type"] not in SKIP_CHUNK_TYPES]
-    for group in group_sections_for_chunking(keepers, target_chars):
+    for group in group_sections_for_chunking(sections, target_chars):
         chunks.extend(
             chunk_section(
                 merge_sections(group),
