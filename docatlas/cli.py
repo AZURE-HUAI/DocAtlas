@@ -17,6 +17,7 @@ from .config import (
     DATA_ROOT,
     DATASET_ID,
     DB_PATH,
+    LANGUAGE,
     REPO_ROOT,
     VERSION,
 )
@@ -223,7 +224,7 @@ def command_search(args: argparse.Namespace) -> int:
         connection, args.query, limit=args.limit, category=args.category
     )
     if not rows:
-        print("没有找到结果。英文原文库建议优先使用英文关键词。")
+        print(f"没有找到结果。原文语言是 {LANGUAGE}，换成原文里的写法往往能命中。")
         return 1
     if args.json:
         print(
@@ -530,6 +531,9 @@ def command_paths(_: argparse.Namespace) -> int:
         json.dumps(
             {
                 "dataset": DATASET_ID,
+                # 原文是什么语言由数据集说了算，不是程序的假设——安装技能时
+                # 要把它填进说明里，好让 AI 知道该用哪种语言的词去查。
+                "language": LANGUAGE,
                 "repo_root": str(REPO_ROOT),
                 "data_root": str(DATA_ROOT),
                 "data_dir": str(DATA_DIR),

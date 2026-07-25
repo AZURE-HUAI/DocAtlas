@@ -20,6 +20,7 @@ $script:_paths = & python.exe -m docatlas paths | ConvertFrom-Json
 if (-not $script:_paths) { throw '无法定位数据目录：python -m docatlas paths 没有输出。' }
 
 $DatasetId = $script:_paths.dataset
+$DatasetLanguage = $script:_paths.language
 $DataDir = $script:_paths.data_dir
 $DbPath = $script:_paths.database
 

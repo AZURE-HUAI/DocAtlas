@@ -29,13 +29,15 @@ $target = Join-Path $skillsHome 'docatlas'
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 
 # 反斜杠路径写进 Markdown 就是原样文本，不需要转义。
-$content = (Get-Content -LiteralPath $source -Raw).Replace('{{DOCATLAS_ROOT}}', $RepoRoot)
+$content = (Get-Content -LiteralPath $source -Raw).
+    Replace('{{DOCATLAS_ROOT}}', $RepoRoot).
+    Replace('{{DATASET_LANGUAGE}}', $DatasetLanguage)
 $targetFile = Join-Path $target 'SKILL.md'
 $content | Set-Content -LiteralPath $targetFile -Encoding UTF8 -NoNewline
 
 Write-Host "已安装技能：$targetFile" -ForegroundColor Green
 Write-Host "  程序位置写为：$RepoRoot"
-Write-Host "  当前数据集：$DatasetId"
+Write-Host "  当前数据集：$DatasetId（原文语言 $DatasetLanguage）"
 
 $legacy = Join-Path $skillsHome 'ue5-docs'
 if (Test-Path -LiteralPath $legacy) {
