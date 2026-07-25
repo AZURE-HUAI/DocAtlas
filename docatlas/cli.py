@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import sys
 from typing import Any
 
 from .config import (
@@ -15,6 +16,7 @@ from .config import (
     CATEGORY_PATTERNS,
     DATA_DIR,
     DATA_ROOT,
+    DATASET,
     DATASET_ID,
     DB_PATH,
     LANGUAGE,
@@ -547,6 +549,50 @@ def command_paths(_: argparse.Namespace) -> int:
     return 0
 
 
+def skill_substitutions() -> dict[str, str]:
+    """技能文档里的占位符 → 当前数据集的实际内容。
+
+    技能文档是给 AI 看的操作手册，措辞必须是通用的——"当前装的是什么库"
+    由数据集填，不能写死。写死了就等于假定所有人装的都是同一份文档。
+    """
+    from .validate import expected_evidence_kinds
+
+    return {
+        "DOCATLAS_ROOT": str(REPO_ROOT),
+        "DATASET_ID": DATASET_ID,
+        "DATASET_NAME": DATASET.name,
+        "DATASET_LANGUAGE": LANGUAGE,
+        "DATASET_CATEGORIES": "、".join(
+            CATEGORY_LABELS.get(key, key) for key in DATASET.categories
+        ),
+        "DATASET_CATEGORY_IDS": " / ".join(f"`{key}`" for key in DATASET.categories),
+        "DATASET_TRIGGERS": "、".join(DATASET.skill_triggers) or "（未配置）",
+        "DATASET_EVIDENCE_KINDS": "、".join(
+            f"`{kind}`" for kind in expected_evidence_kinds()
+        ),
+    }
+
+
+def command_render_skill(args: argparse.Namespace) -> int:
+    """把技能模板按当前数据集填好，打到标准输出，安装脚本负责落地。
+
+    填充放在 Python 这边：只有它认识数据集。安装脚本就只管把文件放对地方，
+    换个平台重写一个安装脚本也不用把这些知识再抄一遍。
+    """
+    template = Path(args.template)
+    if not template.exists():
+        print(f"找不到模板：{template}", file=sys.stderr)
+        return 1
+    text = template.read_text(encoding="utf-8")
+    for name, value in skill_substitutions().items():
+        text = text.replace("{{" + name + "}}", value)
+    if leftover := sorted(set(re.findall(r"\{\{([A-Z_]+)\}\}", text))):
+        print(f"{template.name} 里有没人认识的占位符：{'、'.join(leftover)}", file=sys.stderr)
+        return 1
+    sys.stdout.write(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=f"DocAtlas 本地文档知识库（当前数据集：{DATASET_ID}）"
@@ -729,6 +775,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     paths = subparsers.add_parser("paths", help="打印数据集与数据目录的实际位置")
     paths.set_defaults(func=command_paths)
+
+    render = subparsers.add_parser(
+        "render-skill", help="把技能模板按当前数据集填好并打印（给安装脚本用）"
+    )
+    render.add_argument("template", help="模板文件路径")
+    render.set_defaults(func=command_render_skill)
 
     mcp = subparsers.add_parser(
         "mcp", help="以 MCP 服务器方式运行（给 Claude Desktop / Cursor 等客户端用）"
