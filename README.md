@@ -292,3 +292,15 @@ python -m unittest discover -s tests -v      # 离线测试，不联网，不碰
 - [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) —— 数据结构与字段约定
 - [docs/AI_ROUTING.md](docs/AI_ROUTING.md) —— AI 检索策略与上下文预算规则
 - [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md) —— 从单一知识库演进到多来源的完整评估
+
+---
+
+## 八、问题反馈与协作
+
+- 报告错误或提出增强：使用 GitHub 的 **New issue** 页面。
+- 查看当前问题、长期证据和解决归档：[`issues/README.md`](issues/README.md)。
+- 了解分支、测试、PR 和封存要求：[`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+GitHub Issues 负责在线讨论、分工和开关状态；仓库中的 `issues/` 保存复现证据、
+设计背景、验证结果和历史决策。两者的同步规则见
+[`issues/WORKFLOW.md`](issues/WORKFLOW.md)。

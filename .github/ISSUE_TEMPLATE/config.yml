@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 先阅读问题管理流程
+    url: https://github.com/AZURE-HUAI/DocAtlas/blob/main/issues/README.md
+    about: 了解 GitHub Issues 与仓库内长期档案如何配合。
