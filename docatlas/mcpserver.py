@@ -45,7 +45,11 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "要查的东西。英文原名命中率最高，例如 K2_SetTimer、Nanite。",
+                    "description": (
+                        "要查的东西。库里是英文原文，中文提问一般先落成官方英文名"
+                        "再查（\"定时器\" → Set Timer）。专有名词和 K2_ 开头的符号"
+                        "直接原样查即可；命中不好就换个说法再试一次。"
+                    ),
                 },
                 "token_budget": {
                     "type": "integer",
@@ -75,7 +79,10 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "关键词"},
+                "query": {
+                    "type": "string",
+                    "description": "关键词。同 docatlas_ask，英文原名命中最好。",
+                },
                 "limit": {"type": "integer", "description": "最多几条", "default": 10},
                 "category": {
                     "type": "string",
