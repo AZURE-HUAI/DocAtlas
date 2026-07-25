@@ -23,7 +23,9 @@ _TEMP_HOME = tempfile.mkdtemp(prefix="docatlas_test_")
 os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
-from docatlas import chunking, config, context, dataset, net, ondemand, search, store  # noqa: E402
+from docatlas import (  # noqa: E402
+    chunking, config, context, dataset, net, ondemand, search, store, validate,
+)
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
@@ -631,6 +633,26 @@ class ChunkMergingTests(unittest.TestCase):
             make_section("Outputs", "b", position=4, knowledge_type="returns"),
         ]
         self.assertEqual(self.chunk(sections)[0]["section_position"], 3)
+
+
+class EvidenceCoverageTests(unittest.TestCase):
+    """守住一条教训：加工规则一改，可能把某类关系整类做没。
+
+    只看"跑完没报错"发现不了——所有健康检查都会通过，只是某类证据静静地
+    变成 0 条。所以验收要盯每类证据的产出量。
+    """
+
+    def test_expected_kinds_cover_generic_plus_domain(self):
+        kinds = validate.expected_evidence_kinds()
+        self.assertIn("official_link", kinds)  # 任何文档站都有
+        for kind in unreal.DERIVED_EVIDENCE_KINDS:
+            self.assertIn(kind, kinds, "领域知识包声明会推出的证据必须被验收覆盖")
+
+    def test_domain_kinds_are_actually_produced_by_the_pack(self):
+        # 声明了却没人生产，等于验收永远失败；反过来生产了却没声明，等于漏检。
+        source = (Path(unreal.__file__)).read_text(encoding="utf-8")
+        for kind in unreal.DERIVED_EVIDENCE_KINDS:
+            self.assertIn(f"'{kind}'", source, f"{kind} 没有任何地方写入")
 
 
 class McpProtocolTests(unittest.TestCase):
