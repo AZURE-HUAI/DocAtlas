@@ -1,0 +1,35 @@
+name: Validate issue records
+
+on:
+  pull_request:
+    paths:
+      - "issues/**"
+      - "scripts/validate-issues.ps1"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "CONTRIBUTING.md"
+      - "README.md"
+  push:
+    branches:
+      - main
+    paths:
+      - "issues/**"
+      - "scripts/validate-issues.ps1"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "CONTRIBUTING.md"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate issue records
+        shell: pwsh
+        run: ./scripts/validate-issues.ps1
