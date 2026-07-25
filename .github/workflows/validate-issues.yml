@@ -7,6 +7,7 @@ on:
       - "scripts/validate-issues.ps1"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/validate-issues.yml"
       - "CONTRIBUTING.md"
       - "README.md"
   push:
@@ -17,6 +18,7 @@ on:
       - "scripts/validate-issues.ps1"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/workflows/validate-issues.yml"
       - "CONTRIBUTING.md"
       - "README.md"
 
@@ -25,10 +27,19 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate YAML syntax
+        shell: bash
+        run: >-
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }'
+          .github/ISSUE_TEMPLATE/*.yml .github/workflows/*.yml
 
       - name: Validate issue records
         shell: pwsh
