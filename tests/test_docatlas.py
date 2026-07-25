@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,6 +33,7 @@ from docatlas import (  # noqa: E402
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
+from docatlas.sources import epic_ue  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
 from docatlas.documents import transform_document  # noqa: E402
 
@@ -694,6 +697,44 @@ class EvidenceCoverageTests(unittest.TestCase):
         source = (Path(unreal.__file__)).read_text(encoding="utf-8")
         for kind in unreal.DERIVED_EVIDENCE_KINDS:
             self.assertIn(f"'{kind}'", source, f"{kind} 没有任何地方写入")
+
+
+class FetchedLanguageTests(unittest.TestCase):
+    """数据集里的 language 是"去要哪一版"的指令，不是站点的事实，所以没法自动填。
+
+    但"要的和给的是不是一回事"能自动查：站点没有你要的语言时多半不报错，
+    只不声不响回默认语言，于是你得到一个标着德语的英文库。
+    """
+
+    def _connection(self, locales):
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE raw_documents(raw_json BLOB)")
+        for locale in locales:
+            payload = json.dumps({"title": "x", "locale": locale}).encode("utf-8")
+            connection.execute(
+                "INSERT INTO raw_documents VALUES(?)", (zlib.compress(payload),)
+            )
+        return connection
+
+    def test_counts_what_the_server_actually_returned(self):
+        counts = validate.fetched_locales(self._connection(["en-US", "en-us", "de-de"]))
+        self.assertEqual(counts["en-us"], 2)  # 大小写不该算成两种
+        self.assertEqual(counts["de-de"], 1)
+
+    def test_a_silently_substituted_language_is_visible(self):
+        # 这条是关键：要了德语、拿回英语，必须看得出来，不能悄悄过去。
+        counts = validate.fetched_locales(self._connection(["en-us"] * 5))
+        wrong = sum(n for code, n in counts.items() if code != "de-de")
+        self.assertEqual(wrong, 5)
+
+    def test_corrupt_archives_do_not_crash_the_check(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE raw_documents(raw_json BLOB)")
+        connection.execute("INSERT INTO raw_documents VALUES(?)", (b"not zlib",))
+        self.assertEqual(validate.fetched_locales(connection), collections.Counter())
+
+    def test_adapter_reports_nothing_when_the_site_says_nothing(self):
+        self.assertIsNone(epic_ue.document_locale({"title": "x"}))
 
 
 class SkillTemplateTests(unittest.TestCase):
