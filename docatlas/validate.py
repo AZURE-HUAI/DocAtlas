@@ -28,7 +28,7 @@ def validate_contract(
         connection.execute(
             "SELECT COUNT(*) FROM sitemaps WHERE status!='success'"
         ).fetchone()[0],
-        "全部 UE 子站点地图必须成功",
+        "全部子站点地图必须成功",
     )
     add(
         "page_inventory_metadata",

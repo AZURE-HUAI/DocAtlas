@@ -279,8 +279,9 @@ def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
         heading = "#" * min(max(section["heading_level"], 1), 6)
         parts.append(f"{heading} {section['title']}\n\n{section['body_md']}".strip())
     parent = _parent_path(first["heading_path"])
+    # 明确列出每个字段，不用 **first：合成小节的正文已经不是第一个小节的了，
+    # 顺手继承过来的 content_hash / token_estimate 会是错的，留着迟早被人误用。
     return {
-        **first,
         # 归属到组里的第一个小节：chunks 表要求 section_id 非空，
         # 而这一组在文档里本来就是从它开始的。
         "position": first["position"],
@@ -289,6 +290,9 @@ def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
         "heading_level": min(section["heading_level"] for section in group),
         "body_md": "\n\n".join(parts),
         "knowledge_type": first["knowledge_type"],
+        "source_url": first["source_url"],
+        "source_anchor": first["source_anchor"],
+        "quality_score": min(section["quality_score"] for section in group),
     }
 
 
