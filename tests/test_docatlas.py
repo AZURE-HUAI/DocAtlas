@@ -24,6 +24,7 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import chunking, config, context, dataset, net, ondemand, search, store  # noqa: E402
+from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
 from docatlas.documents import transform_document  # noqa: E402
@@ -533,6 +534,144 @@ class EndToEndTests(unittest.TestCase):
         )
         markdown = context.render_context_markdown(pack)
         self.assertIn("没有命中", markdown)
+
+
+def make_section(title, body, *, position, level=2, knowledge_type="details",
+                 parent="Page"):
+    return {
+        "position": position,
+        "title": title,
+        "heading_path": f"{parent} > {title}",
+        "heading_level": level,
+        "body_md": body,
+        "knowledge_type": knowledge_type,
+        "source_url": "https://example.invalid/x",
+        "source_anchor": f"https://example.invalid/x#{title.lower()}",
+        "quality_score": 1.0,
+    }
+
+
+class ChunkMergingTests(unittest.TestCase):
+    """小节合并：解决"一页被切成几个二十字碎块"的问题。"""
+
+    def chunk(self, sections):
+        return chunking.chunk_sections(
+            sections, page_title="Page", category="blueprint_api", document_type=None
+        )
+
+    def test_small_neighbours_merge_into_one_usable_chunk(self):
+        sections = [
+            make_section("Inputs", "| Name | Type |\n|---|---|\n| A | int |", position=0,
+                         knowledge_type="parameters"),
+            make_section("Outputs", "| Name | Type |\n|---|---|\n| R | bool |", position=1,
+                         knowledge_type="returns"),
+        ]
+        chunks = self.chunk(sections)
+        self.assertEqual(len(chunks), 1)
+        # 合并不等于抹掉子标题——读的人还得看得出哪段是输入、哪段是输出。
+        self.assertIn("Inputs", chunks[0]["content_md"])
+        self.assertIn("Outputs", chunks[0]["content_md"])
+
+    def test_merging_stops_at_a_different_parent(self):
+        sections = [
+            make_section("A", "short one", position=0, parent="Page > Topic1"),
+            make_section("B", "short two", position=1, parent="Page > Topic2"),
+        ]
+        self.assertEqual(len(self.chunk(sections)), 2)
+
+    def test_large_sections_are_never_merged_away(self):
+        sections = [
+            make_section("Small", "tiny", position=0),
+            make_section("Big", "x " * 2000, position=1),
+        ]
+        chunks = self.chunk(sections)
+        self.assertGreaterEqual(len(chunks), 2)
+        for chunk in chunks:
+            self.assertLessEqual(chunk["token_estimate"], 900)
+
+    def test_navigation_sections_produce_no_chunks(self):
+        # 面包屑的信息 heading_path 里已经有了，进索引只会稀释检索结果。
+        sections = [
+            make_section("Navigation", "Home > API > Thing", position=0,
+                         knowledge_type="navigation"),
+            make_section("Inputs", "real content here", position=1,
+                         knowledge_type="parameters"),
+        ]
+        chunks = self.chunk(sections)
+        self.assertEqual(len(chunks), 1)
+        self.assertNotEqual(chunks[0]["knowledge_type"], "navigation")
+
+    def test_no_runt_tail_chunk_is_left_behind(self):
+        # 一段刚好切成"一大块 + 一小截"，小截必须并回去。
+        body = ("paragraph body text. " * 120).strip() + "\n\nshort tail."
+        sections = [make_section("Body", body, position=0)]
+        chunks = self.chunk(sections)
+        if len(chunks) > 1:
+            self.assertGreaterEqual(chunks[-1]["token_estimate"], 50)
+        self.assertIn("short tail.", chunks[-1]["content_md"])
+
+    def test_merged_chunk_is_attributed_to_the_first_section(self):
+        # chunks.section_id 非空，合并块必须挂在组里第一个小节上。
+        sections = [
+            make_section("Inputs", "a", position=3, knowledge_type="parameters"),
+            make_section("Outputs", "b", position=4, knowledge_type="returns"),
+        ]
+        self.assertEqual(self.chunk(sections)[0]["section_position"], 3)
+
+
+class McpProtocolTests(unittest.TestCase):
+    """MCP 是手写的（不引第三方 SDK），协议层必须有测试守着。"""
+
+    def test_handshake_echoes_the_client_protocol_version(self):
+        # 硬报一个版本会让老客户端直接拒绝握手。
+        reply = mcpserver.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        })
+        self.assertEqual(reply["result"]["protocolVersion"], "2024-11-05")
+        self.assertIn("tools", reply["result"]["capabilities"])
+
+    def test_notifications_get_no_reply(self):
+        # 通知没有 id，回一个响应会让客户端报协议错误。
+        self.assertIsNone(
+            mcpserver.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+
+    def test_every_advertised_tool_has_a_handler(self):
+        advertised = {tool["name"] for tool in mcpserver.TOOLS}
+        self.assertEqual(advertised, set(mcpserver.HANDLERS))
+
+    def test_tool_schemas_are_well_formed(self):
+        for tool in mcpserver.TOOLS:
+            self.assertTrue(tool["description"], tool["name"])
+            schema = tool["inputSchema"]
+            self.assertEqual(schema["type"], "object")
+            for required in schema.get("required", []):
+                self.assertIn(required, schema["properties"], tool["name"])
+
+    def test_unknown_tool_is_a_protocol_error(self):
+        reply = mcpserver.handle({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "nope", "arguments": {}},
+        })
+        self.assertEqual(reply["error"]["code"], -32602)
+
+    def test_tool_failure_is_reported_not_crashed(self):
+        # 工具抛异常必须变成 isError 结果，不能把整个连接搞崩。
+        original = mcpserver.HANDLERS["docatlas_show"]
+        mcpserver.HANDLERS["docatlas_show"] = lambda _a: 1 / 0
+        try:
+            reply = mcpserver.handle({
+                "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                "params": {"name": "docatlas_show", "arguments": {}},
+            })
+        finally:
+            mcpserver.HANDLERS["docatlas_show"] = original
+        self.assertTrue(reply["result"]["isError"])
+        self.assertNotIn("error", reply)
+
+    def test_bad_chunk_id_is_rejected_politely(self):
+        self.assertIn("看不懂", mcpserver.tool_show({"chunk_id": "; DROP TABLE"}))
 
 
 class DatasetLayeringTests(unittest.TestCase):

@@ -122,7 +122,8 @@ def store_document_result(
             redirect_url=NULL,
             content_hash=?,
             section_count=?,
-            raw_json=NULL
+            raw_json=NULL,
+            parser_version=?
         WHERE id=?
         """,
         (
@@ -135,6 +136,7 @@ def store_document_result(
             stored_at,
             result["content_hash"],
             len(result["sections"]),
+            CHUNKER_VERSION,
             page_id,
         ),
     )
@@ -221,6 +223,7 @@ def store_document_result(
             if alias and normalize_name(alias)
         ],
     )
+    page_chunk_ids: list[int] = []
     for chunk in result["chunks"]:
         section_id = section_ids[chunk["section_position"]]
         chunk_cursor = connection.execute(
@@ -255,6 +258,7 @@ def store_document_result(
             ),
         )
         chunk_id = chunk_cursor.lastrowid
+        page_chunk_ids.append(chunk_id)
         connection.execute(
             """
             INSERT INTO chunks_fts(
@@ -305,6 +309,18 @@ def store_document_result(
                 "INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_id) VALUES(?, ?)",
                 (chunk_id, tag_id),
             )
+    # 把同一页的块按顺序串起来，需要更多上下文时可以往前后取一块。
+    for position, chunk_id in enumerate(page_chunk_ids):
+        connection.execute(
+            "UPDATE chunks SET prev_chunk_id=?, next_chunk_id=? WHERE id=?",
+            (
+                page_chunk_ids[position - 1] if position else None,
+                page_chunk_ids[position + 1]
+                if position + 1 < len(page_chunk_ids)
+                else None,
+                chunk_id,
+            ),
+        )
     for link in result["page_links"]:
         connection.execute(
             """

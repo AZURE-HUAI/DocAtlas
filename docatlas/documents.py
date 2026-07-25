@@ -22,7 +22,7 @@ from .config import DATASET, ENTITY_TYPES, KNOWLEDGE, MARKDOWN_TARGET_RE, SOURCE
 from .dataset import knowledge_hook
 from .net import fetch_bytes
 from .htmlmd import plain_text
-from .chunking import chunk_section, normalize_name, split_sections
+from .chunking import chunk_sections, normalize_name, split_sections
 from .text import humanize_cpp_identifier  # noqa: F401  （测试与外部调用方在用）
 
 
@@ -168,16 +168,12 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         # 文档明说不支持当前版本，内容还留着，但可信度打对折。
         for section in sections:
             section["quality_score"] *= 0.5
-    chunks = [
-        chunk
-        for section in sections
-        for chunk in chunk_section(
-            section,
-            page_title=title,
-            category=category,
-            document_type=document_type,
-        )
-    ]
+    chunks = chunk_sections(
+        sections,
+        page_title=title,
+        category=category,
+        document_type=document_type,
+    )
     entity = entity_descriptor(
         title=title,
         path=path,

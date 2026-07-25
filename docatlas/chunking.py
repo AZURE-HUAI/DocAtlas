@@ -208,6 +208,116 @@ def markdown_units(markdown: str, max_chars: int) -> list[str]:
     return units
 
 
+# 导航类小节是面包屑，内容已经由 heading_path 和层级关系完整表达了，
+# 检索里也一直在给它扣分。既不合并、也不单独成块——直接不进知识库，
+# 省掉几千条纯噪音的索引。小节本身保留：页面链接和层级关系靠它。
+SKIP_CHUNK_TYPES = frozenset({"navigation"})
+
+# 切分后剩下的尾巴短于这个字符数，就并回上一块，别留一条二十来字的孤块。
+RUNT_TAIL_CHARS = 400
+
+
+def _parent_path(heading_path: str) -> str:
+    """`Page > A > x` → `Page > A`。用来判断两个小节是不是同一个话题下的。"""
+    head, separator, _tail = heading_path.rpartition(" > ")
+    return head if separator else heading_path
+
+
+def group_sections_for_chunking(
+    sections: list[dict[str, Any]], target_chars: int
+) -> list[list[dict[str, Any]]]:
+    """把连续的小段落攒成一组，再去切块。
+
+    为什么需要这一步：按标题切出来的小节里，有大量像 `Inputs` 这种
+    只有一行表头的段落。单独成块的话，一块只有二三十个 token，
+    既答不了问题又占检索名额。把同一个父标题下相邻的小段落攒到
+    目标大小，才是一条能用的知识。
+
+    只在两种情况下断开：换了父标题（话题变了），或者攒够了目标大小。
+    本来就超标的大段落自己单独一组，走原来的切分逻辑。
+    """
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_chars = 0
+
+    def flush() -> None:
+        nonlocal current, current_chars
+        if current:
+            groups.append(current)
+            current = []
+            current_chars = 0
+
+    for section in sections:
+        size = len(section["body_md"] or "")
+        if size >= target_chars:
+            flush()
+            groups.append([section])
+            continue
+        if current and (
+            _parent_path(current[0]["heading_path"])
+            != _parent_path(section["heading_path"])
+            or current_chars + size > target_chars
+        ):
+            flush()
+        current.append(section)
+        current_chars += size
+    flush()
+    return groups
+
+
+def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """把一组小节拼成一个"合成小节"，交给原来的切块逻辑处理。
+
+    子标题原样保留在正文里——合并是为了让一块内容足够完整，
+    不是把 `Inputs` / `Outputs` 这些标签抹掉。
+    """
+    if len(group) == 1:
+        return group[0]
+    first = group[0]
+    parts = []
+    for section in group:
+        heading = "#" * min(max(section["heading_level"], 1), 6)
+        parts.append(f"{heading} {section['title']}\n\n{section['body_md']}".strip())
+    parent = _parent_path(first["heading_path"])
+    return {
+        **first,
+        # 归属到组里的第一个小节：chunks 表要求 section_id 非空，
+        # 而这一组在文档里本来就是从它开始的。
+        "position": first["position"],
+        "heading_path": parent,
+        "title": parent.rpartition(" > ")[2] or first["title"],
+        "heading_level": min(section["heading_level"] for section in group),
+        "body_md": "\n\n".join(parts),
+        "knowledge_type": first["knowledge_type"],
+    }
+
+
+def chunk_sections(
+    sections: list[dict[str, Any]],
+    *,
+    page_title: str,
+    category: str,
+    document_type: str | None,
+    target_chars: int = 2200,
+    max_chars: int = 3200,
+) -> list[dict[str, Any]]:
+    """一整页的切块入口：先攒小的，再切大的。"""
+    chunks: list[dict[str, Any]] = []
+    keepers = [s for s in sections if s["knowledge_type"] not in SKIP_CHUNK_TYPES]
+    for group in group_sections_for_chunking(keepers, target_chars):
+        chunks.extend(
+            chunk_section(
+                merge_sections(group),
+                page_title=page_title,
+                category=category,
+                document_type=document_type,
+                target_chars=target_chars,
+                max_chars=max_chars,
+            )
+        )
+    return chunks
+
+
 def chunk_section(
     section: dict[str, Any],
     *,
@@ -238,6 +348,15 @@ def chunk_section(
             current_chars = 0
     if current:
         bodies.append("\n\n".join(current))
+    # 最后剩的一小截并回上一块：一条二十来字的孤块既答不了问题，
+    # 又白占一个检索名额。并回去顶多让上一块略超目标，仍在硬上限内。
+    if (
+        len(bodies) > 1
+        and len(bodies[-1]) < RUNT_TAIL_CHARS
+        and len(bodies[-2]) + 2 + len(bodies[-1]) <= max_chars
+    ):
+        tail = bodies.pop()
+        bodies[-1] = f"{bodies[-1]}\n\n{tail}"
     if not bodies:
         bodies = [section["body_md"] or "(No textual content)"]
 

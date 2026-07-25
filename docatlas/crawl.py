@@ -9,7 +9,7 @@ import time
 from typing import Any
 import zlib
 
-from .config import CATEGORY_PATTERNS
+from .config import CATEGORY_PATTERNS, CHUNKER_VERSION
 from .net import REQUEST_LIMITER
 from .util import log
 from .documents import fetch_document, transform_document
@@ -206,19 +206,30 @@ def crawl_documents(
 
 
 def reprocess_stored_documents(
-    connection: sqlite3.Connection, *, limit: int
+    connection: sqlite3.Connection, *, limit: int, force: bool = False
 ) -> int:
     # 先只取页面清单（很轻），原文一页一页按 id 单独取。
     # 原来是一条带相关子查询的大 JOIN，并且 list() 会把上万份压缩原文
     # 一次性读进内存——页数一多就直接卡死。
-    sql = "SELECT id, url, path, category FROM pages WHERE status='success' ORDER BY id"
-    params: tuple[Any, ...] = ()
+    # 默认只做还没按当前规则加工过的页：中途断掉再跑就是续传，
+    # 而不是从头再来一遍上万页。--force 才全部重做。
+    outdated = "" if force else " AND COALESCE(parser_version,'') != ?"
+    sql = (
+        "SELECT id, url, path, category FROM pages "
+        f"WHERE status='success'{outdated} ORDER BY id"
+    )
+    params: tuple[Any, ...] = () if force else (CHUNKER_VERSION,)
     if limit:
         sql += " LIMIT ?"
-        params = (limit,)
+        params += (limit,)
     pages = list(connection.execute(sql, params))
     total = len(pages)
-    log(f"使用已保存原文重新加工 {total:,} 页，不访问网络")
+    if not total:
+        log(f"没有需要重新加工的页面（都已是 {CHUNKER_VERSION}）")
+    else:
+        log(
+            f"使用已保存原文重新加工 {total:,} 页 → {CHUNKER_VERSION}，不访问网络"
+        )
     processed = 0
     skipped = 0
     reader = connection.cursor()

@@ -272,6 +272,19 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunks_parser ON chunks(parser_version)"
     )
+    # 相邻块指针。刻意不做"内容重叠"：重叠会让 content_hash 失去唯一性，
+    # 直接破坏上下文包的去重，还会把全文索引撑大。要上下文就顺着指针去取。
+    add_column_if_missing(connection, "chunks", "prev_chunk_id", "INTEGER")
+    add_column_if_missing(connection, "chunks", "next_chunk_id", "INTEGER")
+    # 页面级的加工版本。有了它，重切可以只挑没做过的页，中途断掉能接着跑；
+    # 也能覆盖"这一页加工完一个知识块都没有"的情况（纯导航页就是这样）。
+    if add_column_if_missing(connection, "pages", "parser_version", "TEXT"):
+        connection.execute(
+            "UPDATE pages SET parser_version='v1' WHERE status='success'"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_parser ON pages(parser_version)"
+    )
     try:
         connection.execute(
             """
