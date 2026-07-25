@@ -27,7 +27,8 @@
 | 已完成事项的长期历史 | `resolved/` |
 
 实时协作状态以 GitHub Issue 为准，技术事实和历史证据以本目录档案为准。进入开发
-阶段的事项应互相链接；关闭前要同步解决结论和验证结果，避免两边内容冲突。
+阶段的事项应互相链接；GitHub Issue 应链接到本索引中对应编号的稳定锚点，而不是
+会在封存时移动的档案路径。关闭前要同步解决结论和验证结果，避免两边内容冲突。
 
 ## 状态约定
 
@@ -45,11 +46,11 @@
 
 | 编号 | 标题 | 状态 | 优先级 |
 |---|---|---|---|
-| [BUG-001](bugs/unresolved/0001-ask-overview-timeout.md) | `ask` 查询宽泛版本概览时超时且没有进度输出 | open | high |
-| [BUG-002](bugs/unresolved/0002-ask-exact-query-slow-low-relevance.md) | 精确 `ask` 查询仍然偏慢，且结果相关性较低 | open | high |
-| [BUG-003](bugs/unresolved/0003-set-field-of-view-not-found.md) | 本地搜索没有命中已存在的 `Set Field Of View` 蓝图 API 页面 | open | high |
-| [BUG-004](bugs/unresolved/0004-blueprint-property-setter-discovery.md) | 蓝图属性 Setter 难以按节点显示名检索和关联 | open | medium |
-| [BUG-005](bugs/unresolved/0005-related-empty-result-ambiguous.md) | `related` 用空数组同时表示多种失败状态 | open | medium |
+| <a id="bug-001"></a>[BUG-001](bugs/unresolved/0001-ask-overview-timeout.md) | `ask` 查询宽泛版本概览时超时且没有进度输出 | open | high |
+| <a id="bug-002"></a>[BUG-002](bugs/unresolved/0002-ask-exact-query-slow-low-relevance.md) | 精确 `ask` 查询仍然偏慢，且结果相关性较低 | open | high |
+| <a id="bug-003"></a>[BUG-003](bugs/unresolved/0003-set-field-of-view-not-found.md) | 本地搜索没有命中已存在的 `Set Field Of View` 蓝图 API 页面 | open | high |
+| <a id="bug-004"></a>[BUG-004](bugs/unresolved/0004-blueprint-property-setter-discovery.md) | 蓝图属性 Setter 难以按节点显示名检索和关联 | open | medium |
+| <a id="bug-005"></a>[BUG-005](bugs/unresolved/0005-related-empty-result-ambiguous.md) | `related` 用空数组同时表示多种失败状态 | open | medium |
 
 ## 已解决问题
 
@@ -60,9 +61,9 @@
 
 | 编号 | 标题 | 状态 | 优先级 |
 |---|---|---|---|
-| [ENH-001](enhancements/unresolved/0001-skill-installer-portability.md) | Skill 安装器支持多个客户端 | open | medium |
-| [ENH-002](enhancements/unresolved/0002-skill-mcp-integration.md) | Skill 与 MCP 形成明确的组合入口 | open | medium |
-| [ENH-003](enhancements/unresolved/0003-generic-relations-extensible-domains.md) | 关系能力通用化并允许领域独立扩展 | discussion | low |
+| <a id="enh-001"></a>[ENH-001](enhancements/unresolved/0001-skill-installer-portability.md) | Skill 安装器支持多个客户端 | open | medium |
+| <a id="enh-002"></a>[ENH-002](enhancements/unresolved/0002-skill-mcp-integration.md) | Skill 与 MCP 形成明确的组合入口 | open | medium |
+| <a id="enh-003"></a>[ENH-003](enhancements/unresolved/0003-generic-relations-extensible-domains.md) | 关系能力通用化并允许领域独立扩展 | discussion | low |
 
 ## 已解决增强建议
 
@@ -76,6 +77,8 @@
 - 文件名使用四位序号和简短英文描述，例如
   `0006-related-on-demand-fetch.md`。
 - 新议题先放入对应的 `unresolved` 目录。
+- 索引中的编号使用稳定锚点，例如 `<a id="bug-006"></a>`；GitHub Issue
+  回链该锚点，档案封存或重新打开时不需要修改外部链接。
 - 一个文件只讨论一个可独立关闭的事项；相关事项通过 `related` 字段连接。
 - 完成后补充解决记录和验证结果，再移动到对应的 `resolved` 目录。
 - “期望结果”描述用户能够验证的结果，不预先规定内部实现。

@@ -38,7 +38,9 @@
 5. 创建 Pull Request，填写改动、关联事项和实际验证结果。
 
 有对应 GitHub Issue 时，在 PR 描述中写 `Closes #编号`。PR 合并进默认分支后，
-GitHub 会关闭对应 Issue。
+GitHub 会关闭对应 Issue。GitHub Issue 回链
+[`issues/README.md`](issues/README.md) 中对应编号的稳定锚点，不直接链接会在
+封存时移动的档案路径。
 
 ## 完成与封存
 
@@ -49,6 +51,8 @@ GitHub 会关闭对应 Issue。
 - 填写解决日期和 PR；
 - 将档案从 `unresolved/` 移入相同类型的 `resolved/`；
 - 更新 [`issues/README.md`](issues/README.md) 索引。
+
+如果创建 PR 前还不知道 PR URL，创建后追加一个提交填写档案中的 `fix_pr`。
 
 完整的状态映射、重新打开和上下文保护规则见
 [`issues/WORKFLOW.md`](issues/WORKFLOW.md)。
