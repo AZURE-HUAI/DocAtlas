@@ -1,26 +1,42 @@
-"""蓝图 / C++ / 类型交叉关系的构建。"""
+"""交叉关系的构建。
+
+通用的部分留在这里：文档里的官方链接指向另一篇文档，就是一条关系——
+任何文档站都成立。领域特有的推断（蓝图节点对应哪个 C++ 函数之类）
+交给领域知识包，没挂知识包就只有官方链接关系。
+"""
 
 from __future__ import annotations
 
-import re
 import sqlite3
 
+from .config import KNOWLEDGE
+from .dataset import knowledge_hook
 from .util import utc_now
-from .chunking import normalize_name
+
+
+# 官方链接的 link_kind → 关系类型。
+RELATION_TYPE_BY_LINK_KIND = {
+    "hierarchy": "belongs_to",
+    "parameter_type": "parameter_type",
+    "return_type": "return_type",
+    "signature_reference": "signature_reference",
+    "example_reference": "example_reference",
+    "official_reference": "official_reference",
+}
 
 
 def build_cross_index(connection: sqlite3.Connection) -> dict[str, int]:
     now = utc_now()
-    connection.execute(
-        """
-        DELETE FROM relations
-        WHERE evidence_kind IN (
-            'exact_normalized_name',
-            'document_statement',
-            'unreal_display_name_metadata'
-        )
-        """
+    # 只清推导出来的关系；官方链接关系每轮都会重新 INSERT OR IGNORE。
+    derived_kinds = tuple(
+        knowledge_hook(KNOWLEDGE, "DERIVED_EVIDENCE_KINDS", ())
     )
+    if derived_kinds:
+        placeholders = ",".join("?" for _ in derived_kinds)
+        connection.execute(
+            f"DELETE FROM relations WHERE evidence_kind IN ({placeholders})",
+            derived_kinds,
+        )
     connection.execute(
         """
         UPDATE page_links
@@ -54,14 +70,9 @@ def build_cross_index(connection: sqlite3.Connection) -> dict[str, int]:
         )
     )
     for row in official_links:
-        relation_type = {
-            "hierarchy": "belongs_to",
-            "parameter_type": "parameter_type",
-            "return_type": "return_type",
-            "signature_reference": "signature_reference",
-            "example_reference": "example_reference",
-            "official_reference": "official_reference",
-        }.get(row["link_kind"], "official_reference")
+        relation_type = RELATION_TYPE_BY_LINK_KIND.get(
+            row["link_kind"], "official_reference"
+        )
         connection.execute(
             """
             INSERT OR IGNORE INTO relations(
@@ -81,183 +92,10 @@ def build_cross_index(connection: sqlite3.Connection) -> dict[str, int]:
             ),
         )
 
-    candidate_rows = list(
-        connection.execute(
-            """
-            SELECT
-                source.id AS from_id,
-                target.id AS to_id,
-                source.entity_type AS from_type,
-                target.entity_type AS to_type,
-                source.owner_type AS source_owner,
-                target.owner_type AS target_owner,
-                source.source_url
-            FROM entities source
-            JOIN entities target
-                ON target.normalized_name=source.normalized_name
-               AND target.id != source.id
-            WHERE length(source.normalized_name) >= 6
-              AND (
-                (source.entity_type='blueprint_node'
-                    AND target.entity_type='cpp_symbol')
-                OR
-                (source.entity_type='editor_node'
-                    AND target.entity_type IN (
-                        'blueprint_node', 'cpp_symbol', 'python_api'
-                    ))
-              )
-            ORDER BY source.id, target.id
-            """
-        )
-    )
-    grouped: dict[int, list[sqlite3.Row]] = {}
-    for row in candidate_rows:
-        grouped.setdefault(row["from_id"], []).append(row)
-    for rows in grouped.values():
-        if len(rows) > 8:
-            continue
-        for row in rows:
-            relation_type = (
-                "blueprint_cpp_candidate"
-                if row["from_type"] == "blueprint_node"
-                else "node_api_candidate"
-            )
-            owner_matches = (
-                row["source_owner"]
-                and row["target_owner"]
-                and normalize_name(row["source_owner"])
-                == normalize_name(row["target_owner"])
-            )
-            confidence = 0.9 if owner_matches else 0.82
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO relations(
-                    from_entity_id, to_entity_id, relation_type,
-                    evidence_kind, confidence, source_url, note,
-                    created_at, updated_at
-                ) VALUES(?, ?, ?, 'exact_normalized_name', ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["from_id"],
-                    row["to_id"],
-                    relation_type,
-                    confidence,
-                    row["source_url"],
-                    (
-                        "名称与所有者类型均一致"
-                        if owner_matches
-                        else "显示名称标准化后完全一致；需要 AI 核对签名"
-                    ),
-                    now,
-                    now,
-                ),
-            )
+    build_relations = knowledge_hook(KNOWLEDGE, "build_relations")
+    if build_relations:
+        build_relations(connection, now)
 
-    display_name_rows = list(
-        connection.execute(
-            """
-            SELECT DISTINCT
-                blueprint.id AS from_id,
-                cpp.id AS to_id,
-                blueprint.source_url AS blueprint_url,
-                cpp.source_url AS evidence_url,
-                source_alias.alias AS blueprint_name,
-                target_alias.alias AS metadata_display_name
-            FROM entities blueprint
-            JOIN entity_aliases source_alias
-                ON source_alias.entity_id=blueprint.id
-               AND source_alias.alias_type='display_name'
-            JOIN entity_aliases target_alias
-                ON target_alias.normalized_alias=source_alias.normalized_alias
-               AND target_alias.alias_type='unreal_display_name'
-            JOIN entities cpp
-                ON cpp.id=target_alias.entity_id
-               AND cpp.entity_type='cpp_symbol'
-            WHERE blueprint.entity_type='blueprint_node'
-              AND length(source_alias.normalized_alias) >= 6
-            ORDER BY blueprint.id, cpp.id
-            """
-        )
-    )
-    for row in display_name_rows:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO relations(
-                from_entity_id, to_entity_id, relation_type,
-                evidence_kind, confidence, source_url, note,
-                created_at, updated_at
-            ) VALUES(
-                ?, ?, 'blueprint_cpp_api',
-                'unreal_display_name_metadata', 1.0, ?, ?, ?, ?
-            )
-            """,
-            (
-                row["from_id"],
-                row["to_id"],
-                row["evidence_url"],
-                (
-                    f'C++ 文档的 Unreal 元数据声明 DisplayName="'
-                    f'{row["metadata_display_name"]}"；与蓝图节点显示名完全一致'
-                ),
-                now,
-                now,
-            ),
-        )
-
-    target_rows = list(
-        connection.execute(
-            """
-            SELECT DISTINCT
-                e.id AS from_id,
-                e.source_url,
-                c.content_text
-            FROM entities e
-            JOIN chunks c ON c.page_id=e.page_id
-            WHERE e.entity_type='blueprint_node'
-              AND c.content_text LIKE '%Target is %'
-            """
-        )
-    )
-    for row in target_rows:
-        match = re.search(
-            r"\bTarget is ([A-Za-z][A-Za-z0-9_ ]{2,80}?)(?:[.!]|\s{2,}|$)",
-            row["content_text"],
-        )
-        if not match:
-            continue
-        target_name = match.group(1).strip()
-        normalized_target = normalize_name(target_name)
-        targets = list(
-            connection.execute(
-                """
-                SELECT DISTINCT e.id FROM entity_aliases a
-                JOIN entities e ON e.id=a.entity_id
-                WHERE a.normalized_alias=?
-                  AND e.entity_type='cpp_symbol'
-                LIMIT 8
-                """,
-                (normalized_target,),
-            )
-        )
-        for target in targets:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO relations(
-                    from_entity_id, to_entity_id, relation_type,
-                    evidence_kind, confidence, source_url, note,
-                    created_at, updated_at
-                ) VALUES(?, ?, 'targets_type', 'document_statement',
-                          0.92, ?, ?, ?, ?)
-                """,
-                (
-                    row["from_id"],
-                    target["id"],
-                    row["source_url"],
-                    f"文档正文声明 Target is {target_name}",
-                    now,
-                    now,
-                ),
-            )
     connection.commit()
     return {
         "entities": connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0],

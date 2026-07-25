@@ -1,4 +1,8 @@
-"""Epic 结构化 JSON / HTML → Markdown。"""
+"""HTML → Markdown。通用工具，不认识任何具体站点。
+
+图片地址往往是相对路径，拼成绝对地址需要一个基准；基准由来源适配器给，
+这里不写死任何域名。
+"""
 
 from __future__ import annotations
 
@@ -12,14 +16,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .config import IMAGE_EXTENSIONS, MARKDOWN_LINK_RE, MARKDOWN_MARKUP_RE, URL_RE, WHITESPACE_RE
+from .constants import MARKDOWN_LINK_RE, MARKDOWN_MARKUP_RE, WHITESPACE_RE
 
 
 class HTMLToMarkdown(HTMLParser):
-    """Small, dependency-free converter for Epic's already-sanitized HTML."""
+    """Small, dependency-free HTML → Markdown converter."""
 
-    def __init__(self) -> None:
+    def __init__(self, asset_base: str = "") -> None:
         super().__init__(convert_charrefs=True)
+        self.asset_base = asset_base
         self.output: list[str] = []
         self.href_stack: list[str | None] = []
         self.in_pre = False
@@ -86,8 +91,10 @@ class HTMLToMarkdown(HTMLParser):
             src = attrs_dict.get("src") or attrs_dict.get("data-src")
             alt = attrs_dict.get("alt") or "image"
             if src:
-                absolute = urllib.parse.urljoin(
-                    "https://dev.epicgames.com/documentation/", src
+                absolute = (
+                    urllib.parse.urljoin(self.asset_base, src)
+                    if self.asset_base
+                    else src
                 )
                 self.assets.add(absolute)
                 self.append(f"![{alt}]({absolute})")
@@ -162,26 +169,11 @@ class HTMLToMarkdown(HTMLParser):
         return "\n".join(lines).strip()
 
 
-def html_to_markdown(value: str) -> tuple[str, set[str]]:
-    parser = HTMLToMarkdown()
+def html_to_markdown(value: str, asset_base: str = "") -> tuple[str, set[str]]:
+    parser = HTMLToMarkdown(asset_base)
     parser.feed(value)
     parser.close()
     return parser.markdown(), parser.assets
-
-
-def document_list_to_markdown(block: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for item in block.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "Untitled").strip()
-        url = item.get("document_url")
-        description = str(item.get("description") or "").strip()
-        line = f"- [{title}]({url})" if url else f"- {title}"
-        if description:
-            line += f" — {description}"
-        lines.append(line)
-    return "\n".join(lines)
 
 
 _HTML_TAG_RE = re.compile(
@@ -196,11 +188,11 @@ def looks_like_html(text: str) -> bool:
     return bool(_HTML_TAG_RE.search(text))
 
 
-def maybe_html_to_markdown(text: str) -> str:
+def maybe_html_to_markdown(text: str, asset_base: str = "") -> str:
     """只在确实像 HTML 时才转换，避免把普通文本里的 `<` 当标签处理。"""
     if not looks_like_html(text):
         return text
-    markdown, _assets = html_to_markdown(text)
+    markdown, _assets = html_to_markdown(text, asset_base)
     return markdown or text
 
 
@@ -209,6 +201,7 @@ def collect_strings(
     *,
     key: str = "",
     seen: set[str] | None = None,
+    asset_base: str = "",
 ) -> list[str]:
     """Conservative fallback for uncommon structured blocks."""
     if seen is None:
@@ -228,17 +221,23 @@ def collect_strings(
                 "has_live_revision",
             }:
                 continue
-            result.extend(collect_strings(child, key=child_key, seen=seen))
+            result.extend(
+                    collect_strings(
+                        child, key=child_key, seen=seen, asset_base=asset_base
+                    )
+                )
     elif isinstance(value, list):
         for child in value:
-            result.extend(collect_strings(child, key=key, seen=seen))
+            result.extend(
+                collect_strings(child, key=key, seen=seen, asset_base=asset_base)
+            )
     elif isinstance(value, str):
         text = value.strip()
         if not text or text in seen:
             return result
         seen.add(text)
         if key.endswith("_html"):
-            md, _ = html_to_markdown(text)
+            md, _ = html_to_markdown(text, asset_base)
             if md:
                 result.append(md)
         elif key.endswith("_url"):
@@ -248,44 +247,11 @@ def collect_strings(
         elif key in {"description", "content", "text", "caption"}:
             # 这些字段里经常混着行内 HTML（<strong>、<a> 等）。不转换的话
             # 标签会一路带进正文和全文索引，既难读又污染检索。
-            result.append(maybe_html_to_markdown(text))
+            result.append(maybe_html_to_markdown(text, asset_base))
         elif key in {"code", "language"}:
             # 代码原样保留：C++ 模板里的 < > 不是 HTML。
             result.append(text)
     return result
-
-
-def render_blocks(blocks: list[Any]) -> tuple[str, set[str], set[str]]:
-    rendered: list[str] = []
-    assets: set[str] = set()
-    block_types: set[str] = set()
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        block_type = str(block.get("type") or "unknown")
-        block_types.add(block_type)
-        if block.get("settings", {}).get("is_hidden") is True:
-            continue
-        if isinstance(block.get("content_html"), str):
-            markdown, found_assets = html_to_markdown(block["content_html"])
-            if markdown:
-                rendered.append(markdown)
-            assets.update(found_assets)
-        elif block_type == "document_list":
-            markdown = document_list_to_markdown(block)
-            if markdown:
-                rendered.append(markdown)
-        else:
-            fallback = collect_strings(block)
-            if fallback:
-                rendered.append("\n\n".join(fallback))
-
-        for url in URL_RE.findall(json.dumps(block, ensure_ascii=False)):
-            cleaned = html.unescape(url).rstrip(".,;")
-            suffix = Path(urllib.parse.urlsplit(cleaned).path).suffix.lower()
-            if suffix in IMAGE_EXTENSIONS:
-                assets.add(cleaned)
-    return "\n\n".join(rendered).strip(), assets, block_types
 
 
 def plain_text(markdown: str) -> str:

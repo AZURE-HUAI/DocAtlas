@@ -21,7 +21,9 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS
+from .config import CATEGORY_LABELS, DATASET, KNOWLEDGE
+from .crossindex import RELATION_TYPE_BY_LINK_KIND
+from .dataset import knowledge_hook
 from .db import page_slug
 from .documents import fetch_document
 from .store import store_document_result
@@ -31,15 +33,18 @@ from .util import log
 DEFAULT_FETCH_LIMIT = 5
 MAX_FETCH_LIMIT = 40
 
-# 分类优先级：同名时优先给蓝图和教程，C++ 总目录类页面最后。
-CATEGORY_PRIORITY = {
-    "guides": 1,
-    "community_docs": 2,
-    "blueprint_api": 3,
-    "node_reference": 4,
-    "python_api": 5,
-    "cpp_api": 6,
-}
+# 同名候选谁优先，由数据集配置说了算（没配就一视同仁）。
+CATEGORY_PRIORITY = DATASET.category_priority
+
+
+def _priority_case(column: str = "category") -> str:
+    """把优先级表编译成一段 SQL CASE，省得同一份顺序在字典和 SQL 里各写一遍。"""
+    if not CATEGORY_PRIORITY:
+        return "0"
+    branches = " ".join(
+        f"WHEN '{name}' THEN {rank}" for name, rank in CATEGORY_PRIORITY.items()
+    )
+    return f"CASE {column} {branches} ELSE {max(CATEGORY_PRIORITY.values()) + 1} END"
 
 
 def find_uncrawled_candidates(
@@ -57,13 +62,7 @@ def find_uncrawled_candidates(
 
     category_clause = " AND category=?" if category else ""
     category_params: tuple[Any, ...] = (category,) if category else ()
-    order = """
-        ORDER BY CASE category
-            WHEN 'guides' THEN 1 WHEN 'community_docs' THEN 2
-            WHEN 'blueprint_api' THEN 3 WHEN 'node_reference' THEN 4
-            WHEN 'python_api' THEN 5 ELSE 6 END,
-            route_depth, id
-    """
+    order = f"ORDER BY {_priority_case()}, route_depth, id"
     pending = "status IN ('pending', 'failed') AND attempts < 8"
 
     # 第一档：slug 完全一致。绝大多数"我要查某个节点/某个函数"都命中这里。
@@ -212,14 +211,9 @@ def link_new_pages(connection: sqlite3.Connection, page_ids: list[int]) -> int:
         """,
         (*page_ids, *page_ids),
     ):
-        relation_type = {
-            "hierarchy": "belongs_to",
-            "parameter_type": "parameter_type",
-            "return_type": "return_type",
-            "signature_reference": "signature_reference",
-            "example_reference": "example_reference",
-            "official_reference": "official_reference",
-        }.get(row["link_kind"], "official_reference")
+        relation_type = RELATION_TYPE_BY_LINK_KIND.get(
+            row["link_kind"], "official_reference"
+        )
         now = _now()
         connection.execute(
             """
@@ -240,8 +234,10 @@ def link_new_pages(connection: sqlite3.Connection, page_ids: list[int]) -> int:
         )
         created += 1
 
-    # 蓝图 ↔ C++ 的 DisplayName 对应，只针对新页面所属实体。
-    created += _link_display_names(connection, page_ids)
+    # 领域特有的关系（Unreal 的蓝图↔C++ 对应之类），只针对新页面所属实体。
+    link_pages = knowledge_hook(KNOWLEDGE, "link_pages")
+    if link_pages:
+        created += link_pages(connection, page_ids, _now())
     connection.commit()
     return created
 
@@ -250,58 +246,6 @@ def _now() -> str:
     from .util import utc_now
 
     return utc_now()
-
-
-def _link_display_names(
-    connection: sqlite3.Connection, page_ids: list[int]
-) -> int:
-    placeholders = ",".join("?" for _ in page_ids)
-    created = 0
-    for row in connection.execute(
-        f"""
-        SELECT DISTINCT
-            blueprint.id AS from_id,
-            cpp.id AS to_id,
-            cpp.source_url AS evidence_url,
-            target_alias.alias AS metadata_display_name
-        FROM entities blueprint
-        JOIN entity_aliases source_alias
-            ON source_alias.entity_id=blueprint.id
-           AND source_alias.alias_type='display_name'
-        JOIN entity_aliases target_alias
-            ON target_alias.normalized_alias=source_alias.normalized_alias
-           AND target_alias.alias_type='unreal_display_name'
-        JOIN entities cpp
-            ON cpp.id=target_alias.entity_id
-           AND cpp.entity_type='cpp_symbol'
-        WHERE blueprint.entity_type='blueprint_node'
-          AND length(source_alias.normalized_alias) >= 6
-          AND (blueprint.page_id IN ({placeholders})
-               OR cpp.page_id IN ({placeholders}))
-        """,
-        (*page_ids, *page_ids),
-    ):
-        now = _now()
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO relations(
-                from_entity_id, to_entity_id, relation_type, evidence_kind,
-                confidence, source_url, note, created_at, updated_at
-            ) VALUES(?, ?, 'blueprint_cpp_api',
-                     'unreal_display_name_metadata', 1.0, ?, ?, ?, ?)
-            """,
-            (
-                row["from_id"],
-                row["to_id"],
-                row["evidence_url"],
-                f'C++ 文档的 Unreal 元数据声明 DisplayName="'
-                f'{row["metadata_display_name"]}"；与蓝图节点显示名完全一致',
-                now,
-                now,
-            ),
-        )
-        created += 1
-    return created
 
 
 def ensure_available(

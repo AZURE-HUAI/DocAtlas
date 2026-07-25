@@ -6,24 +6,11 @@ import hashlib
 import re
 from typing import Any, Iterable
 
-from .config import CATEGORY_LABELS, HEADING_RE, KNOWLEDGE_TYPE_RULES, VERSION
+from .config import CATEGORY_LABELS, DATASET, HEADING_RE, KNOWLEDGE_TYPE_RULES, SOURCE, VERSION
 from .htmlmd import plain_text
-
-
-def normalize_name(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
-
-
-def humanize_cpp_identifier(value: str) -> str:
-    value = value.split("::")[-1].replace("_", " ")
-    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
-    value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def heading_anchor(value: str) -> str:
-    anchor = re.sub(r"[^a-z0-9]+", "", value.casefold())
-    return anchor or "content"
+# 这几个小工具搬到 text.py 了（适配器和知识包要用，不能绕回 config）；
+# 这里继续导出，老的 from .chunking import normalize_name 照常可用。
+from .text import heading_anchor, humanize_cpp_identifier, normalize_name  # noqa: F401
 
 
 def classify_knowledge_type(
@@ -36,7 +23,8 @@ def classify_knowledge_type(
         if pattern.search(heading):
             return knowledge_type
     if position == 0:
-        if category in {"blueprint_api", "cpp_api", "python_api", "node_reference"}:
+        # API 参考的开头是"这个函数干嘛"的摘要；教程的开头是全篇概述。
+        if category in DATASET.api_categories:
             return "summary"
         return "overview"
     return "details"
@@ -386,9 +374,10 @@ def split_sections(
         heading = "#" * min(max(section["heading_level"], 1), 6)
         content_md = f"{heading} {section['title']}\n\n{body}\n\n{source_line}".strip()
         text = plain_text(body)
-        quality_score = 1.0 if text and source_url.startswith(
-            "https://dev.epicgames.com/documentation/"
-        ) else 0.7
+        # 有正文、且出处是官方地址，才算满分。
+        quality_score = (
+            1.0 if text and SOURCE.is_official_url(DATASET, source_url) else 0.7
+        )
         sections.append(
             {
                 **section,

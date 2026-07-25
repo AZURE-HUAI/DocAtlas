@@ -8,9 +8,17 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .config import CATEGORY_LABELS, CATEGORY_PATTERNS, DATA_DIR, DB_PATH, LANGUAGE, VERSION
+from .config import (
+    CATEGORY_LABELS,
+    CATEGORY_PATTERNS,
+    DATA_DIR,
+    DATASET,
+    DB_PATH,
+    LANGUAGE,
+    SOURCE,
+    VERSION,
+)
 from .util import utc_now
-from .discover import canonical_source_url
 
 
 def database_stats(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -79,6 +87,12 @@ def write_manifest(connection: sqlite3.Connection) -> Path:
     return manifest_path
 
 
+def _home_url() -> str:
+    """数据集首页地址。没配 home_path 就不写这一行，而不是编一个假地址。"""
+    home_path = DATASET.option("home_path")
+    return SOURCE.canonical_url(DATASET, home_path) if home_path else ""
+
+
 def write_reports(
     connection: sqlite3.Connection, *, manifest: bool = False
 ) -> dict[str, Any]:
@@ -92,10 +106,13 @@ def write_reports(
         write_manifest(connection)
 
     router_lines = [
-        f"# Unreal Engine {VERSION} 本地文档总路由",
+        f"# {DATASET.name} 本地知识库总路由",
         "",
-        f"- 官方入口：[{canonical_source_url('/documentation/unreal-engine/unreal-engine-5-8-documentation')}]"
-        f"({canonical_source_url('/documentation/unreal-engine/unreal-engine-5-8-documentation')})",
+        *(
+            [f"- 官方入口：[{home_url}]({home_url})"]
+            if (home_url := _home_url())
+            else []
+        ),
         f"- 文档语言：{LANGUAGE}",
         f"- 页面总数：{stats['pages_total']:,}",
         f"- 成功页面：{stats['pages'].get('success', 0):,}",
@@ -132,7 +149,7 @@ def write_reports(
             "```",
             "",
             "`ask` 会按 token 预算返回整理好的知识块和 Epic DOC 原出处，是 AI 的默认入口。"
-            "结构化总索引位于 `ue58_docs.sqlite3`；逐页清单需要时用 "
+            "结构化总索引位于 `knowledge.sqlite3`；逐页清单需要时用 "
             "`python ue58_docs.py stats --manifest` 生成到 `manifest.jsonl`；"
             "整本 Markdown 位于 `exports/`（体积大，AI 不要整篇读）。",
             "",
@@ -140,7 +157,7 @@ def write_reports(
             "",
             "- 每个知识小节都单独保存 `source_url`。",
             "- 每个检索块末尾都重复写入 `DOC 原出处`。",
-            "- 原始 JSON 按内容哈希追加保存，可追溯到 Epic 返回的历史结构。",
+            "- 原始响应按内容哈希追加保存，可追溯到官方返回过的历史结构。",
             "- 交叉关系保存证据类型与置信度，不把候选映射冒充官方声明。",
             "- 重跑采集器默认只补抓未完成或失败项目，不会重复成功页面。",
             "",

@@ -17,12 +17,14 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# config 在导入时就固定路径，所以必须先指到临时目录，避免动到真实知识库。
+# config 在导入时就固定路径，所以必须先把数据根指到临时目录，避免动到真实知识库。
+# 数据集仍用真实的那一份配置——这样 datasets/*.toml 本身也在测试覆盖范围内。
 _TEMP_HOME = tempfile.mkdtemp(prefix="docatlas_test_")
 os.environ["DOCATLAS_HOME"] = _TEMP_HOME
-os.environ["DOCATLAS_DATASET"] = "test-dataset"
+os.environ.pop("DOCATLAS_DATASET", None)
 
-from docatlas import chunking, context, net, ondemand, search, store  # noqa: E402
+from docatlas import chunking, config, context, dataset, net, ondemand, search, store  # noqa: E402
+from docatlas.knowledge import unreal  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
 from docatlas.documents import transform_document  # noqa: E402
 
@@ -531,6 +533,118 @@ class EndToEndTests(unittest.TestCase):
         )
         markdown = context.render_context_markdown(pack)
         self.assertIn("没有命中", markdown)
+
+
+class DatasetLayeringTests(unittest.TestCase):
+    """核心不该认识 Epic 或 Unreal——这些用例守住那条界线。"""
+
+    def write_dataset(self, name: str, body: str) -> Path:
+        directory = Path(tempfile.mkdtemp(prefix="docatlas_ds_"))
+        (directory / f"{name}.toml").write_text(body, encoding="utf-8")
+        return directory
+
+    def test_missing_dataset_names_what_is_available(self):
+        directory = self.write_dataset("only-this", 'id="only-this"\nversion="1"\nsource="x"')
+        with self.assertRaises(SystemExit) as caught:
+            dataset.load_dataset("nope", directory)
+        self.assertIn("only-this", str(caught.exception))
+
+    def test_id_must_match_filename(self):
+        # 不一致会让数据目录和配置对不上，宁可拒绝启动也不要静默用错目录。
+        directory = self.write_dataset("a", 'id="b"\nversion="1"\nsource="x"')
+        with self.assertRaises(SystemExit) as caught:
+            dataset.load_dataset("a", directory)
+        self.assertIn("不一致", str(caught.exception))
+
+    def test_unknown_adapter_is_a_clear_error(self):
+        directory = self.write_dataset(
+            "d", 'id="d"\nversion="1"\nsource="no_such_site"'
+        )
+        loaded = dataset.load_dataset("d", directory)
+        with self.assertRaises(SystemExit) as caught:
+            dataset.load_source(loaded)
+        self.assertIn("epic_ue", str(caught.exception))
+
+    def test_knowledge_pack_is_optional(self):
+        directory = self.write_dataset("d", 'id="d"\nversion="1"\nsource="epic_ue"')
+        loaded = dataset.load_dataset("d", directory)
+        self.assertIsNone(dataset.load_knowledge(loaded))
+        # 没挂知识包时，取任何能力都应安静地拿到默认值，而不是崩溃。
+        self.assertEqual(dataset.knowledge_hook(None, "build_relations", None), None)
+        self.assertEqual(dataset.knowledge_hook(None, "RELATION_LABELS", {}), {})
+
+    def test_adapter_urls_follow_the_dataset_version(self):
+        # "加一个版本 = 改配置"的核心保证：换 version 就换出正确的地址。
+        directory = self.write_dataset(
+            "d",
+            'id="d"\nversion="9.9"\nsource="epic_ue"\nlanguage="en-US"\n'
+            '[source_options]\nbase_url="https://example.test"\n'
+            'document_api="https://example.test/api"\n'
+            'doc_prefix="/documentation/unreal-engine/"\n',
+        )
+        loaded = dataset.load_dataset("d", directory)
+        adapter = dataset.load_source(loaded)
+        self.assertIn("9.9", adapter.canonical_url(loaded, "/documentation/unreal-engine/x"))
+        self.assertTrue(
+            adapter.canonical_url(loaded, "/documentation/unreal-engine/x").startswith(
+                "https://example.test/"
+            )
+        )
+        self.assertIn("application_version=9.9", adapter.document_request_url(loaded, "/x"))
+
+    def test_adapter_rejects_other_hosts_and_languages(self):
+        loaded = config.DATASET
+        adapter = config.SOURCE
+        self.assertIsNone(adapter.normalize_link_target(loaded, "https://example.com/x"))
+        self.assertIsNone(
+            adapter.normalize_location(
+                loaded, "https://dev.epicgames.com/documentation/unreal-engine/x?lang=zh-CN"
+            )
+        )
+        # 语言前缀要剥掉，否则同一篇文档会被当成两页。
+        path, _ = adapter.normalize_location(
+            loaded, "https://dev.epicgames.com/documentation/zh-cn/unreal-engine/x"
+        )
+        self.assertEqual(path, "/documentation/unreal-engine/x")
+
+
+class UnrealKnowledgeTests(unittest.TestCase):
+    def test_k2_prefix_is_stripped_into_searchable_aliases(self):
+        aliases = dict(
+            (alias_type, alias)
+            for alias, alias_type in unreal.extra_entity_aliases(
+                title="UKismetSystemLibrary::K2_SetTimer",
+                category="cpp_api",
+                segments=["api", "Runtime", "Engine"],
+            )
+        )
+        self.assertEqual(aliases["k2_base_name"], "SetTimer")
+        self.assertEqual(aliases["k2_humanized_name"], "Set Timer")
+
+    def test_type_prefix_stripped_only_on_class_pages(self):
+        class_page = dict(
+            (t, a)
+            for a, t in unreal.extra_entity_aliases(
+                title="AActor", category="cpp_api", segments=["api"]
+            )
+        )
+        self.assertEqual(class_page["unreal_prefix_stripped"], "Actor")
+        # 成员页的首字母大写不是类型前缀，不能脱。
+        member_page = dict(
+            (t, a)
+            for a, t in unreal.extra_entity_aliases(
+                title="AActor::Tick", category="cpp_api", segments=["api"]
+            )
+        )
+        self.assertNotIn("unreal_prefix_stripped", member_page)
+
+    def test_non_cpp_categories_get_no_unreal_aliases(self):
+        self.assertEqual(
+            unreal.extra_entity_aliases(
+                title="Nanite", category="guides", segments=["nanite"]
+            ),
+            set(),
+        )
 
 
 if __name__ == "__main__":

@@ -1,26 +1,34 @@
-"""常量、路径与分类定义。整个知识库唯一的配置来源。"""
+"""路径解析，以及当前生效的数据集、来源适配器、领域知识包。
+
+站点特有的东西（网址、分类规则、实体类型）都搬进 datasets/*.toml 和
+docatlas/sources/ 了；跟站点无关的常量在 constants.py。
+这个文件里再也不该出现任何具体产品或网站的名字。
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 
-
-VERSION = "5.8"
-LANGUAGE = "en-US"
-# 切块规则的版本号。规则一改就要 +1，chunks.parser_version 记录每块由哪版产出，
-# 中途换规则时才分得清哪些块是旧的、需要重切。
-CHUNKER_VERSION = "v1"
-USER_AGENT = "UE58OfflineDocs/1.0 (+local educational archive)"
-SITEMAP_INDEX_URL = "https://dev.epicgames.com/documentation/sitemap.xml"
-DOCUMENT_API_URL = (
-    "https://dev.epicgames.com/community/api/documentation/document.json"
+from .constants import (  # noqa: F401  （给老的 from .config import … 留着）
+    CHUNKER_VERSION,
+    HEADING_RE,
+    IMAGE_EXTENSIONS,
+    KNOWLEDGE_TYPE_RULES,
+    MARKDOWN_LINK_RE,
+    MARKDOWN_MARKUP_RE,
+    MARKDOWN_TARGET_RE,
+    RETRYABLE_HTTP_CODES,
+    URL_RE,
+    USER_AGENT,
+    WHITESPACE_RE,
 )
-DOC_PREFIX = "/documentation/unreal-engine/"
+from .dataset import load_dataset, load_knowledge, load_source
+
 
 # 代码根：本包的上一级，也就是 Git 仓库根。放程序，不放数据。
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DATASET_CONFIG_DIR = REPO_ROOT / "datasets"
 
 # 数据根：所有数据集的家。默认 <仓库>/data，可用 DOCATLAS_HOME 挪到别的盘。
 # 代码目录和数据目录从此各归各的，加一个新版本不需要复制一份程序。
@@ -36,57 +44,16 @@ DB_PATH = DATA_DIR / "knowledge.sqlite3"
 EXPORT_DIR = DATA_DIR / "exports"
 ASSET_DIR = DATA_DIR / "assets"
 
-CATEGORY_PATTERNS = {
-    "guides": "/unreal_engine/external/",
-    "community_docs": "/unreal_engine/epic_developer_community/",
-    "blueprint_api": "/unreal_engine/ue_blueprint_api_external/",
-    "cpp_api": "/unreal_engine/ue_cpp_api_external/",
-    "python_api": "/unreal_engine/ue_python_api_external/",
-    "node_reference": "/unreal_engine/ue_noderef_api_external/",
-}
+# 一个进程只服务一个数据集，在这里定下来。要查别的数据集就换 DOCATLAS_DATASET
+# 再跑一次——比让全套代码随时准备切换简单得多，也不会有状态串味的问题。
+DATASET = load_dataset(DATASET_ID, DATASET_CONFIG_DIR)
+SOURCE = load_source(DATASET)
+KNOWLEDGE = load_knowledge(DATASET)
 
-CATEGORY_LABELS = {
-    "guides": "教程与功能文档",
-    "community_docs": "Epic 社区维护文档",
-    "blueprint_api": "蓝图 API",
-    "cpp_api": "C++ API",
-    "python_api": "Python API",
-    "node_reference": "节点参考",
-}
-
-RETRYABLE_HTTP_CODES = {403, 408, 425, 429, 500, 502, 503, 504}
-IMAGE_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".svg",
-    ".avif",
-}
-URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+", re.IGNORECASE)
-HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-MARKDOWN_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]+\)")
-MARKDOWN_TARGET_RE = re.compile(
-    r"(?<!!)\[([^\]]*)\]\((https?://[^)\s]+)(?:\s+\"[^\"]*\")?\)",
-    re.IGNORECASE,
-)
-MARKDOWN_MARKUP_RE = re.compile(r"[`*_>#|~]+")
-WHITESPACE_RE = re.compile(r"[ \t]+")
-KNOWLEDGE_TYPE_RULES = (
-    ("parameters", re.compile(r"\b(inputs?|parameters?|arguments?|properties)\b", re.I)),
-    ("returns", re.compile(r"\b(outputs?|returns?|return value|results?)\b", re.I)),
-    ("examples", re.compile(r"\b(examples?|usage|how to use|walkthrough)\b", re.I)),
-    ("remarks", re.compile(r"\b(remarks?|notes?|cautions?|warnings?|limitations?|considerations?)\b", re.I)),
-    ("signature", re.compile(r"\b(syntax|declaration|definition|signature|header|include)\b", re.I)),
-    ("navigation", re.compile(r"\b(navigation|breadcrumbs?|hierarchy)\b", re.I)),
-    ("references", re.compile(r"\b(related|references?|see also|prerequisites?)\b", re.I)),
-)
-ENTITY_TYPES = {
-    "guides": "guide",
-    "community_docs": "document",
-    "blueprint_api": "blueprint_node",
-    "cpp_api": "cpp_symbol",
-    "python_api": "python_api",
-    "node_reference": "editor_node",
-}
+VERSION = DATASET.version
+LANGUAGE = DATASET.language
+CATEGORY_PATTERNS = DATASET.categories
+CATEGORY_LABELS = DATASET.category_labels
+ENTITY_TYPES = DATASET.entity_types
+# 路径前缀：什么样的路径才算"这个数据集的一篇文档"。
+DOC_PREFIX = DATASET.option("doc_prefix", "/")

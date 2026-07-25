@@ -6,14 +6,7 @@ from pathlib import Path
 import sqlite3
 import urllib.parse
 
-from .config import (
-    CHUNKER_VERSION,
-    DB_PATH,
-    DOC_PREFIX,
-    LANGUAGE,
-    SITEMAP_INDEX_URL,
-    VERSION,
-)
+from .config import DATASET, DB_PATH, DOC_PREFIX, LANGUAGE, SOURCE, VERSION
 from .util import utc_now
 
 
@@ -350,11 +343,15 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.executemany(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
         [
+            ("dataset", DATASET.id),
+            ("product", DATASET.product),
             ("ue_version", VERSION),
             ("language", LANGUAGE),
-            ("source", "Epic Developer Community"),
-            ("sitemap_index", SITEMAP_INDEX_URL),
-            ("schema_version", "2"),
+            ("source", DATASET.name),
+            ("source_adapter", DATASET.source),
+            ("knowledge_pack", DATASET.knowledge or ""),
+            ("sitemap_index", SOURCE.sitemap_index_url(DATASET)),
+            ("schema_version", "3"),
         ],
     )
     backfill_page_metadata(connection)
@@ -423,7 +420,7 @@ def page_slug(path: str) -> str:
     `/…/UKismetSystemLibrary/K2_SetTimer` → `k2settimer`，
     而用户问的 `K2_SetTimer` 标准化后也是 `k2settimer`——两边能对上。
     """
-    from .chunking import normalize_name
+    from .text import normalize_name
 
     tail = urllib.parse.unquote(path.rstrip("/").rsplit("/", 1)[-1])
     return normalize_name(tail)
