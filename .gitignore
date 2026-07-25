@@ -32,3 +32,6 @@ _scratch/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 迁移前冷备份（数据库快照，体积巨大）
+_backup/
