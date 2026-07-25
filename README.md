@@ -13,6 +13,34 @@ Python API、节点参考、社区文档）。加别的版本或别的产品见[
 
 ---
 
+## 零、从零开始（第一次用）
+
+只要有 Python 3.11+ 就行，**不需要装任何第三方包**。
+
+```powershell
+git clone <这个仓库> DocAtlas
+cd DocAtlas
+python -m docatlas crawl --discovery-only    # 第一步：枚举全站页面清单
+```
+
+第一步只读官方站点地图、不抓正文，几十分钟，产出一份冻结的清单
+（UE 5.8 是 199,883 页）。**做完这一步就能用了**——
+
+```powershell
+.\docatlas.ps1 ask "Nanite"
+```
+
+因为清单里已经记着每一页在哪，`ask` 查到本地没有会当场把那一页抓回来。
+**不需要先把二十万页全下载下来。**
+
+想要离线可用（出差、断网、或者就是想要全量），再跑：
+
+```powershell
+.\docatlas.ps1 start      # 抓正文，随时可中断，下次自动续传
+```
+
+---
+
 ## 一、你只需要记这几条命令
 
 ```powershell

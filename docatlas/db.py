@@ -11,6 +11,9 @@ from .util import utc_now
 
 
 def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
+    # 第一次用的时候数据目录还不存在，不建的话 sqlite 只会甩一句
+    # "unable to open database file"，看不出该干嘛。
+    path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=120)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")

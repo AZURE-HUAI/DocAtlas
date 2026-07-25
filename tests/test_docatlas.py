@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -633,6 +634,44 @@ class ChunkMergingTests(unittest.TestCase):
             make_section("Outputs", "b", position=4, knowledge_type="returns"),
         ]
         self.assertEqual(self.chunk(sections)[0]["section_position"], 3)
+
+
+class ImportSmokeTests(unittest.TestCase):
+    """每个模块都要能导入。
+
+    看着像废话，但它抓过一个真实的错：cli.py 里写坏了一个 f-string，
+    69 个用例全过——因为没有一个用例 import 过 cli。
+    语法错误不该等到用户敲命令时才发现。
+    """
+
+    def test_every_module_imports(self):
+        import importlib
+        import pkgutil
+
+        import docatlas
+
+        failures = []
+        for module in pkgutil.walk_packages(
+            docatlas.__path__, prefix="docatlas."
+        ):
+            try:
+                importlib.import_module(module.name)
+            except Exception as exc:  # noqa: BLE001 —— 就是要抓全部
+                failures.append(f"{module.name}: {type(exc).__name__}: {exc}")
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_cli_parser_builds_and_every_command_has_a_handler(self):
+        from docatlas.cli import build_parser
+
+        parser = build_parser()
+        actions = [
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        ]
+        self.assertTrue(actions, "命令行应该有子命令")
+        for name, sub in actions[0].choices.items():
+            self.assertTrue(
+                sub.get_default("func"), f"子命令 {name} 没有绑定实现"
+            )
 
 
 class EvidenceCoverageTests(unittest.TestCase):
