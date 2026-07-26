@@ -83,6 +83,7 @@
 | <a id="enh-002"></a>[ENH-002](enhancements/resolved/0002-skill-mcp-integration.md) | Skill 与 MCP 形成明确的组合入口 | resolved | medium |
 | <a id="enh-004"></a>[ENH-004](enhancements/resolved/0004-non-sitemap-inventory-sources.md) | 来源适配器支持非 sitemap 的页面清单 | resolved | medium |
 | <a id="enh-008"></a>[ENH-008](enhancements/resolved/0008-structured-version-intent-contract.md) | 版本意图的跨层结构化合同 | resolved | high |
+| <a id="enh-009"></a>[ENH-009](enhancements/resolved/0009-fourth-domain-generalisation-acceptance.md) | 用陌生领域验收分层架构：Roblox Creator Hub | resolved | high |
 
 封存说明见 [`enhancements/resolved/README.md`](enhancements/resolved/README.md)。
 
