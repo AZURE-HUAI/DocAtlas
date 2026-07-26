@@ -61,12 +61,22 @@ def using(**overrides):
 
 def temp_db(case: unittest.TestCase) -> sqlite3.Connection:
     """一个建好表的临时库，用例结束时自动关闭并删除。"""
+    return temp_library(case)[0]
+
+
+def temp_library(case: unittest.TestCase) -> tuple[sqlite3.Connection, Path]:
+    """一个建好表的临时数据集目录，返回 (连接, 数据目录)。
+
+    库文件必须叫 knowledge.sqlite3：Workspace 就是按这个名字找库的，
+    随便起个名字会让"这个数据集还没建过"的判断一直成立。
+    """
     directory = tempfile.TemporaryDirectory()
     case.addCleanup(directory.cleanup)
-    connection = connect_db(Path(directory.name) / "t.sqlite3")
+    data_dir = Path(directory.name)
+    connection = connect_db(data_dir / "knowledge.sqlite3")
     case.addCleanup(connection.close)
     initialize_db(connection)
-    return connection
+    return connection, data_dir
 
 
 def seed_entity(
@@ -995,7 +1005,49 @@ class McpProtocolTests(unittest.TestCase):
         self.assertNotIn("error", reply)
 
     def test_bad_chunk_id_is_rejected_politely(self):
-        self.assertIn("看不懂", mcpserver.tool_show({"chunk_id": "; DROP TABLE"}))
+        # 调用方能改的错要走 isError 结果，而不是 JSON-RPC 协议错误：
+        # 协议错误是"这个请求不合法"，这里是"请求合法但参数得改"。
+        reply = mcpserver.handle({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {
+                "name": "docatlas_show",
+                "arguments": {"chunk_id": "; DROP TABLE"},
+            },
+        })
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("看不懂", reply["result"]["content"][0]["text"])
+        self.assertNotIn("Traceback", reply["result"]["content"][0]["text"])
+
+    def test_an_unknown_dataset_id_does_not_kill_the_server(self):
+        """load_dataset 用 SystemExit 报错，普通 except Exception 抓不到它。
+
+        不接住的话，一个拼错的 dataset_id 会让整个 MCP 进程直接退出。
+        """
+        reply = mcpserver.handle({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {
+                "name": "docatlas_ask",
+                "arguments": {"query": "x", "dataset_id": "no-such-library"},
+            },
+        })
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("no-such-library", reply["result"]["content"][0]["text"])
+
+    def test_tools_do_not_hardcode_one_datasets_categories(self):
+        """分类 enum 写进协议，换个数据集就成了骗人的。
+
+        客户端会缓存 tools/list，enum 里列着另一个库的分类比不列更糟。
+        """
+        for tool in mcpserver.TOOLS:
+            category = tool["inputSchema"]["properties"].get("category")
+            if category:
+                self.assertNotIn("enum", category, tool["name"])
+
+    def test_every_query_tool_can_choose_a_dataset(self):
+        for tool in mcpserver.TOOLS:
+            self.assertIn(
+                "dataset_id", tool["inputSchema"]["properties"], tool["name"]
+            )
 
 
 class DatasetLayeringTests(unittest.TestCase):
@@ -1894,6 +1946,139 @@ class InventoryCoverageTests(unittest.TestCase):
         self.assertEqual(gaps["uncovered_areas"], 0)
 
 
+class McpMultiDatasetTests(unittest.TestCase):
+    """ENH-006 的正题：一个 MCP 连接同时服务多个文档库。
+
+    以前一个进程锁死一个数据集，查第二个库要在客户端里再配一条 server 记录。
+    实测的结果是没人配——181 次跨库调用全部退回了命令行。
+    """
+
+    def setUp(self):
+        self.libraries = {}
+        for key, title in (("lib-a", "Alpha 手册"), ("lib-b", "Beta 手册")):
+            connection, data_dir = temp_library(self)
+            seed_entity(connection, entity_type="guide", name=f"{title} 首页",
+                        path=f"/{key}/index")
+            store.store_document_result(
+                connection,
+                transform_document(
+                    FakeRow(
+                        id=connection.execute(
+                            "INSERT INTO pages(url, path, category, status,"
+                            " route_depth) VALUES(?, ?, 'guides', 'pending', 2)",
+                            (f"https://{key}.invalid/topic", f"/{key}/topic"),
+                        ).lastrowid,
+                        path=f"/{key}/topic",
+                        url=f"https://{key}.invalid/topic",
+                        category="guides",
+                    ),
+                    make_document(f"{title} 专题", [text_block(f"只有 {title} 才有这段话")]),
+                ),
+                "guides",
+            )
+            connection.commit()
+            base = runtime.active()
+            self.libraries[key] = dataclasses.replace(
+                base,
+                dataset=dataclasses.replace(base.dataset, id=key, name=title,
+                                            product=title, knowledge=None),
+                knowledge=None,
+                data_dir=data_dir,
+            )
+
+        real_workspace = runtime.workspace
+
+        def routed(dataset_id):
+            if dataset_id in self.libraries:
+                return self.libraries[dataset_id]
+            return real_workspace(dataset_id)
+
+        runtime.workspace = routed
+        mcpserver.runtime.workspace = routed
+        self.addCleanup(setattr, runtime, "workspace", real_workspace)
+        self.addCleanup(setattr, mcpserver.runtime, "workspace", real_workspace)
+
+    def _call(self, tool, arguments):
+        reply = mcpserver.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        })
+        self.assertNotIn("error", reply, reply)
+        return reply["result"]
+
+    def test_one_connection_answers_from_two_different_libraries(self):
+        a = self._call("docatlas_ask",
+                       {"query": "专题", "dataset_id": "lib-a", "no_fetch": True})
+        b = self._call("docatlas_ask",
+                       {"query": "专题", "dataset_id": "lib-b", "no_fetch": True})
+        self.assertFalse(a["isError"], a)
+        self.assertFalse(b["isError"], b)
+        self.assertIn("只有 Alpha 手册 才有这段话", a["content"][0]["text"])
+        self.assertIn("只有 Beta 手册 才有这段话", b["content"][0]["text"])
+        # 反向保证：真的是两个库，不是同一个库回了两次。
+        self.assertNotIn("Beta", a["content"][0]["text"])
+
+    def test_routing_does_not_leak_into_the_next_call(self):
+        """切库必须在调用结束后还原，否则下一次不带 dataset_id 的调用会串味。"""
+        before = runtime.active().id
+        self._call("docatlas_ask",
+                   {"query": "专题", "dataset_id": "lib-b", "no_fetch": True})
+        self.assertEqual(runtime.active().id, before)
+
+    def test_structured_results_carry_the_dataset_identity(self):
+        result = self._call(
+            "docatlas_ask",
+            {"query": "专题", "dataset_id": "lib-a", "no_fetch": True,
+             "format": "json"},
+        )
+        payload = result["structuredContent"]
+        self.assertEqual(payload["dataset"]["dataset_id"], "lib-a")
+        self.assertEqual(payload["dataset"]["product"], "Alpha 手册")
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["knowledge"][0]["knowledge_id"].startswith("K"))
+        self.assertTrue(payload["contract_version"])
+        # 不认识 structuredContent 的客户端要能从文本里读到同样的内容。
+        self.assertEqual(json.loads(result["content"][0]["text"]), payload)
+
+    def test_markdown_stays_the_default_so_queries_do_not_pay_for_json(self):
+        markdown = self._call(
+            "docatlas_ask",
+            {"query": "专题", "dataset_id": "lib-a", "no_fetch": True},
+        )
+        self.assertNotIn("structuredContent", markdown)
+        self.assertLess(
+            len(markdown["content"][0]["text"]),
+            len(
+                self._call(
+                    "docatlas_ask",
+                    {"query": "专题", "dataset_id": "lib-a", "no_fetch": True,
+                     "format": "json"},
+                )["content"][0]["text"]
+            ),
+        )
+
+    def test_listing_reports_each_library_and_its_capabilities(self):
+        payload = self._call(
+            "docatlas_list_datasets", {"dataset_id": "lib-a", "format": "json"}
+        )["structuredContent"]
+        report = payload["datasets"][0]
+        self.assertEqual(report["dataset_id"], "lib-a")
+        self.assertEqual(report["state"], "ready")
+        self.assertIn("guides", report["categories"])
+        # 没挂领域包也要有通用关系能力，不能显示成"没有关系功能"。
+        self.assertIsNone(report["knowledge_pack"])
+        self.assertIn("official_link", report["evidence_kinds"])
+        self.assertIn("belongs_to", report["relation_types"])
+
+    def test_a_wrong_category_lists_the_valid_ones(self):
+        result = self._call(
+            "docatlas_ask",
+            {"query": "专题", "dataset_id": "lib-a", "category": "not_a_category"},
+        )
+        self.assertTrue(result["isError"])
+        self.assertIn("guides", result["content"][0]["text"])
+
+
 class RelationContractTests(unittest.TestCase):
     """ENH-006 的验收线：新数据集只实现一个函数就能建出真关系。
 
@@ -2200,7 +2385,7 @@ class McpRelatedEvidenceTests(unittest.TestCase):
         )
         self.connection.commit()
         original_open = mcpserver._open
-        mcpserver._open = lambda: self._NoCloseConnection(self.connection)
+        mcpserver._open = lambda _workspace: self._NoCloseConnection(self.connection)
         try:
             output = mcpserver.tool_related({"subject": "Alpha Component"})
         finally:

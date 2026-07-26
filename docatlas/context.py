@@ -35,6 +35,7 @@ from .ondemand import (
     inventory_lookup,
     missing_exact_pages,
 )
+from .relations import page_link_status
 from .runtime import active
 from .search import query_names, search_chunks
 
@@ -354,6 +355,7 @@ def related_payload(
             {
                 "entity": {
                     "id": entity["id"],
+                    "page_id": entity["page_id"],
                     "name": entity["canonical_name"],
                     "type": entity["entity_type"],
                     "qualified_name": entity["qualified_name"],
@@ -397,12 +399,31 @@ def related_payload(
             '先用 python -m docatlas search "<关键词>" 拿到当前有效的 K 编号。',
         ]
     elif status == "entity_found_but_no_relations":
-        result["next_steps"] = [
-            "这个实体在库里，但一条交叉关系都没有。多半是它指向的页面还没抓；"
-            "也可能这一页确实不指向别处。",
-            "先按名字补抓相关页面，再重建关系："
-            'python -m docatlas get "<相关页面名>" 然后 python -m docatlas cross-index。',
-        ]
+        # 笼统说一句"没有关系"没法照着做。它指向的页面还没抓、还是那些页面
+        # 压根不在清单里，下一步完全不同，所以直接把目标状态查出来说。
+        targets = page_link_status(
+            connection, [item["entity"]["page_id"] for item in entities]
+        )
+        result["link_targets"] = targets
+        steps: list[str] = []
+        if targets["pending"]:
+            steps.append(
+                f"这一页链向 {len(targets['pending'])} 个清单里已有、但正文还没抓的页面。"
+                "取回来关系就会出现："
+            )
+            steps.extend(f'  python -m docatlas get "{t["path"]}"' for t in targets["pending"])
+        if targets["missing"]:
+            steps.append(
+                f"另有 {len(targets['missing'])} 个链接目标不在全站清单里"
+                "——官方有，是来源适配器没有枚举到，抓多少次都不会有："
+            )
+            steps.extend(f"  {t['url']}" for t in targets["missing"])
+        if not steps:
+            steps = [
+                "这个实体在库里，它指向的页面也都抓过了，只是这一页确实不指向别处。",
+                "换个更具体的名字查，或者用 search 看看它出现在哪些页面里。",
+            ]
+        result["next_steps"] = steps
     return result
 
 
