@@ -1607,16 +1607,36 @@ class InventoryCandidateTests(unittest.TestCase):
 
     def test_weak_candidates_are_reported_but_never_fetched(self):
         """"线索不够所以没敢抓"和"确实没有这一页"要分开说。"""
-        lookup = ondemand.inventory_lookup(self.connection, "camera settings")
+        query = "camera aspect ratio settings"
+        lookup = ondemand.inventory_lookup(self.connection, query)
         # 不敢抓：没有一页能确定就是它。
         self.assertEqual(lookup["pending_pages"], [])
-        # 但也不能说"官方没有"——清单里确实有沾边的。
-        self.assertTrue(lookup["weak_candidates"])
+        # 但也不能说"官方没有"——清单里确实有差一个词就全中的。
+        self.assertEqual(
+            [item["path"] for item in lookup["weak_candidates"]],
+            ["/documentation/unreal-engine/BlueprintAPI/Camera/SetAspectRatio"],
+        )
         steps = "\n".join(context.describe_lookup(lookup))
         self.assertIn("没有把握", steps)
         self.assertNotIn("官方文档确实没有这一页", steps)
         # 报告归报告，补抓一页都不许多抓。
-        self.assertEqual(self.find("camera settings"), [])
+        self.assertEqual(self.find(query), [])
+
+    def test_a_sentence_full_of_function_words_gets_no_candidates(self):
+        """虚词占一半以上就是一句话，不是页面名。
+
+        "how do I make an object glow" 里剩下的 make + object 能撞上一堆
+        MakeXxxObject 页面。摆出来只会把人带偏，还不如老实说没找到——
+        这正是本议题反对的"拿弱相关结果当完整回答"。
+        """
+        for sentence in (
+            "how do I make an object glow",
+            "what is the best way to do lighting in my game",
+        ):
+            self.assertEqual(
+                ondemand.weak_candidates(self.connection, sentence), [], sentence
+            )
+            self.assertEqual(self.find(sentence), [], sentence)
 
     def test_a_truly_absent_name_still_says_the_docs_do_not_have_it(self):
         lookup = ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
