@@ -217,6 +217,30 @@ def markdown_units(markdown: str, max_chars: int) -> list[str]:
 # 否则整块会被当成导航，在检索里被扣分扣到底。
 WEAK_TYPE_LABELS = frozenset({"navigation"})
 
+# 面包屑：一整行里除了链接就只有分隔符。
+# 例：`[BlueprintAPI](…) > [BlueprintAPI/Camera](…)`
+_BREADCRUMB_RE = re.compile(
+    r"^[ \t]*\[[^\]]*\]\([^)\s]*\)"
+    r"(?:[ \t]*[>›»][ \t]*\[[^\]]*\]\([^)\s]*\))+[ \t]*$",
+    re.M,
+)
+
+
+def strip_breadcrumbs(markdown: str) -> str:
+    """去掉导航面包屑那一行。
+
+    面包屑是页面装饰，不是内容。留着它，整站的目录名和两三条 URL 会进到
+    **每一页**的全文索引里，于是"Blueprint Camera 怎么改视野"这样的查询会
+    命中该目录下的每一页——命中的全是面包屑，正文一个词都没对上。真正想要
+    的那一页反而被一堆同目录的兄弟页挤下去。
+
+    页面在站点里的位置，`source_url` 和 `context_prefix` 已经各存了一份，
+    不需要第三份。
+
+    只认"两个以上链接串成的一整行"：正文里孤零零的一个链接不会被误删。
+    """
+    return _BREADCRUMB_RE.sub("", markdown)
+
 # 切分后剩下的尾巴短于这个字符数，就并回上一块，别留一条二十来字的孤块。
 RUNT_TAIL_CHARS = 400
 
@@ -347,9 +371,10 @@ def chunk_section(
     target_chars: int = 2200,
     max_chars: int = 3200,
 ) -> list[dict[str, Any]]:
-    if not plain_text(section["body_md"]):
+    body_md = strip_breadcrumbs(section["body_md"] or "")
+    if not plain_text(body_md):
         return []
-    units = markdown_units(section["body_md"], max_chars)
+    units = markdown_units(body_md, max_chars)
     bodies: list[str] = []
     current: list[str] = []
     current_chars = 0
@@ -378,7 +403,7 @@ def chunk_section(
         tail = bodies.pop()
         bodies[-1] = f"{bodies[-1]}\n\n{tail}"
     if not bodies:
-        bodies = [section["body_md"] or "(No textual content)"]
+        bodies = [body_md or "(No textual content)"]
 
     chunk_count = len(bodies)
     workspace = active()

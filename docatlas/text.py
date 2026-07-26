@@ -57,3 +57,86 @@ def heading_visible_text(value: str) -> str:
 def heading_anchor(value: str) -> str:
     anchor = re.sub(r"[^a-z0-9]+", "", heading_visible_text(value).casefold())
     return anchor or "content"
+
+
+# 一段文字用的是哪套书写系统。按 Unicode 区段判断，不涉及任何具体语言——
+# 这里回答的是"用什么字写的"，不是"说的是哪国话"。
+_SCRIPT_RANGES: tuple[tuple[str, str, tuple[tuple[int, int], ...]], ...] = (
+    ("han", "汉字", ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF))),
+    ("kana", "假名", ((0x3040, 0x309F), (0x30A0, 0x30FF))),
+    ("hangul", "谚文", ((0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF))),
+    ("cyrillic", "西里尔字母", ((0x0400, 0x04FF),)),
+    ("greek", "希腊字母", ((0x0370, 0x03FF),)),
+    ("hebrew", "希伯来字母", ((0x0590, 0x05FF),)),
+    ("arabic", "阿拉伯字母", ((0x0600, 0x06FF),)),
+    ("devanagari", "天城文", ((0x0900, 0x097F),)),
+    ("thai", "泰文", ((0x0E00, 0x0E7F),)),
+    ("latin", "拉丁字母", ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F))),
+)
+
+SCRIPT_NAMES = {key: label for key, label, _ in _SCRIPT_RANGES}
+
+# 语言标签用哪套字写。一种语言可以用不止一套（日文汉字假名混写）。
+# 这是书写系统的事实，不是对用户的假设。
+_LANGUAGE_SCRIPTS = {
+    "zh": ("han",),
+    "ja": ("kana", "han"),
+    "ko": ("hangul", "han"),
+    "ru": ("cyrillic",),
+    "uk": ("cyrillic",),
+    "bg": ("cyrillic",),
+    "sr": ("cyrillic", "latin"),
+    "el": ("greek",),
+    "he": ("hebrew",),
+    "ar": ("arabic",),
+    "fa": ("arabic",),
+    "ur": ("arabic",),
+    "hi": ("devanagari",),
+    "mr": ("devanagari",),
+    "ne": ("devanagari",),
+    "th": ("thai",),
+}
+
+
+def _script_of(character: str) -> str:
+    code = ord(character)
+    for key, _label, ranges in _SCRIPT_RANGES:
+        if any(low <= code <= high for low, high in ranges):
+            return key
+    return ""
+
+
+def dominant_script(value: str) -> str:
+    """这段文字主要用哪套书写系统写的；认不出来返回空串。"""
+    counts: dict[str, int] = {}
+    for character in value:
+        if key := _script_of(character):
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def expected_scripts(language: str) -> tuple[str, ...]:
+    """这个语言标签的正文该用哪套字写。不认识的语言按拉丁字母算。"""
+    return _LANGUAGE_SCRIPTS.get(language.split("-")[0].casefold(), ("latin",))
+
+
+def script_of_language(language: str) -> str:
+    """这个语言标签主要用哪套字写，取第一种，用于说人话的提示。"""
+    return expected_scripts(language)[0]
+
+
+def script_mismatch(query: str, language: str) -> str:
+    """查询用的字和数据集原文的字明显不是一套时，返回查询用的那一套。
+
+    英文库里查不到中文问题不是 Bug——库里本来就没有中文正文。但空结果本身
+    不含信息量，用户没法从中判断该改成什么。认出这一种"没有"，才能给出
+    "换成原文写法再问一次"这样能照做的下一步。
+
+    只看字形，不猜语种：数据集声明什么语言，就按什么语言比。
+    """
+    script = dominant_script(query)
+    if not script:
+        return ""
+    return "" if script in expected_scripts(language) else script

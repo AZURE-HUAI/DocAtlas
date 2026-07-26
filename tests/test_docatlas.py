@@ -33,7 +33,7 @@ os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
     chunking, config, context, crawl, dataset, db, discover, net, ondemand,
-    relations, runtime, search, store, text, validate,
+    constants, relations, runtime, search, store, text, validate,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
@@ -1487,6 +1487,9 @@ class InventoryCandidateTests(unittest.TestCase):
         ("/render/shader_nodes/textures/wave.html", "guides"),
         ("/cpp/utility/from_chars", "cpp_api"),
         ("/documentation/unreal-engine/nanite-virtualized-geometry", "guides"),
+        ("/cpp/chrono/duration/duration_cast", "cpp_api"),
+        ("/documentation/unreal-engine/render-target-guide", "guides"),
+        ("/documentation/unreal-engine/BlueprintAPI/Camera/SetAspectRatio", "blueprint_api"),
     ]
 
     def setUp(self):
@@ -1565,6 +1568,62 @@ class InventoryCandidateTests(unittest.TestCase):
         self.assertIn("get", "\n".join(pending))
         self.assertNotEqual(pending, missing)
         self.assertIn("没有对得上的页面", "\n".join(missing))
+
+
+    def test_a_symbol_inside_a_longer_question_still_locates_its_page(self):
+        """BUG-008 的残余边界：整条查询对不上，但里面某个符号正好是一页的名字。
+
+        `duration_cast milliseconds` 以前一页都找不到——规范化后的
+        `durationcast` 拿去比原始路径里的 `duration_cast`，下划线一挡就永远
+        对不上；何况 `milliseconds` 压根不在那条路径里，"每个实词都要命中"
+        这一档也过不了。
+        """
+        rows = self.find("duration_cast milliseconds")
+        self.assertEqual(
+            [row["path"] for row in rows], ["/cpp/chrono/duration/duration_cast"]
+        )
+        self.assertEqual(rows[0]["match_stage"], "token_exact_slug")
+
+    def test_separators_in_the_path_do_not_block_coverage(self):
+        # `render target` 的实词都在 `/…/render-targets-in-unreal` 里，
+        # 只是被连字符断开了。拍平之后才对得上。
+        rows = self.find("render target guide")
+        self.assertIn(
+            "/documentation/unreal-engine/render-target-guide",
+            [row["path"] for row in rows],
+        )
+
+    def test_a_plain_word_alone_never_triggers_a_fetch(self):
+        """反向保证：只有符号形状的词够格单独定位。
+
+        `milliseconds` 是普通英文词，单独拿去对 slug 会扫回一大片；
+        `duration_cast` 带下划线，基本只可能是那一页。
+        """
+        self.assertEqual(ondemand.identifier_tokens("milliseconds"), [])
+        self.assertEqual(ondemand.identifier_tokens("how do I make an object glow"), [])
+        self.assertEqual(
+            ondemand.identifier_tokens("duration_cast milliseconds"), ["durationcast"]
+        )
+
+    def test_weak_candidates_are_reported_but_never_fetched(self):
+        """"线索不够所以没敢抓"和"确实没有这一页"要分开说。"""
+        lookup = ondemand.inventory_lookup(self.connection, "camera settings")
+        # 不敢抓：没有一页能确定就是它。
+        self.assertEqual(lookup["pending_pages"], [])
+        # 但也不能说"官方没有"——清单里确实有沾边的。
+        self.assertTrue(lookup["weak_candidates"])
+        steps = "\n".join(context.describe_lookup(lookup))
+        self.assertIn("没有把握", steps)
+        self.assertNotIn("官方文档确实没有这一页", steps)
+        # 报告归报告，补抓一页都不许多抓。
+        self.assertEqual(self.find("camera settings"), [])
+
+    def test_a_truly_absent_name_still_says_the_docs_do_not_have_it(self):
+        lookup = ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
+        self.assertEqual(lookup["weak_candidates"], [])
+        self.assertIn(
+            "官方文档确实没有这一页", "\n".join(context.describe_lookup(lookup))
+        )
 
 
 class SampleQuotaTests(unittest.TestCase):
@@ -2077,6 +2136,144 @@ class McpMultiDatasetTests(unittest.TestCase):
         )
         self.assertTrue(result["isError"])
         self.assertIn("guides", result["content"][0]["text"])
+
+
+class BreadcrumbNoiseTests(unittest.TestCase):
+    """BUG-002：面包屑把整站目录名塞进每一页的全文索引。
+
+    真实库里 25,565 个知识块有 6,854 个（27%）正文以面包屑开头，而它们几乎
+    全被判成 parameters / returns——于是"Blueprint Camera …"这类查询会命中
+    该目录下的每一页，命中的全是面包屑，正文一个词都没对上。
+    """
+
+    TRAIL = "[BlueprintAPI](https://x/a) > [BlueprintAPI/Camera](https://x/b)"
+
+    def test_a_breadcrumb_trail_is_dropped(self):
+        body = f"{self.TRAIL}\n\nSet Field Of View\n\nTarget is Camera Component"
+        cleaned = chunking.strip_breadcrumbs(body)
+        self.assertNotIn("https://x/a", cleaned)
+        # Target is 这行是 targets_type 关系的证据，绝不能跟着一起删掉。
+        self.assertIn("Target is Camera Component", cleaned)
+        self.assertIn("Set Field Of View", cleaned)
+
+    def test_prose_links_and_lone_links_survive(self):
+        for body in (
+            "See the [Camera docs](https://x/c) for details.",
+            "[Only One](https://x/d)",
+        ):
+            self.assertEqual(chunking.strip_breadcrumbs(body), body)
+
+    def test_other_separators_count_too(self):
+        self.assertEqual(
+            chunking.strip_breadcrumbs("[A](https://x/a) › [B](https://x/b)").strip(),
+            "",
+        )
+
+    def _section(self, position, title, body, knowledge_type):
+        return {
+            "position": position,
+            "heading_level": 2,
+            "heading_path": f"Set Field Of View > {title}",
+            "title": title,
+            "body_md": body,
+            "knowledge_type": knowledge_type,
+            "source_url": "https://x/page",
+            "source_anchor": "https://x/page",
+            "quality_score": 1.0,
+        }
+
+    def test_chunks_do_not_carry_the_trail_into_the_index(self):
+        # 真实形状：小节被合并成一块，导航那一节的正文就跟着进了全文索引。
+        chunks = chunking.chunk_sections(
+            [
+                self._section(
+                    0,
+                    "Navigation",
+                    f"{self.TRAIL}\n\nTarget is Camera Component",
+                    "navigation",
+                ),
+                self._section(
+                    1,
+                    "Inputs",
+                    "| Type | Name |\n| --- | --- |\n| real | In Field Of View |",
+                    "parameters",
+                ),
+            ],
+            page_title="Set Field Of View",
+            category="blueprint_api",
+            document_type=None,
+        )
+        indexed = " ".join(chunk["content_text"] for chunk in chunks)
+        self.assertNotIn("https://x/a", indexed)
+        self.assertNotIn("BlueprintAPI/Camera", indexed)
+        self.assertIn("Target is Camera Component", indexed)
+        self.assertIn("In Field Of View", indexed)
+
+    def test_changing_the_rule_bumps_the_chunker_version(self):
+        """切分规则变了不改版本号，旧块会和新块混在同一个库里。"""
+        self.assertEqual(constants.CHUNKER_VERSION, "v5")
+
+
+class CrossLanguageDiagnosisTests(unittest.TestCase):
+    """ENH-005：单语库里用另一套文字提问，必然一无所获。
+
+    这不是 Bug——库里本来就没有那种文字的正文。但空结果不含信息量，
+    用户没法从中判断该改成什么。所以要认出这一种"没有"。
+
+    判断只看字形，语言来自数据集的 language 字段：不假设用户说中文，
+    也不假设文档是英文。
+    """
+
+    def test_script_is_detected_not_guessed_from_the_user(self):
+        # 同一条查询，在不同语言的库里结论相反——语言来自数据集，不是猜的。
+        self.assertEqual(text.script_mismatch("如何设置视野", "en-US"), "han")
+        self.assertEqual(text.script_mismatch("如何设置视野", "zh-CN"), "")
+        self.assertEqual(text.script_mismatch("Set Field Of View", "zh-CN"), "latin")
+        self.assertEqual(text.script_mismatch("Set Field Of View", "en-US"), "")
+
+    def test_mixed_scripts_go_with_the_dominant_one(self):
+        # 英文库里问"Nanite 是什么"——主体是汉字，算异语言。
+        self.assertEqual(text.script_mismatch("Nanite 到底是个什么东西呢", "en-US"), "han")
+        # 但夹一两个汉字的英文查询不算。
+        self.assertEqual(text.script_mismatch("Nanite virtualized geometry 用法", "en-US"), "")
+
+    def test_japanese_kanji_and_kana_both_belong_to_japanese(self):
+        # 日文汉字假名混写，两套字都是它自己的，不能判成异语言。
+        self.assertEqual(text.script_mismatch("ノードの設定", "ja-JP"), "")
+        self.assertEqual(text.script_mismatch("設定", "ja-JP"), "")
+
+    def test_an_unknown_language_tag_falls_back_to_latin(self):
+        self.assertEqual(text.expected_scripts("xx-YY"), ("latin",))
+
+    def test_symbols_only_queries_are_never_flagged(self):
+        for query in ("K2_SetTimer", "UPROPERTY", "123", "", "   "):
+            self.assertEqual(text.script_mismatch(query, "en-US"), "", query)
+
+    def test_the_empty_result_says_which_kind_of_nothing_it_is(self):
+        connection = temp_db(self)
+        lookup = ondemand.inventory_lookup(connection, "把小方块撒到网格表面")
+        steps = chr(10).join(context.describe_lookup(lookup))
+        self.assertIn("汉字", steps)
+        self.assertIn("en-US", steps)
+        # 关键：不能说成"官方文档确实没有这一页"——那是另一种"没有"。
+        self.assertNotIn("官方文档确实没有这一页", steps)
+
+    def test_a_same_script_miss_still_reads_as_a_genuine_miss(self):
+        connection = temp_db(self)
+        lookup = ondemand.inventory_lookup(connection, "zzzznotarealpage")
+        steps = chr(10).join(context.describe_lookup(lookup))
+        self.assertIn("官方文档确实没有这一页", steps)
+        self.assertNotIn("汉字", steps)
+
+    def test_mcp_reports_language_mismatch_as_its_own_status(self):
+        connection = temp_db(self)
+        pack = context.answer(
+            connection, "把小方块撒到网格表面", token_budget=800,
+            category=None, allow_fetch=False, quiet=True,
+        )
+        payload = mcpserver._structured_ask(runtime.active(), pack)
+        self.assertEqual(payload["status"], "language_mismatch")
+        self.assertTrue(payload["next_steps"])
 
 
 class RelationContractTests(unittest.TestCase):

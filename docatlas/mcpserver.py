@@ -39,6 +39,7 @@ from .db import connect_db, initialize_db
 from .net import REQUEST_LIMITER
 from .ondemand import DEFAULT_FETCH_LIMIT, inventory_lookup
 from .search import search_docs
+from .text import script_mismatch
 
 
 SERVER_NAME = "docatlas"
@@ -289,12 +290,17 @@ def _structured_ask(
     workspace: runtime.Workspace, pack: dict[str, Any]
 ) -> dict[str, Any]:
     lookup = pack.get("lookup") or {}
+    # 四种"没有"，四种下一步。压成一个 no_match，调用方就只能靠猜。
     if pack["primary_knowledge"]:
         status = "ok"
-    elif lookup.get("linked_targets"):
-        status = "target_outside_inventory"
     elif lookup.get("pending_pages"):
         status = "pages_not_fetched"
+    elif lookup.get("weak_candidates"):
+        status = "candidates_too_weak"
+    elif lookup.get("linked_targets"):
+        status = "target_outside_inventory"
+    elif script_mismatch(pack["query"], workspace.language):
+        status = "language_mismatch"
     else:
         status = "no_match"
     result = {
