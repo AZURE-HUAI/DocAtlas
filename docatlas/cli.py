@@ -22,6 +22,7 @@ from .config import (
     LANGUAGE,
     REPO_ROOT,
 )
+from .runtime import bind
 from .util import log, set_log_file
 from .net import REQUEST_LIMITER
 from .db import connect_db, initialize_db
@@ -30,7 +31,7 @@ from .documents import fetch_document
 from .store import store_document_result
 from .crawl import crawl_documents, reprocess_stored_documents
 from .assets import download_assets
-from .crossindex import build_cross_index
+from .relations import build_cross_index, link_new_pages
 from .search import search_docs
 from .export import export_markdown
 from .reports import write_reports, write_site_inventory
@@ -47,7 +48,6 @@ from .ondemand import (
     fetch_now,
     find_uncrawled_candidates,
     inventory_lookup,
-    link_new_pages,
 )
 from .validate import validate_contract
 
@@ -198,7 +198,7 @@ def command_fetch_pages(args: argparse.Namespace) -> int:
         max_workers=args.workers
     ) as executor:
         future_to_row = {
-            executor.submit(fetch_document, row, 0.05): row for row in rows
+            executor.submit(bind(fetch_document), row, 0.05): row for row in rows
         }
         for future in concurrent.futures.as_completed(future_to_row):
             row = future_to_row[future]

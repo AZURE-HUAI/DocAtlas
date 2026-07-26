@@ -6,7 +6,8 @@ import hashlib
 import re
 from typing import Any, Iterable
 
-from .config import CATEGORY_LABELS, DATASET, HEADING_RE, KNOWLEDGE_TYPE_RULES, SOURCE, VERSION
+from .constants import HEADING_RE, KNOWLEDGE_TYPE_RULES
+from .runtime import active
 from .htmlmd import plain_text
 # 这几个小工具搬到 text.py 了（适配器和知识包要用，不能绕回 config）；
 # 这里继续导出，老的 from .chunking import normalize_name 照常可用。
@@ -24,7 +25,7 @@ def classify_knowledge_type(
             return knowledge_type
     if position == 0:
         # API 参考的开头是"这个函数干嘛"的摘要；教程的开头是全篇概述。
-        if category in DATASET.api_categories:
+        if category in active().dataset.api_categories:
             return "summary"
         return "overview"
     return "details"
@@ -380,12 +381,13 @@ def chunk_section(
         bodies = [section["body_md"] or "(No textual content)"]
 
     chunk_count = len(bodies)
-    label = CATEGORY_LABELS.get(category, category)
+    workspace = active()
+    label = workspace.category_labels.get(category, category)
     context_prefix = " | ".join(
         part
         for part in (
             # 产品和版本都来自数据集：写死 "UE" 会让 Blender 的知识块也标成 UE。
-            f"{DATASET.product} {VERSION}",
+            f"{workspace.dataset.product} {workspace.version}",
             label,
             document_type,
             page_title,
@@ -515,7 +517,9 @@ def split_sections(
         text = plain_text(body)
         # 有正文、且出处是官方地址，才算满分。
         quality_score = (
-            1.0 if text and SOURCE.is_official_url(DATASET, source_url) else 0.7
+            1.0
+            if text and (ws := active()).source.is_official_url(ws.dataset, source_url)
+            else 0.7
         )
         sections.append(
             {

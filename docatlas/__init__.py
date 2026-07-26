@@ -8,7 +8,7 @@
 
 核心内部的依赖方向：constants/text → dataset → config → util → net → db →
 discover/htmlmd → chunking → documents → store → crawl/assets/ondemand →
-crossindex → search/context → export/reports/validate → cli/mcpserver。
+relations → search/context → export/reports/validate → cli/mcpserver。
 """
 
 from .config import VERSION

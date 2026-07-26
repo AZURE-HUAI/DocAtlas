@@ -26,10 +26,10 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS, DATASET, KNOWLEDGE
-from .crossindex import RELATION_TYPE_BY_LINK_KIND
-from .dataset import knowledge_hook
+from .db import page_slug
 from .documents import fetch_document
+from .relations import link_new_pages
+from .runtime import active, bind
 from .search import query_names, tokenize, STOPWORDS
 from .store import store_document_result
 from .util import log
@@ -43,18 +43,19 @@ MIN_COVERAGE_TOKENS = 2
 # 太短的词（as、id、ue）做包含匹配会命中几万页，只在精确档用。
 MIN_CONTAINS_CHARS = 5
 
-# 同名候选谁优先，由数据集配置说了算（没配就一视同仁）。
-CATEGORY_PRIORITY = DATASET.category_priority
-
 
 def _priority_case(column: str = "category") -> str:
-    """把优先级表编译成一段 SQL CASE，省得同一份顺序在字典和 SQL 里各写一遍。"""
-    if not CATEGORY_PRIORITY:
+    """把优先级表编译成一段 SQL CASE，省得同一份顺序在字典和 SQL 里各写一遍。
+
+    同名候选谁优先，由数据集配置说了算（没配就一视同仁）。
+    """
+    priority = active().category_priority
+    if not priority:
         return "0"
     branches = " ".join(
-        f"WHEN '{name}' THEN {rank}" for name, rank in CATEGORY_PRIORITY.items()
+        f"WHEN '{name}' THEN {rank}" for name, rank in priority.items()
     )
-    return f"CASE {column} {branches} ELSE {max(CATEGORY_PRIORITY.values()) + 1} END"
+    return f"CASE {column} {branches} ELSE {max(priority.values()) + 1} END"
 
 
 def coverage_tokens(query: str) -> list[str]:
@@ -164,6 +165,36 @@ def missing_exact_pages(
     return connection.execute(sql, params).fetchone()[0]
 
 
+def linked_but_unlisted(
+    connection: sqlite3.Connection, query: str, *, limit: int = 3
+) -> list[dict[str, str]]:
+    """别的页面链接过去、但全站清单里根本没有的目标页。
+
+    这是"官方确实没有这一页"和"我们的来源没枚举到这一页"之间的分界线。
+    答错方向的代价很实在：用户会一遍遍改查询词，而真正该改的是来源适配器的
+    枚举范围——那一页在官网上好好地待着，只是我们从来没把它列进来。
+
+    只在"什么都没找到"时才会走到这里，所以这个全表扫描不在常用路径上。
+    """
+    names = set(query_names(query))
+    if not names:
+        return []
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in connection.execute(
+        "SELECT DISTINCT target_path, target_url FROM page_links"
+        " WHERE target_path IS NOT NULL AND target_page_id IS NULL"
+    ):
+        path = row["target_path"]
+        if path in seen or page_slug(path) not in names:
+            continue
+        seen.add(path)
+        found.append({"path": path, "url": row["target_url"]})
+        if len(found) >= limit:
+            break
+    return found
+
+
 def inventory_lookup(
     connection: sqlite3.Connection,
     query: str,
@@ -173,8 +204,9 @@ def inventory_lookup(
 ) -> dict[str, Any]:
     """清单对这个名字知道些什么。
 
-    没有它，"查不到"就只能是一个空结果——调用方分不清是官方压根没这一页，
-    还是这一页在清单里躺着、只是正文还没取。这两件事的下一步完全不同。
+    没有它，"查不到"就只能是一个空结果——调用方分不清是官方压根没这一页、
+    这一页在清单里躺着只是正文还没取、还是我们的来源根本没枚举到它。
+    三件事的下一步完全不同。
     """
     stages = _candidate_queries(query)
     pending = _collect(
@@ -201,6 +233,10 @@ def inventory_lookup(
         "crawled_pages": [
             {"path": row["path"], "category": row["category"]} for row in crawled
         ],
+        # 前两样都空才值得查这个：它回答的是"是不是我们自己漏了"。
+        "linked_targets": (
+            linked_but_unlisted(connection, query) if not pending and not crawled else []
+        ),
     }
 
 
@@ -222,7 +258,7 @@ def fetch_now(
         max_workers=min(workers, len(rows))
     ) as executor:
         future_to_row = {
-            executor.submit(fetch_document, row, 0.0): row for row in rows
+            executor.submit(bind(fetch_document), row, 0.0): row for row in rows
         }
         for future in concurrent.futures.as_completed(future_to_row):
             row = future_to_row[future]
@@ -251,90 +287,6 @@ def fetch_now(
     }
 
 
-def link_new_pages(connection: sqlite3.Connection, page_ids: list[int]) -> int:
-    """只为刚抓到的页面补建交叉关系。
-
-    全量 `build_cross_index` 要扫全表，二十万页时要跑好几分钟——按需抓取
-    显然不能每次都付这个代价。这里只处理这几页涉及的官方链接。
-    """
-    if not page_ids:
-        return 0
-    placeholders = ",".join("?" for _ in page_ids)
-    connection.execute(
-        f"""
-        UPDATE page_links
-        SET target_page_id=(
-            SELECT p.id FROM pages p WHERE p.path=page_links.target_path
-        )
-        WHERE target_path IS NOT NULL
-          AND (from_page_id IN ({placeholders}) OR target_page_id IS NULL)
-        """,
-        page_ids,
-    )
-    created = 0
-    for row in connection.execute(
-        f"""
-        SELECT
-            source_entity.id AS from_id,
-            target_entity.id AS to_id,
-            page_links.link_kind,
-            page_links.source_url,
-            (
-                SELECT c.id FROM chunks c
-                WHERE c.section_id=page_links.from_section_id
-                ORDER BY c.chunk_index LIMIT 1
-            ) AS chunk_id
-        FROM page_links
-        JOIN entities source_entity
-            ON source_entity.page_id=page_links.from_page_id
-        JOIN entities target_entity
-            ON target_entity.page_id=page_links.target_page_id
-        WHERE page_links.evidence_kind='official_link'
-          AND source_entity.id != target_entity.id
-          AND (
-              page_links.from_page_id IN ({placeholders})
-              OR page_links.target_page_id IN ({placeholders})
-          )
-        """,
-        (*page_ids, *page_ids),
-    ):
-        relation_type = RELATION_TYPE_BY_LINK_KIND.get(
-            row["link_kind"], "official_reference"
-        )
-        now = _now()
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO relations(
-                from_entity_id, to_entity_id, relation_type, evidence_kind,
-                confidence, evidence_chunk_id, source_url, created_at, updated_at
-            ) VALUES(?, ?, ?, 'official_link', 1.0, ?, ?, ?, ?)
-            """,
-            (
-                row["from_id"],
-                row["to_id"],
-                relation_type,
-                row["chunk_id"],
-                row["source_url"],
-                now,
-                now,
-            ),
-        )
-        created += 1
-
-    # 领域特有的关系（Unreal 的蓝图↔C++ 对应之类），只针对新页面所属实体。
-    link_pages = knowledge_hook(KNOWLEDGE, "link_pages")
-    if link_pages:
-        created += link_pages(connection, page_ids, _now())
-    connection.commit()
-    return created
-
-
-def _now() -> str:
-    from .util import utc_now
-
-    return utc_now()
-
-
 def ensure_available(
     connection: sqlite3.Connection,
     query: str,
@@ -356,8 +308,11 @@ def ensure_available(
     if not candidates:
         return {"requested": 0, "succeeded": 0, "failed": 0, "pages": []}
     if not quiet:
+        category_labels = active().category_labels
         labels = ", ".join(
-            sorted({CATEGORY_LABELS.get(r["category"], r["category"]) for r in candidates})
+            sorted(
+                {category_labels.get(r["category"], r["category"]) for r in candidates}
+            )
         )
         log(f"本地还没有这一页，正在按需抓取 {len(candidates)} 页（{labels}）…")
     outcome = fetch_now(connection, candidates, quiet=quiet)

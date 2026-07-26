@@ -8,8 +8,9 @@ import sqlite3
 from typing import Any
 import zlib
 
-from .config import CHUNKER_VERSION, DATASET, KNOWLEDGE, LANGUAGE, SOURCE
-from .dataset import knowledge_hook
+from . import relations
+from .constants import CHUNKER_VERSION
+from .runtime import active
 from .util import utc_now
 
 # 抽查多少篇原文来核对语言。全量解压太慢，而"要错就整批错"，抽样足够。
@@ -22,7 +23,7 @@ def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
     数据集里的 `language` 是指令不是事实：站点没有你要的语言时，多半不报错，
     只不声不响回默认语言。不对一遍，就会得到一个标着德语的英文库。
     """
-    read_locale = getattr(SOURCE, "document_locale", None)
+    read_locale = getattr(active().source, "document_locale", None)
     if read_locale is None:
         return collections.Counter()
     seen: collections.Counter = collections.Counter()
@@ -47,8 +48,40 @@ def expected_evidence_kinds() -> list[str]:
     官方链接是通用的，任何文档站都有；其余由领域知识包声明自己会推出哪几类。
     """
     kinds = ["official_link"]
-    kinds.extend(knowledge_hook(KNOWLEDGE, "DERIVED_EVIDENCE_KINDS", ()))
+    kinds.extend(active().hook("DERIVED_EVIDENCE_KINDS", ()))
     return kinds
+
+
+def link_coverage_observation(connection: sqlite3.Connection) -> dict[str, Any]:
+    """来源清单有没有漏掉别的页面正在链接的目录。
+
+    刻意**不算作合同违反**：官方站点地图列不列某个目录是站点自己的事，
+    把它判成失败会让一个本来健康的库无缘无故变红。但它必须被说出来——
+    "别的页面链过去、清单里却没有"是来源范围划漏的唯一早期信号，
+    不报出来就只能等到用户查不到东西时再从头排查。
+    """
+    gaps = relations.link_target_gaps(connection)
+    areas = "；".join(
+        f"{item['area']}（{item['links']} 条链接）"
+        for item in gaps["top_uncovered_areas"]
+    )
+    return {
+        "name": "inventory_link_coverage",
+        "pending_targets": gaps["pending_targets"],
+        "missing_targets": gaps["missing_targets"],
+        "uncovered_areas": gaps["uncovered_areas"],
+        "detail": (
+            f"{gaps['pending_targets']:,} 条链接指向清单里已有、但正文尚未抓取的页面"
+            "（用 get 或 ask 就能补上）。"
+            + (
+                f"另有 {gaps['missing_targets']:,} 条指向清单里根本没有的页面，"
+                f"集中在 {gaps['uncovered_areas']} 个完全没被枚举的目录：{areas}。"
+                "这类要改来源适配器的枚举范围，抓多少次都不会有。"
+                if gaps["uncovered_areas"]
+                else "没有发现整目录缺失的情况。"
+            )
+        ),
+    }
 
 
 def validate_contract(
@@ -94,8 +127,8 @@ def validate_contract(
     # 这种错不会报异常，只会让整整一类文档静静地缺席。
     required = [
         key
-        for key in DATASET.categories
-        if key not in DATASET.optional_categories
+        for key in active().dataset.categories
+        if key not in active().dataset.optional_categories
     ]
     empty = [key for key in required if not counts.get(key)]
     add(
@@ -230,11 +263,12 @@ def validate_contract(
         )
         # 语言是**选的**不是猜的，所以没法自动填；但"选的有没有生效"能自动查。
         locales = fetched_locales(connection)
-        wrong = sum(n for code, n in locales.items() if code != LANGUAGE.lower())
+        language = active().language
+        wrong = sum(n for code, n in locales.items() if code != language.lower())
         add(
             "fetched_language_matches_declaration",
             wrong,
-            f"抓回来的正文应当都是声明的 {LANGUAGE}"
+            f"抓回来的正文应当都是声明的 {language}"
             + (
                 "，实际抽到：" + "、".join(f"{c}×{n}" for c, n in locales.most_common())
                 if wrong
@@ -242,9 +276,13 @@ def validate_contract(
             ),
         )
     failed = sum(1 for check in checks if check["status"] == "fail")
-    return {
+    report = {
         "phase": phase,
         "status": "pass" if failed == 0 else "fail",
         "checked_at": utc_now(),
         "checks": checks,
     }
+    if phase == "content":
+        # 观察项不参与 pass/fail：它们是"值得知道"，不是"违反了合同"。
+        report["observations"] = [link_coverage_observation(connection)]
+    return report

@@ -17,8 +17,8 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 
+from ..relations import RelationCandidate
 from ..text import humanize_cpp_identifier, normalize_name
 
 
@@ -31,7 +31,8 @@ UNREAL_TYPE_PREFIX_RE = re.compile(r"^[UAFIET][A-Z]")
 # 比通用规则多认一个"类型前缀 + 大驼峰"的形状，例如 AActor、FVector。
 IDENTIFIER_PATTERN = r"::|_[A-Za-z]|[a-z][A-Z]|^[UAFIETS][A-Z][A-Za-z]+$"
 
-# 交叉索引重建时要先清掉的关系（都是本知识包推导出来的，不是抓来的事实）。
+# 本包会产出的证据类型。`validate` 用它检查"某类关系被整类做没"——
+# 关系的清理不看这张表，看 relations.origin，所以漏写一项不会留下死关系。
 DERIVED_EVIDENCE_KINDS = (
     "exact_normalized_name",
     "document_statement",
@@ -164,175 +165,16 @@ def document_aliases(
     return aliases
 
 
-def build_relations(connection: sqlite3.Connection, now: str) -> None:
-    """全量重建 Unreal 特有的交叉关系。核心负责通用的官方链接关系。"""
-    _link_same_name_candidates(connection, now)
-    _link_display_names(connection, now)
-    _link_target_types(connection, now)
+# ---------------------------------------------------------------------------
+# 关系规则：凭什么说两个实体有关。
+#
+# 找候选、验证目标、挡撞名、去重、存储、全量/增量更新都归通用核心
+# （`docatlas/relations.py`）。这一段只回答"为什么有关"，所以一行 SQL 也没有，
+# 也不认识 entity id、表结构和 origin。换成 Unity 或 Blender 时，
+# 整个文件不加载，通用的官方链接关系照样建得出来。
+# ---------------------------------------------------------------------------
 
-
-def link_pages(
-    connection: sqlite3.Connection, page_ids: list[int], now: str
-) -> int:
-    """按需抓取补了几页之后，只给这几页补关系，不重建全库。"""
-    if not page_ids:
-        return 0
-    return _link_display_names(connection, now, page_ids=page_ids)
-
-
-def _link_same_name_candidates(connection: sqlite3.Connection, now: str) -> None:
-    """名字标准化后完全一致的蓝图 / 编辑器节点 ↔ API 符号。
-
-    只是"候选"：同名不等于同一个东西，所以置信度压在 0.82~0.9，
-    并在备注里写清楚需要 AI 核对签名。一个名字对上 8 个以上就整组丢弃，
-    那多半是 Get / Set 这类烂大街的名字，给出去只会误导。
-    """
-    candidate_rows = list(
-        connection.execute(
-            """
-            SELECT
-                source.id AS from_id,
-                target.id AS to_id,
-                source.entity_type AS from_type,
-                target.entity_type AS to_type,
-                source.owner_type AS source_owner,
-                target.owner_type AS target_owner,
-                source.source_url
-            FROM entities source
-            JOIN entities target
-                ON target.normalized_name=source.normalized_name
-               AND target.id != source.id
-            WHERE length(source.normalized_name) >= 6
-              AND (
-                (source.entity_type='blueprint_node'
-                    AND target.entity_type='cpp_symbol')
-                OR
-                (source.entity_type='editor_node'
-                    AND target.entity_type IN (
-                        'blueprint_node', 'cpp_symbol', 'python_api'
-                    ))
-              )
-            ORDER BY source.id, target.id
-            """
-        )
-    )
-    grouped: dict[int, list[sqlite3.Row]] = {}
-    for row in candidate_rows:
-        grouped.setdefault(row["from_id"], []).append(row)
-    for rows in grouped.values():
-        if len(rows) > 8:
-            continue
-        for row in rows:
-            relation_type = (
-                "blueprint_cpp_candidate"
-                if row["from_type"] == "blueprint_node"
-                else "node_api_candidate"
-            )
-            owner_matches = (
-                row["source_owner"]
-                and row["target_owner"]
-                and normalize_name(row["source_owner"])
-                == normalize_name(row["target_owner"])
-            )
-            confidence = 0.9 if owner_matches else 0.82
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO relations(
-                    from_entity_id, to_entity_id, relation_type,
-                    evidence_kind, confidence, source_url, note,
-                    created_at, updated_at
-                ) VALUES(?, ?, ?, 'exact_normalized_name', ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["from_id"],
-                    row["to_id"],
-                    relation_type,
-                    confidence,
-                    row["source_url"],
-                    (
-                        "名称与所有者类型均一致"
-                        if owner_matches
-                        else "显示名称标准化后完全一致；需要 AI 核对签名"
-                    ),
-                    now,
-                    now,
-                ),
-            )
-
-
-def _link_display_names(
-    connection: sqlite3.Connection,
-    now: str,
-    *,
-    page_ids: list[int] | None = None,
-) -> int:
-    """蓝图节点 ↔ C++ 函数，证据是 C++ 文档里的 DisplayName 元数据。
-
-    这是置信度 1.0 的对应：不是猜的，是官方文档自己写的。
-    """
-    scope = ""
-    params: tuple = ()
-    if page_ids is not None:
-        placeholders = ",".join("?" for _ in page_ids)
-        scope = (
-            f" AND (blueprint.page_id IN ({placeholders})"
-            f" OR cpp.page_id IN ({placeholders}))"
-        )
-        params = (*page_ids, *page_ids)
-
-    rows = list(
-        connection.execute(
-            f"""
-            SELECT DISTINCT
-                blueprint.id AS from_id,
-                cpp.id AS to_id,
-                cpp.source_url AS evidence_url,
-                target_alias.alias AS metadata_display_name
-            FROM entities blueprint
-            JOIN entity_aliases source_alias
-                ON source_alias.entity_id=blueprint.id
-               AND source_alias.alias_type='display_name'
-            JOIN entity_aliases target_alias
-                ON target_alias.normalized_alias=source_alias.normalized_alias
-               AND target_alias.alias_type='unreal_display_name'
-            JOIN entities cpp
-                ON cpp.id=target_alias.entity_id
-               AND cpp.entity_type='cpp_symbol'
-            WHERE blueprint.entity_type='blueprint_node'
-              AND length(source_alias.normalized_alias) >= 6{scope}
-            ORDER BY blueprint.id, cpp.id
-            """,
-            params,
-        )
-    )
-    for row in rows:
-        connection.execute(
-            """
-            INSERT OR REPLACE INTO relations(
-                from_entity_id, to_entity_id, relation_type,
-                evidence_kind, confidence, source_url, note,
-                created_at, updated_at
-            ) VALUES(
-                ?, ?, 'blueprint_cpp_api',
-                'unreal_display_name_metadata', 1.0, ?, ?, ?, ?
-            )
-            """,
-            (
-                row["from_id"],
-                row["to_id"],
-                row["evidence_url"],
-                (
-                    f'C++ 文档的 Unreal 元数据声明 DisplayName="'
-                    f'{row["metadata_display_name"]}"；与蓝图节点显示名完全一致'
-                ),
-                now,
-                now,
-            ),
-        )
-    return len(rows)
-
-
-# `Target is` 之后先粗抓一段，具体到哪个词结束由 _resolve_target_entity 定。
+# `Target is` 之后先粗抓一段，具体到哪个词结束由 _resolve_target 定。
 TARGET_IS_PATTERN = re.compile(r"\bTarget is ([A-Za-z][A-Za-z0-9_ ]{2,80})")
 
 # 目标类型名最长几个词（`Ability System Blueprint Library` 是 4 个）。
@@ -340,75 +182,108 @@ TARGET_IS_PATTERN = re.compile(r"\bTarget is ([A-Za-z][A-Za-z0-9_ ]{2,80})")
 MAX_TARGET_WORDS = 8
 
 
-def _resolve_target_entity(
-    connection: sqlite3.Connection, tail: str
-) -> tuple[str, list[sqlite3.Row]]:
+def relation_rules(graph):
+    """Unreal 的三种关系证据，从最硬到最软。
+
+    顺序有意为之：同一对实体被多条规则命中时，先产出的那条置信度更高，
+    去重时留下的就是证据更硬的那条。
+    """
+    yield from _display_name_metadata(graph)
+    yield from _target_type_statements(graph)
+    yield from _same_name_candidates(graph)
+
+
+def _display_name_metadata(graph):
+    """C++ 文档里的 `DisplayName="X"` 就是蓝图里那个节点的名字。
+
+    这是置信度 1.0 的对应：不是猜的，是官方文档自己写的。
+    """
+    for node, symbol, display_name in graph.name_matches(
+        "blueprint_node",
+        "cpp_symbol",
+        source_alias="display_name",
+        target_alias="unreal_display_name",
+    ):
+        yield RelationCandidate(
+            source=node,
+            target=symbol,
+            relation_type="blueprint_cpp_api",
+            evidence_kind="unreal_display_name_metadata",
+            confidence=1.0,
+            evidence_url=symbol.source_url,
+            note=(
+                f'C++ 文档的 Unreal 元数据声明 DisplayName="{display_name}"；'
+                "与蓝图节点显示名完全一致"
+            ),
+        )
+
+
+def _target_type_statements(graph):
+    """蓝图文档正文写着 "Target is Actor"，说明这个节点作用在 AActor 上。"""
+    for node, body in graph.texts("blueprint_node", containing="Target is "):
+        match = TARGET_IS_PATTERN.search(body)
+        if not match:
+            continue
+        type_name, targets = _resolve_target(graph, match.group(1))
+        for target in targets:
+            yield RelationCandidate(
+                source=node,
+                target=target,
+                relation_type="targets_type",
+                evidence_kind="document_statement",
+                confidence=0.92,
+                note=f"文档正文声明 Target is {type_name}",
+            )
+
+
+def _resolve_target(graph, tail: str):
     """从 `Target is` 后面那串词里认出目标类型名。
 
     难点是名字到哪儿结束。正文里紧跟着的就是下一段内容，中间**没有标点**：
 
         ...are blocked Target is Ability System Component Inputs Type Name...
 
-    所以边界只能靠别名表来定：从长到短试，第一个对得上已知实体的就是它。
+    所以边界只能靠已知实体来定：从长到短试，第一个对得上的就是它。
     从长到短是必须的——"Actor Component" 得赢过 "Actor"。
     """
     words = tail.split()[:MAX_TARGET_WORDS]
     for size in range(len(words), 1, -1):
         candidate = " ".join(words[:size])
-        targets = list(
-            connection.execute(
-                """
-                SELECT DISTINCT e.id FROM entity_aliases a
-                JOIN entities e ON e.id=a.entity_id
-                WHERE a.normalized_alias=?
-                  AND e.entity_type='cpp_symbol'
-                LIMIT 8
-                """,
-                (normalize_name(candidate),),
-            )
-        )
-        if targets:
+        if targets := graph.find(candidate, entity_type="cpp_symbol"):
             return candidate, targets
     return "", []
 
 
-def _link_target_types(connection: sqlite3.Connection, now: str) -> None:
-    """蓝图文档正文写着 "Target is Actor"，说明这个节点作用在 AActor 上。"""
-    target_rows = list(
-        connection.execute(
-            """
-            SELECT DISTINCT
-                e.id AS from_id,
-                e.source_url,
-                c.content_text
-            FROM entities e
-            JOIN chunks c ON c.page_id=e.page_id
-            WHERE e.entity_type='blueprint_node'
-              AND c.content_text LIKE '%Target is %'
-            """
-        )
-    )
-    for row in target_rows:
-        match = TARGET_IS_PATTERN.search(row["content_text"])
-        if not match:
-            continue
-        target_name, targets = _resolve_target_entity(connection, match.group(1))
-        for target in targets:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO relations(
-                    from_entity_id, to_entity_id, relation_type,
-                    evidence_kind, confidence, source_url, note,
-                    created_at, updated_at
-                ) VALUES(?, ?, 'targets_type', 'document_statement',
-                          0.92, ?, ?, ?, ?)
-                """,
-                (
-                    row["from_id"],
-                    target["id"],
-                    row["source_url"],
-                    f"文档正文声明 Target is {target_name}",
-                    now,
-                    now,
+def _same_name_candidates(graph):
+    """名字标准化后完全一致的蓝图 / 编辑器节点 ↔ API 符号。
+
+    只是"候选"：同名不等于同一个东西，所以置信度压在 0.82~0.9，并在备注里
+    写清楚需要 AI 核对签名。
+    """
+    pairs = [
+        ("blueprint_node", ("cpp_symbol",), "blueprint_cpp_candidate"),
+        (
+            "editor_node",
+            ("blueprint_node", "cpp_symbol", "python_api"),
+            "node_api_candidate",
+        ),
+    ]
+    for from_type, to_types, relation_type in pairs:
+        for source, target, _ in graph.name_matches(from_type, to_types):
+            owner_matches = bool(
+                source.owner_type
+                and target.owner_type
+                and normalize_name(source.owner_type) == normalize_name(target.owner_type)
+            )
+            yield RelationCandidate(
+                source=source,
+                target=target,
+                relation_type=relation_type,
+                evidence_kind="exact_normalized_name",
+                confidence=0.9 if owner_matches else 0.82,
+                note=(
+                    "名称与所有者类型均一致"
+                    if owner_matches
+                    else "显示名称标准化后完全一致；需要 AI 核对签名"
                 ),
             )

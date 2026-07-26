@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import urllib.parse
 
-from .config import DATASET, DB_PATH, DOC_PREFIX, LANGUAGE, SOURCE, VERSION
+from .runtime import active
 from .util import utc_now
 
 
@@ -17,11 +17,14 @@ def inventory_index_url() -> str:
     索引列页的来源（`inventory_feeds` / `read_feed`）压根没有总入口——那种
     来源不实现 `sitemap_index_url`，这里就留空，而不是让开库直接崩掉。
     """
-    index_url = getattr(SOURCE, "sitemap_index_url", None)
-    return index_url(DATASET) if index_url else ""
+    workspace = active()
+    index_url = getattr(workspace.source, "sitemap_index_url", None)
+    return index_url(workspace.dataset) if index_url else ""
 
 
-def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
+def connect_db(path: Path | None = None) -> sqlite3.Connection:
+    # 默认值不能写在签名里：那是导入时求值，MCP 切了数据集也还是老路径。
+    path = path or active().db_path
     # 第一次用的时候数据目录还不存在，不建的话 sqlite 只会甩一句
     # "unable to open database file"，看不出该干嘛。
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,6 +271,18 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "pages", "last_seen_at", "TEXT")
     add_column_if_missing(connection, "pages", "deleted_at", "TEXT")
     # 按需抓取靠它定位页面：没抓过的页面只有 path，没有标题。
+    # 关系是谁建的：核心记 'core'，领域知识包记包名。全量重建按它清理，
+    # 领域包因此不必再自己维护一张"我会产出哪些 evidence_kind"的清单——
+    # 那张清单漏写一项，就会留下一条永远删不掉的死关系。
+    if add_column_if_missing(connection, "relations", "origin", "TEXT"):
+        connection.execute(
+            "UPDATE relations SET origin=CASE WHEN evidence_kind='official_link'"
+            " THEN 'core' ELSE ? END WHERE origin IS NULL",
+            (active().dataset.knowledge or "core",),
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin)"
+    )
     add_column_if_missing(connection, "pages", "normalized_slug", "TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(normalized_slug)"
@@ -371,16 +386,17 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('chunk_fts', 'fallback')"
         )
+    dataset = active().dataset
     connection.executemany(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
         [
-            ("dataset", DATASET.id),
-            ("product", DATASET.product),
-            ("doc_version", VERSION),
-            ("language", LANGUAGE),
-            ("source", DATASET.name),
-            ("source_adapter", DATASET.source),
-            ("knowledge_pack", DATASET.knowledge or ""),
+            ("dataset", dataset.id),
+            ("product", dataset.product),
+            ("doc_version", dataset.version),
+            ("language", dataset.language),
+            ("source", dataset.name),
+            ("source_adapter", dataset.source),
+            ("knowledge_pack", dataset.knowledge or ""),
             ("inventory_index", inventory_index_url()),
             ("schema_version", "3"),
         ],
@@ -469,7 +485,8 @@ def migrate_tag_type(connection: sqlite3.Connection, old: str, new: str) -> None
 
 
 def route_metadata(path: str) -> tuple[int, str | None]:
-    relative = path[len(DOC_PREFIX) :] if path.lower().startswith(DOC_PREFIX.lower()) else path.strip("/")
+    doc_prefix = active().doc_prefix
+    relative = path[len(doc_prefix) :] if path.lower().startswith(doc_prefix.lower()) else path.strip("/")
     segments = [segment for segment in relative.split("/") if segment]
     parent = "/".join(path.rstrip("/").split("/")[:-1]) or None
     return len(segments), parent
@@ -488,10 +505,13 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     if not rows:
         return
     now = utc_now()
+    dataset = active().dataset
     values = []
     for row in rows:
         depth, parent = route_metadata(row["path"])
-        values.append((VERSION, LANGUAGE, depth, parent, now, now, row["id"]))
+        values.append(
+            (dataset.version, dataset.language, depth, parent, now, now, row["id"])
+        )
     connection.executemany(
         """
         UPDATE pages SET

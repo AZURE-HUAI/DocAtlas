@@ -7,7 +7,8 @@ import sqlite3
 from typing import Any
 import zlib
 
-from .config import CHUNKER_VERSION, VERSION
+from .constants import CHUNKER_VERSION
+from .runtime import active
 from .util import utc_now
 from .chunking import normalize_name
 
@@ -288,7 +289,7 @@ def store_document_result(
         tag_values = {
             (category, "category"),
             (chunk["knowledge_type"], "knowledge_type"),
-            (VERSION, "doc_version"),
+            (active().version, "doc_version"),
         }
         if result["source_type"]:
             tag_values.add((str(result["source_type"]), "source_type"))

@@ -29,53 +29,19 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS, DATASET, KNOWLEDGE, LANGUAGE, VERSION
-from .dataset import knowledge_hook
 from .ondemand import (
     DEFAULT_FETCH_LIMIT,
     ensure_available,
     inventory_lookup,
     missing_exact_pages,
 )
+from .runtime import active
 from .search import query_names, search_chunks
 
 MAX_CHUNKS_PER_PAGE = 2
 PRIMARY_BUDGET_RATIO = 0.8
 # 低于这个置信度的关系不进上下文：宁可不给，也不能让 AI 把猜测当官方对应。
 MIN_RELATION_CONFIDENCE = 0.8
-
-# 通用关系的中文说法。领域知识包可以补自己那几种（蓝图↔C++ 之类）。
-RELATION_LABELS = {
-    "belongs_to": "所属",
-    "parameter_type": "参数类型",
-    "return_type": "返回值类型",
-    "signature_reference": "签名引用",
-    "example_reference": "示例引用",
-    "official_reference": "官方相关文档",
-    **knowledge_hook(KNOWLEDGE, "RELATION_LABELS", {}),
-}
-
-EVIDENCE_LABELS = {
-    "official_link": "官方文档链接",
-    **knowledge_hook(KNOWLEDGE, "EVIDENCE_LABELS", {}),
-}
-
-# 相关项的排序：领域特有的关系（有实锤证据的对应）排在通用关系前面。
-_RELATION_PRIORITY = {
-    **knowledge_hook(KNOWLEDGE, "RELATION_PRIORITY", {}),
-    "parameter_type": 3,
-    "return_type": 4,
-    "belongs_to": 7,
-}
-_PRIORITY_BRANCHES = " ".join(
-    f"WHEN '{name}' THEN {rank}"
-    for name, rank in sorted(_RELATION_PRIORITY.items(), key=lambda kv: kv[1])
-)
-_RELATION_PRIORITY_SQL = (
-    f"CASE r.relation_type {_PRIORITY_BRANCHES} ELSE 8 END"
-    if _PRIORITY_BRANCHES
-    else "0"
-)
 
 
 def _select_primary(
@@ -153,7 +119,7 @@ def _one_hop_relations(
         WHERE ke.chunk_id IN ({placeholders})
           AND r.confidence >= ?
         ORDER BY
-            {_RELATION_PRIORITY_SQL},
+            {active().relation_priority_sql},
             r.confidence DESC,
             p.route_depth DESC,
             related.canonical_name
@@ -226,11 +192,12 @@ def build_context_pack(
         connection, [row["id"] for row in primary], limit=8
     )
 
+    dataset = active().dataset
     return {
         "query": query,
-        "dataset": DATASET.id,
-        "product": DATASET.product,
-        "version": VERSION,
+        "dataset": dataset.id,
+        "product": dataset.product,
+        "version": dataset.version,
         "token_budget": token_budget,
         "estimated_tokens": used,
         "primary_knowledge": primary,
@@ -418,6 +385,10 @@ def related_payload(
     }
     if status == "entity_not_found":
         result["lookup"] = inventory_lookup(connection, subject)
+        # "官方没有这一页"和"我们的来源没枚举到这一页"要分开：前者到此为止，
+        # 后者是我们自己的覆盖范围问题，改查询词永远解决不了。
+        if result["lookup"].get("linked_targets"):
+            result["status"] = status = "target_outside_inventory"
         result["next_steps"] = describe_lookup(result["lookup"])
     elif status == "knowledge_id_not_found":
         result["next_steps"] = [
@@ -441,12 +412,13 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
     空结果本身不含信息量：官方没有这一页、清单里有但没抓、名字写得对不上，
     三件事的下一步完全不同，必须说清楚是哪一种。
     """
+    workspace = active()
     pending = lookup["pending_pages"]
     crawled = lookup["crawled_pages"]
     if pending:
         lines = [f"本地没有正文，但全站清单里有 {len(pending)} 个页面对得上："]
         for page in pending:
-            label = CATEGORY_LABELS.get(page["category"], page["category"])
+            label = workspace.category_labels.get(page["category"], page["category"])
             lines.append(f"  [{label}] {page['path']}")
         lines.append(f'取回来再查：python -m docatlas get "{lookup["query"]}"')
         return lines
@@ -455,9 +427,22 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
             f"有 {len(crawled)} 个同名页面已经抓过了，但没有知识块命中这次的查询词。",
             f'换个说法再试，或直接读那一页：python -m docatlas ask "{lookup["query"]}"',
         ]
+    if linked := lookup.get("linked_targets"):
+        # 已抓页面链过去，清单里却没有——那不是"官方没有"，是我们没枚举到。
+        # 说成"官方确实没有这一页"会让人一直去改查询词，白费力气。
+        lines = [
+            f"本地已有的页面里，有正文链接指向「{lookup['query']}」，"
+            "但这一页不在全站清单里——官方有，是我们的来源没有枚举到它。",
+        ]
+        lines.extend(f"  {item['url']}" for item in linked)
+        lines.append(
+            "先直接打开上面的官方地址；要让它进库，得扩大来源适配器的枚举范围"
+            "（见 WORKFLOWS.md 流程 B），重抓多少次都不会有。"
+        )
+        return lines
     return [
         "没有找到结果，全站清单里也没有对得上的页面。",
-        f"原文语言是 {LANGUAGE}，换成原文里的官方写法往往能命中；"
+        f"原文语言是 {workspace.language}，换成原文里的官方写法往往能命中；"
         "还是没有，就说明官方文档确实没有这一页。",
     ]
 
@@ -482,13 +467,14 @@ def exact_page_hint(
 
 def _render_empty(pack: dict[str, Any]) -> list[str]:
     """没命中时，把"清单知道什么"说清楚，而不是丢一句"没找到"。"""
+    workspace = active()
     lookup = pack.get("lookup") or {}
     pending = lookup.get("pending_pages") or []
     if not pending:
         return [
             f"本地库里没有命中，全站清单里也没有对得上的页面。",
             "",
-            f"多半是名字和官方写法对不上：原文语言是 {LANGUAGE}，"
+            f"多半是名字和官方写法对不上：原文语言是 {workspace.language}，"
             "换成官方的正式写法再试一次；还是没有，就说明官方文档确实没有这一页。",
         ]
     lines = [
@@ -496,7 +482,7 @@ def _render_empty(pack: dict[str, Any]) -> list[str]:
         "",
     ]
     for page in pending:
-        label = CATEGORY_LABELS.get(page["category"], page["category"])
+        label = workspace.category_labels.get(page["category"], page["category"])
         lines.append(f"- [{label}] {page['path']}")
     lines.extend(
         [
@@ -515,10 +501,11 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
     同样的内容，Markdown 比 JSON 省 30%~40% token——JSON 的引号、转义和字段名
     全都要花钱，而且 AI 读起来还更费劲。
     """
+    workspace = active()
     lines: list[str] = [
         f"# 文档检索：{pack['query']}",
         "",
-        f"来源：《{DATASET.name}》（{pack['product']} {pack['version']}）。"
+        f"来源：《{workspace.name}》（{pack['product']} {pack['version']}）。"
         f"预算 {pack['token_budget']:,} tokens，本次约用 {pack['estimated_tokens']:,}，"
         f"共 {len(pack['primary_knowledge'])} 条知识块。",
         "",
@@ -528,7 +515,7 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     for index, item in enumerate(pack["primary_knowledge"], 1):
-        label = CATEGORY_LABELS.get(item["category"], item["category"])
+        label = workspace.category_labels.get(item["category"], item["category"])
         lines.append(
             f"## {index}. {item['heading_path']}　"
             f"[{label} · {item['knowledge_type']} · K{item['id']}]"
@@ -543,10 +530,10 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
         lines.append("## 交叉关系（只给指针，正文未展开）")
         lines.append("")
         for relation in pack["one_hop_relations"]:
-            kind = RELATION_LABELS.get(
+            kind = workspace.relation_labels.get(
                 relation["relation_type"], relation["relation_type"]
             )
-            evidence = EVIDENCE_LABELS.get(
+            evidence = workspace.evidence_labels.get(
                 relation["evidence_kind"], relation["evidence_kind"]
             )
             expand = (

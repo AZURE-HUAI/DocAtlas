@@ -9,15 +9,14 @@ import time
 from typing import Any
 import zlib
 
-from .config import CATEGORY_PATTERNS, CHUNKER_VERSION, DATASET
+from .constants import CHUNKER_VERSION
+from .runtime import active, bind
 from .net import REQUEST_LIMITER
 from .util import log
 from .documents import fetch_document, transform_document
 from .store import store_document_result
 
 # 先抓哪一类由数据集说了算；没配就一视同仁。
-CATEGORY_PRIORITY = DATASET.category_priority
-
 
 def _category_order() -> str:
     """把优先级表编译成一段 SQL CASE。没配置时不排序，按 id 顺序抓。"""
@@ -42,7 +41,7 @@ def sample_quota(
     已经抓成功的算进这一类的额度里，所以重复运行不会越抓越多。
     """
     quota: dict[str, int] = {}
-    for key in CATEGORY_PATTERNS:
+    for key in active().dataset.categories:
         if category and key != category:
             continue
         available, done = connection.execute(
@@ -210,7 +209,7 @@ def crawl_documents(
                     break
                 row = pending.popleft()
                 dispatched.add(row["id"])
-                in_flight[executor.submit(fetch_document, row, delay)] = row
+                in_flight[executor.submit(bind(fetch_document), row, delay)] = row
             if not in_flight:
                 break
             done, _ = concurrent.futures.wait(
@@ -296,7 +295,7 @@ def reprocess_stored_documents(
     connection.commit()
     if skipped:
         log(f"跳过 {skipped:,} 页（没有原文存档）")
-    from .crossindex import build_cross_index  # 循环依赖：只在此处按需引入
+    from .relations import build_cross_index  # 循环依赖：只在此处按需引入
 
     build_cross_index(connection)
     return processed
