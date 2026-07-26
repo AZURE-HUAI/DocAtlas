@@ -183,10 +183,12 @@ MAX_TARGET_WORDS = 8
 
 
 def relation_rules(graph):
-    """Unreal 的三种关系证据，从最硬到最软。
+    """Unreal 的三种关系证据，按硬度从高到低排。
 
-    顺序有意为之：同一对实体被多条规则命中时，先产出的那条置信度更高，
-    去重时留下的就是证据更硬的那条。
+    三条规则的 `relation_type` + `evidence_kind` 两两不同，而去重是按
+    （起点、终点、关系类型、证据类型）来的，所以它们不会互相覆盖——同一对
+    实体可以既有 `blueprint_cpp_api` 又有 `targets_type`，各带各的证据。
+    这里的顺序只是给人读的：先写最硬的那条。
     """
     yield from _display_name_metadata(graph)
     yield from _target_type_statements(graph)
