@@ -1639,12 +1639,121 @@ class InventoryCandidateTests(unittest.TestCase):
             )
             self.assertEqual(self.find(sentence), [], sentence)
 
-    def test_a_truly_absent_name_still_says_the_docs_do_not_have_it(self):
+    def test_a_truly_absent_name_never_speaks_for_the_official_site(self):
+        """什么都没找到时，只能说"本数据集没有"，不能说"官方没有"。
+
+        DocAtlas 看得见的只有自己的清单，而清单的范围是数据集声明的那几个
+        目录。Blender 库只声明了两个节点目录，于是 `Shader Editor` 查不到——
+        然后系统回一句"官方文档确实没有这一页"，而那一页在官网上活得好好的
+        （BUG-011）。这不是措辞讲究：用户照这句话会去改查询词，而真正该改的
+        是收录范围，怎么改查询词都不可能有结果。
+        """
         lookup = ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
         self.assertEqual(lookup["weak_candidates"], [])
-        self.assertIn(
-            "官方文档确实没有这一页", "\n".join(context.describe_lookup(lookup))
+        steps = "\n".join(context.describe_lookup(lookup))
+        self.assertNotIn("官方文档确实没有这一页", steps)
+        self.assertIn("没有对得上的页面", steps)
+        # 得说清楚"没有"的边界在哪：本数据集只收了这几类。
+        self.assertIn("收录范围", steps)
+
+
+class QualifiedTargetTests(unittest.TestCase):
+    """用户已经把话说到最准了——精确地址、带命名空间的全名——还是取不到目标页。
+
+    这是 BUG-008 剩下的两条稳定复现，共同点是"更精确的输入反而更没用"：
+
+        https://cppreference.com/cpp/language/coroutines  → 一个候选都没有
+        std::ranges::sort                                 → 头名是 /cpp/algorithm/sort
+
+    两条都不是排序偏好问题，是确定性定位漏掉了查询里明摆着的信息。
+    """
+
+    PAGES = [
+        "/cpp/language/coroutines",
+        "/cpp/algorithm/sort",
+        "/cpp/algorithm/ranges/sort",
+        "/cpp/container/list/sort",
+    ]
+
+    def setUp(self):
+        self.workspace = self.enterContext(runtime.use("cppreference-2026-07-26"))
+        self.connection = temp_db(self)
+        for path in self.PAGES:
+            self.connection.execute(
+                "INSERT INTO pages(url, path, category, status, route_depth)"
+                " VALUES(?, ?, 'standard_library', 'pending', ?)",
+                (f"https://cppreference.com{path}", path, path.count("/")),
+            )
+        self.connection.commit()
+        initialize_db(self.connection)  # 回填 normalized_slug
+
+    def find(self, query, **kwargs):
+        return ondemand.find_uncrawled_candidates(
+            self.connection, query, limit=5, **kwargs
         )
+
+    def test_an_official_url_locates_exactly_that_page(self):
+        """贴地址是最强的线索，以前却是最没用的。
+
+        整条 URL 被当成一串普通文字规范化成
+        `httpscppreferencecomcpplanguagecoroutines`，跟任何 slug 都对不上。
+        """
+        rows = self.find("https://cppreference.com/cpp/language/coroutines")
+        self.assertEqual([row["path"] for row in rows], ["/cpp/language/coroutines"])
+        self.assertEqual(rows[0]["match_stage"], "exact_url")
+
+    def test_a_url_wrapped_in_a_sentence_still_counts(self):
+        rows = self.find("看下这一页 https://cppreference.com/cpp/algorithm/ranges/sort 讲了什么")
+        self.assertEqual([row["path"] for row in rows], ["/cpp/algorithm/ranges/sort"])
+
+    def test_a_path_printed_in_next_steps_can_be_pasted_straight_back(self):
+        """`related` 的下一步自己打印路径，那条命令就必须真能跑。
+
+            python -m docatlas get "/render/shader_nodes/index"
+
+        按名字匹配只看得到末段 `index`，于是系统给出的下一步跑不通——
+        用户照着做，得到的是"本数据集的清单里也没有对得上的页面"。
+        """
+        rows = self.find("/cpp/algorithm/ranges/sort")
+        self.assertEqual([row["path"] for row in rows], ["/cpp/algorithm/ranges/sort"])
+        self.assertEqual(rows[0]["match_stage"], "exact_url")
+
+    def test_a_path_that_is_not_in_the_inventory_matches_nothing(self):
+        self.assertEqual(self.find("/cpp/nothing/here/at/all"), [])
+
+    def test_a_path_variant_is_canonicalised_by_the_adapter(self):
+        """路径也有变体写法，认不认得出来是站点知识，不是核心该猜的。
+
+        cppreference 的 wiki 前缀 `/w/` 就是一例；UE 的语言段同理。
+        """
+        rows = self.find("/w/cpp/algorithm/ranges/sort")
+        self.assertEqual([row["path"] for row in rows], ["/cpp/algorithm/ranges/sort"])
+
+    def test_a_url_from_another_site_is_not_a_page_of_this_dataset(self):
+        """地址属不属于本数据集由来源适配器回答，核心不认识任何站点。"""
+        self.assertEqual(
+            ondemand.target_paths("https://example.invalid/cpp/algorithm/sort"), []
+        )
+        self.assertEqual(self.find("https://example.invalid/nothing/here"), [])
+
+    def test_namespace_in_the_query_picks_the_right_page_of_that_name(self):
+        """`std::ranges::sort` 和 `std::sort` 是两页，限定符就是区分它们的那一段。
+
+        以前限定符只被用来剥出末段 `sort`，前面几段整个丢掉——于是四个都叫
+        sort 的页面里，靠"路径浅的排前面"选出了 `/cpp/algorithm/sort`。
+        """
+        rows = self.find("std::ranges::sort")
+        self.assertEqual(rows[0]["path"], "/cpp/algorithm/ranges/sort")
+
+    def test_the_unqualified_symbol_still_gets_the_top_level_page(self):
+        """反向控制组：没有 ranges 这一段时，原来的顺序不能被改坏。"""
+        rows = self.find("std::sort")
+        self.assertEqual(rows[0]["path"], "/cpp/algorithm/sort")
+
+    def test_qualifier_segments_are_only_taken_from_qualified_tokens(self):
+        self.assertEqual(text.qualifier_segments("std::ranges::sort"), ["std", "ranges"])
+        self.assertEqual(text.qualifier_segments("sort"), [])
+        self.assertEqual(text.qualifier_segments("how do I sort a list"), [])
 
 
 class SampleQuotaTests(unittest.TestCase):
@@ -1981,13 +2090,17 @@ class InventoryCoverageTests(unittest.TestCase):
         self.assertNotIn("官方文档确实没有这一页", joined)
 
     def test_a_genuinely_absent_name_still_says_so(self):
-        """反向保证：真没有的东西不能都赖到来源范围上。"""
+        """反向保证：真没有的东西不能都赖到来源范围上。
+
+        但"本数据集没有"到此为止——DocAtlas 没有联网看过官网，说不出
+        "官方也没有"（BUG-011）。
+        """
         connection = self._linked_to_a_missing_page()
         result = context.related_payload(connection, "Absolutely Nothing")
         self.assertEqual(result["status"], "entity_not_found")
-        self.assertIn(
-            "官方文档确实没有这一页", chr(10).join(result["next_steps"])
-        )
+        joined = chr(10).join(result["next_steps"])
+        self.assertIn("本数据集的清单里也没有对得上的页面", joined)
+        self.assertNotIn("来源没有枚举到", joined)
 
     def test_gaps_separate_not_fetched_from_not_enumerated(self):
         connection = self._linked_to_a_missing_page()
@@ -2293,7 +2406,7 @@ class CrossLanguageDiagnosisTests(unittest.TestCase):
         connection = temp_db(self)
         lookup = ondemand.inventory_lookup(connection, "zzzznotarealpage")
         steps = chr(10).join(context.describe_lookup(lookup))
-        self.assertIn("官方文档确实没有这一页", steps)
+        self.assertIn("本数据集的清单里也没有对得上的页面", steps)
         self.assertNotIn("汉字", steps)
 
     def test_mcp_reports_language_mismatch_as_its_own_status(self):

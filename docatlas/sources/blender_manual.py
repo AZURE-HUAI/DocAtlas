@@ -28,8 +28,18 @@ def _manual_prefix(dataset) -> str:
 
 
 def _category_for_docname(dataset, docname: str) -> str | None:
-    for category, prefix in dataset.categories.items():
-        if docname.startswith(prefix):
+    """一个分类可以声明一个目录，也可以声明好几个。
+
+    手册按"功能"分目录，不按"学习一件事需要什么"分。节点内容在
+    `render/shader_nodes/`，而编辑节点的那个窗口在 `editors/` 底下——
+    同一件事的两半分处两地。一个分类只能写一个前缀时，数据集要么整个
+    `editors/` 都收（201 页，含视频序列器、摄影表这些与节点无关的），
+    要么一页都收不到（BUG-011）。
+    """
+    for category, prefixes in dataset.categories.items():
+        if isinstance(prefixes, str):
+            prefixes = (prefixes,)
+        if any(docname.startswith(prefix) for prefix in prefixes):
             return category
     return None
 
