@@ -652,6 +652,104 @@ class EndToEndTests(unittest.TestCase):
         markdown = context.render_context_markdown(pack)
         self.assertIn("没有命中", markdown)
 
+    # ---- 查询直接指名了页面（BUG-008）--------------------------------------
+
+    def seed_named_page(self):
+        """一个宽泛总页 + 一个具体目标页。
+
+        总页刻意用地址里那几个词堆出来，好复现真实失败：把整条 URL 当普通
+        全文查询时，`documentation` / `unreal` / `engine` 这些词让总页稳赢，
+        真正被指名的那一页反而排在后面。
+        """
+        self.add_page(
+            "/documentation/unreal-engine/overview",
+            "guides",
+            "Unreal Engine Documentation Overview",
+            [
+                text_block(
+                    "This documentation covers the Unreal Engine documentation set. "
+                    "Unreal Engine documentation is organised by area."
+                ),
+            ],
+        )
+        return self.add_page(
+            "/documentation/unreal-engine/timer-handles",
+            "guides",
+            "Timer Handles",
+            [
+                text_block("A timer handle identifies a scheduled callback."),
+                {"type": "heading", "level": 2, "text": "Clearing"},
+                text_block("Clear the handle to cancel the callback."),
+            ],
+        )
+
+    def test_an_official_url_scopes_the_answer_to_that_page(self):
+        """定位器认得 URL 还不够，**回答**也必须落在那一页上。
+
+        修之前：候选定位器能把 URL 解析成正确的路径，可 `build_context_pack`
+        仍然拿整串 URL 去做全文检索，于是首位是总页、目标页被挤到后面
+        （`ask "https://…/coroutines"` 首位是 `C++ language`）。
+        用户给出的最精确输入，答案却答的是别的页。
+        """
+        target_id = self.seed_named_page()
+        pack = context.build_context_pack(
+            self.connection,
+            "https://dev.epicgames.com/documentation/en-us/unreal-engine/timer-handles",
+            token_budget=3000,
+            category=None,
+        )
+        self.assertTrue(pack["primary_knowledge"], "被指名的那一页必须有内容")
+        self.assertEqual(
+            {item["page_id"] for item in pack["primary_knowledge"]},
+            {target_id},
+            "答案里混进了没被指名的页面",
+        )
+
+    def test_an_inventory_path_scopes_the_answer_the_same_way(self):
+        target_id = self.seed_named_page()
+        pack = context.build_context_pack(
+            self.connection,
+            "/documentation/unreal-engine/timer-handles",
+            token_budget=3000,
+            category=None,
+        )
+        self.assertEqual(
+            {item["page_id"] for item in pack["primary_knowledge"]}, {target_id}
+        )
+
+    def test_a_named_page_with_no_body_yet_returns_nothing_rather_than_others(self):
+        """指名的页面还没抓正文时，宁可空着，也不能拿别的页面顶上。
+
+        空结果会让 `answer()` 去补抓那一页；随便回一页无关内容则会让补抓
+        根本不发生，用户拿到的是"答非所问但看着像答案"。
+        """
+        self.seed_named_page()
+        self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, status, route_depth)"
+            " VALUES('https://example.invalid/documentation/unreal-engine/not-yet',"
+            " '/documentation/unreal-engine/not-yet', 'guides',"
+            " 'https://example.invalid/sitemap.xml', 'pending', 3)"
+        )
+        self.connection.commit()
+        pack = context.build_context_pack(
+            self.connection,
+            "/documentation/unreal-engine/not-yet",
+            token_budget=3000,
+            category=None,
+        )
+        self.assertEqual(pack["primary_knowledge"], [])
+
+    def test_a_normal_query_is_untouched_by_the_named_page_path(self):
+        """反向控制组：不含地址的普通查询，行为一个字都不能变。"""
+        self.seed_named_page()
+        pack = context.build_context_pack(
+            self.connection, "timer handle", token_budget=3000, category=None
+        )
+        self.assertTrue(pack["primary_knowledge"])
+        self.assertIn(
+            "Timer Handles", pack["primary_knowledge"][0]["page_title"]
+        )
+
 
 def make_section(title, body, *, position, level=2, knowledge_type="details",
                  parent="Page"):
@@ -1549,6 +1647,53 @@ class InventoryCandidateTests(unittest.TestCase):
         unknown = ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
         self.assertEqual(unknown["pending_pages"], [])
         self.assertEqual(unknown["crawled_pages"], [])
+
+    def test_a_page_the_site_redirected_away_says_so_instead_of_rephrase(self):
+        """官方把这一页撤了、跳到别处——这时"换个说法再试"永远不可能成立。
+
+        真实库里有 22 个这样的页：`…/GameFramework/AActor` 被 Epic 跳到 5.8
+        文档首页，抓回来是个没有正文的空壳。指名这一页时答案必然是空的，
+        而空结果配上"换个说法"会让人一直在错的方向上使劲。
+        """
+        self.connection.execute(
+            "UPDATE pages SET status='redirect',"
+            " redirect_url='https://example.invalid/moved-here'"
+            " WHERE normalized_slug='setfieldofview'"
+        )
+        self.connection.commit()
+        lookup = ondemand.inventory_lookup(self.connection, "Set Field Of View")
+        steps = "\n".join(context.describe_lookup(lookup))
+        self.assertIn("https://example.invalid/moved-here", steps)
+        self.assertIn("重定向", steps)
+        self.assertNotIn("换个说法", steps)
+
+    def test_a_dead_address_points_at_the_live_page_of_the_same_name(self):
+        """真实形状：旧地址被撤掉跳到首页，而搬家后的新页就在库里。
+
+        UE 的 `…/GameFramework/AActor` 正是这样——跳转目标是 5.8 文档首页，
+        跟着它走只会拿到首页；真正该看的是 `…/Engine/AActor`。所以跳转如实
+        报出、不替用户跟过去，同名的活页摆出来让人自己确认。
+        """
+        self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, status, route_depth)"
+            " VALUES('https://example.invalid/new/SetFieldOfView',"
+            " '/new/SetFieldOfView', 'blueprint_api',"
+            " 'https://example.invalid/s.xml', 'success', 3)"
+        )
+        self.connection.execute(
+            "UPDATE pages SET status='redirect', redirect_url='https://example.invalid/home'"
+            " WHERE path LIKE '%/BlueprintAPI/Camera/SetFieldOfView'"
+        )
+        self.connection.commit()
+        initialize_db(self.connection)  # 回填新页的 normalized_slug
+        steps = "\n".join(
+            context.describe_lookup(
+                ondemand.inventory_lookup(self.connection, "Set Field Of View")
+            )
+        )
+        self.assertIn("https://example.invalid/home", steps)
+        self.assertIn("/new/SetFieldOfView", steps)
+        self.assertIn("同名页面还在", steps)
 
     def test_lookup_reports_pages_that_are_already_local(self):
         self.connection.execute(

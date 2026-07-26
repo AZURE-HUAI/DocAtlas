@@ -34,10 +34,11 @@ from .ondemand import (
     ensure_available,
     inventory_lookup,
     missing_exact_pages,
+    target_paths,
 )
 from .relations import page_link_status
 from .runtime import active
-from .search import query_names, search_chunks
+from .search import page_chunks, query_names, search_chunks
 from .text import SCRIPT_NAMES, script_mismatch, script_of_language
 from . import versions
 
@@ -160,6 +161,25 @@ def _one_hop_relations(
     return relations
 
 
+def _named_pages(
+    connection: sqlite3.Connection, query: str, category: str | None
+) -> list[sqlite3.Row]:
+    """查询有没有直接指名页面——贴了官方地址，或清单里的路径。
+
+    这比任何名字都确定，所以它决定的是"答案出自哪一页"，不是"哪一页排前面"。
+    地址认不认得出来由来源适配器回答（见 `ondemand.target_paths`）。
+    """
+    paths = target_paths(query)
+    if not paths:
+        return []
+    sql = f"SELECT id, title FROM pages WHERE path IN ({','.join('?' for _ in paths)})"
+    params: list[Any] = list(paths)
+    if category:
+        sql += " AND category=?"
+        params.append(category)
+    return list(connection.execute(sql, params))
+
+
 def build_context_pack(
     connection: sqlite3.Connection,
     query: str,
@@ -168,7 +188,23 @@ def build_context_pack(
     category: str | None,
     version_intent: versions.Intent | None = None,
 ) -> dict[str, Any]:
-    candidates = search_chunks(connection, query, limit=60, category=category)
+    named = _named_pages(connection, query, category)
+    # 查询里贴了官方地址或清单路径，等于已经把页面指出来了。这时再拿整串地址
+    # 去做全文检索是本末倒置：地址里的 `documentation`、`language` 这类词会让
+    # 总目录页稳赢，被指名的那一页反而排在后面。有唯一标题就改用标题当检索词。
+    retrieval_query = named[0]["title"] if len(named) == 1 and named[0]["title"] else query
+
+    candidates = search_chunks(
+        connection, retrieval_query, limit=60, category=category
+    )
+    if named:
+        named_ids = {row["id"] for row in named}
+        candidates = [row for row in candidates if row["page_id"] in named_ids]
+        # 检索没把它排进来（标题为空、或页内用词与标题不搭）就直接按页读。
+        # 但**绝不**拿别的页面顶上：那会让 answer() 以为已经有答案，于是该
+        # 补抓的那一页永远抓不到，用户拿到"答非所问但看着像答案"的东西。
+        if not candidates:
+            candidates = page_chunks(connection, sorted(named_ids), limit=60)
     # 版本意图在裁剪预算之前生效：先决定"哪些内容对这个版本算数"，再决定
     # "预算内放得下哪几条"。反过来的话，被排除的内容已经占掉了名额。
     candidates, version_report = versions.apply(
@@ -191,8 +227,9 @@ def build_context_pack(
         )
     }
     # 名字精确命中时，只看这个实体自己的页面——不要把同目录的兄弟函数一起带进来。
+    # 已经按指名页面限定过就不再动：那一档比名字更确定。
     scoped = [row for row in candidates if row["page_id"] in exact_page_ids]
-    if scoped:
+    if scoped and not named:
         candidates = scoped
 
     primary_budget = max(1, int(token_budget * PRIMARY_BUDGET_RATIO))
@@ -219,6 +256,9 @@ def build_context_pack(
             "relations_are_pointers_only": True,
             "large_cpp_member_indexes": "ranked down",
             "exact_entity_scope": bool(scoped),
+            # 答案被限定在查询点名的那一页上。调用方据此可以放心转述：
+            # 这不是"检索觉得它最像"，是用户自己指的。
+            "named_page_scope": bool(named),
         },
     }
     if version_report:
@@ -263,7 +303,13 @@ def answer(
 
     pack = build()
     if allow_fetch:
-        exact_local = _has_exact_local_hit(pack, query)
+        # 指名的那一页已经有正文了，就是精确命中——不必再按名字去捞一批
+        # 名字相近的页面。指名了但正文还空着，则**必须**走补抓那条路。
+        named_and_local = (
+            pack["retrieval_policy"]["named_page_scope"]
+            and bool(pack["primary_knowledge"])
+        )
+        exact_local = named_and_local or _has_exact_local_hit(pack, query)
         needs_fetch = not exact_local or missing_exact_pages(
             connection, query, category
         )
@@ -460,6 +506,28 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
         lines.append(f'取回来再查：python -m docatlas get "{lookup["query"]}"')
         return lines
     if crawled:
+        # 官方把这一页撤掉、跳到别处时，抓回来的是个没有正文的空壳。这时
+        # "换个说法再试"永远不可能成立——内容已经不在那个地址上了。
+        # 注意跳转目标未必是"搬家后的新页"：Epic 撤掉
+        # `…/GameFramework/AActor` 时是跳到 5.8 文档首页，照着它去查只会
+        # 得到首页。所以这里只如实报出跳转，不替用户跟过去。
+        moved = [page for page in crawled if page.get("redirect_url")]
+        live = [page for page in crawled if not page.get("redirect_url")]
+        if moved:
+            lines = [
+                f"这 {len(moved)} 个页面官方做了重定向，抓回来没有正文——"
+                "内容已经不在原地址上了，换查询词不会有结果："
+            ]
+            lines.extend(f"  {page['path']} → {page['redirect_url']}" for page in moved)
+            if live:
+                # 同名页面还活着，多半就是官方搬家后的新位置——但那是推断，
+                # 所以摆出来让人自己确认，不直接拿它当答案顶上去。
+                lines.append("库里另有同名页面还在，很可能是搬家后的位置：")
+                lines.extend(f"  {page['path']}" for page in live)
+                lines.append(f'  python -m docatlas ask "{live[0]["path"]}"')
+            else:
+                lines.append("按跳转后的官方页面重新确定要查的名字，再查一次。")
+            return lines
         return [
             f"有 {len(crawled)} 个同名页面已经抓过了，但没有知识块命中这次的查询词。",
             f'换个说法再试，或直接读那一页：python -m docatlas ask "{lookup["query"]}"',
