@@ -2,13 +2,13 @@
 id: BUG-011
 title: "Blender 数据集清单遗漏节点工作流所需的跨目录基础页"
 type: bug
-status: open
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: high
 area: sources
 labels: [blender, inventory, source-adapter, relations]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-27
 github_issue: null
 fix_pr: null
 related: [BUG-008, BUG-013]
@@ -261,6 +261,84 @@ docatlas_ask(
 
 已经由一跳引用闭包解决的 Modifier、Node Groups 和通用缺页检测保留为历史记录，
 不再作为本次未解决范围。修复不得以无限扩大到 Blender 全站为代价。
+
+## 2026-07-27 解决记录
+
+剩下的两件事分属两层，结论也不一样：**错误诊断是真 bug，清单覆盖不是。**
+
+### 先测一件事：闭包到底够不够得到
+
+把 126 个 shader 节点页全部抓下来数了一遍出站链接（只读探针，0 次失败）：
+
+```text
+指向 /editors/shader_editor 的链接：0 / 126 页
+```
+
+一条都没有。手册从不从节点页链回编辑器页——所以这不是"闭包漏了一跳"，是
+**那条路根本不存在**，再抓多少页、等多少轮都不会出现。对照组：
+`/modeling/geometry_nodes/introduction` **有**一条指向 `/editors/geometry_node`，
+说明闭包机制本身是好的，只是几何节点那边写了、着色器那边没写。
+
+结论：清单覆盖这一半**不是程序缺陷**，是数据集当初只声明了两个目录。没有任何
+自动机制能替官网补上它从没写过的引用。
+
+### 真 bug：系统替官网下了它没资格下的结论
+
+`describe_lookup()` 的兜底话术是"还是没有，就说明官方文档确实没有这一页"。
+DocAtlas 看得见的只有自己的清单，而清单范围 = 数据集声明的目录。伤害很实在：
+用户照这句话会一遍遍改查询词，而真正该改的是收录范围，改查询词永远没结果。
+
+改成只说得出口的那部分，并把边界一起报出来：
+
+```text
+没有找到结果，本数据集的清单里也没有对得上的页面。
+这个库的收录范围是：Shader / Texture Nodes、Geometry Nodes、节点编辑器。
+DocAtlas 只看得见自己的清单，不能据此断定官网没有这一页。
+换成原文（en）里的官方写法再试一次；知道确切地址就直接把官方 URL 当查询词
+传进来……确认官网有、而这里查不到，那是收录范围的问题（见 WORKFLOWS.md 流程 B）。
+```
+
+通用改动，四个库同时生效。`SKILL.md` 同步写明"本数据集没有 ≠ 官方没有"。
+
+### 范围决定：一个分类可以声明多个目录
+
+`[categories]` 原本一个分类只能写一个前缀，于是 Blender 只有两个极端选择：整个
+`editors/` 都收（**201 页**，含视频序列器、摄影表、偏好设置），或者一页都不收。
+适配器改为接受字符串或列表（只动 `blender_manual._category_for_docname`，核心
+只遍历分类名，未受影响）：
+
+```toml
+node_editors = ["editors/shader_editor", "editors/geometry_node"]
+```
+
+**2 页**，正是议题点名、且闭包证明够不到的那两页。为什么不顺手收
+`editors/texture_node/`（44 页）：贴图节点是另一套系统，不在本数据集名字
+（Shader / Geometry Nodes）的范围里。
+
+### 复测（真实库，议题"验证"一节的命令）
+
+```powershell
+$env:DOCATLAS_DATASET='blender-manual-5.2'
+python -m docatlas crawl --discovery-only --refresh-sitemaps
+```
+
+（`--refresh-sitemaps` 是必需的：已成功的清单入口不会重读，新目录进不来。
+这一条已写进 `WORKFLOWS.md`。）
+
+| 查询 | 改前 | 改后 |
+|---|---|---|
+| `ask "Shader Editor"` | `fetch.requested=0`，首位 K143 `RGB Curves Node > Examples` | 当场抓回 `/editors/shader_editor`，首位就是 `Shader Editor` |
+| `related "Shader Editor"` | `entity_not_found` + "官方文档确实没有这一页" | `entity_found_but_no_relations` → 按 `next_steps` 补抓一页后 `status=ok` |
+| 关系内容 | —— | `official_reference → Shader Nodes`，`confidence=1.0`，带官方链接出处 |
+
+清单 647 → 649 页，已抓 60 → 67 页。`node_editors` 分类 2 页全部到齐。
+
+### 回归
+
+- 单元测试 231 → **241 全过**（含"一个分类可声明多个目录"和反向控制组：
+  video_sequencer / dope_sheet / texture_node 仍在范围外）。
+- 四个数据集 `validate` 的 inventory 7 项、content 16 项**全 pass**。
+- 另外三个库的页/块/实体/关系计数不受影响。
 
 ## 外部关联
 

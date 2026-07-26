@@ -32,6 +32,23 @@ def qualifier_tail(value: str) -> str:
     return tail
 
 
+def qualifier_segments(value: str) -> list[str]:
+    """限定名里末段之前的那几段：`std::ranges::sort` → `['std', 'ranges']`。
+
+    末段是"叫什么"，前面几段是"在哪儿"，而地址里往往原样带着这个位置
+    （`/cpp/algorithm/ranges/sort`）。只剥末段就等于把用户已经打出来的
+    位置信息扔了：`std::ranges::sort` 和 `std::sort` 于是变成同一条查询，
+    四个都叫 sort 的页面里只能靠"路径浅的排前面"瞎猜（BUG-008）。
+
+    没有限定符就返回空列表——普通句子里的句点不该被当成限定符，
+    所以只认段与段之间都有字母数字的写法。
+    """
+    parts = [part.strip() for part in re.split(r"::|\.", value.strip())]
+    if len(parts) < 2 or not all(re.search(r"[A-Za-z0-9]", part) for part in parts):
+        return []
+    return parts[:-1]
+
+
 def humanize_cpp_identifier(value: str) -> str:
     """把标识符拆成人话：`K2_SetTimer` → `K2 Set Timer`。"""
     value = value.split("::")[-1].replace("_", " ")

@@ -26,12 +26,13 @@ import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
+from .constants import URL_RE
 from .db import page_slug
 from .documents import fetch_document
 from .relations import link_new_pages
 from .runtime import active, bind
 from .search import query_names, tokenize, STOPWORDS
-from .text import qualifier_tail
+from .text import qualifier_segments, qualifier_tail
 from .store import store_document_result
 from .util import log
 
@@ -85,6 +86,67 @@ def _flattened_path(column: str = "path") -> str:
     return expression
 
 
+def _flatten(path: str) -> str:
+    """`_flattened_path` 的 Python 版，两边口径必须一致。"""
+    flat = path.casefold()
+    for separator in _PATH_SEPARATORS:
+        flat = flat.replace(separator, "")
+    return flat
+
+
+def target_paths(query: str) -> list[str]:
+    """查询里直接写出来的、属于本数据集的页面——地址或路径。
+
+    贴一条精确 URL 是用户能给出的**最强**线索，比任何名字都确定，因为它已经
+    把页面指出来了。可它以前是最没用的输入：整条地址被当成一串普通文字规范化
+    成 `httpscppreferencecomcpplanguagecoroutines`，跟任何 slug 都对不上，
+    于是"给了准确地址反而一页都抓不到"（BUG-008）。
+
+    路径同理，而且更要紧：`related` 和 `describe_lookup` 的 `next_steps`
+    自己就在打印路径（`get "/render/shader_nodes/index"`）。名字匹配对这条
+    路径只看得到末段 `index`，于是**系统给出的下一步命令自己跑不通**。
+
+    地址属不属于本数据集、对应哪一页，交给来源适配器回答；路径则原样比对，
+    它本来就是我们自己库里的写法。核心不认识任何站点。
+    """
+    dataset = active().dataset
+    resolve = active().extension("normalize_link_target")
+    found: list[str] = []
+
+    def remember(path: str | None) -> None:
+        if path and path not in found:
+            found.append(path)
+
+    for candidate in URL_RE.findall(query):
+        if resolve:
+            remember(resolve(dataset, candidate))
+    for token in query.split():
+        if not token.startswith("/") or "://" in token:
+            continue
+        # 先问适配器：路径也可能带着语言段之类的变体写法
+        # （`/documentation/en-us/unreal-engine/…` 和清单里的规范写法差一段）。
+        # 适配器不认（比如缺扩展名）时，原样比对——它本来就是库里的写法。
+        if resolve:
+            remember(resolve(dataset, token))
+        remember(token.rstrip("/") or None)
+    return found
+
+
+def query_qualifiers(query: str) -> list[str]:
+    """查询里"这东西在哪儿"的那几段：`std::ranges::sort` → `['ranges']`。
+
+    只留够长的段：`std` 这种两三个字母的命名空间在任何路径里都撞得到，
+    拿它排序等于随机。
+    """
+    found: list[str] = []
+    for token in tokenize(query):
+        for segment in qualifier_segments(token):
+            normalized = normalize_name(segment)
+            if len(normalized) >= MIN_CONTAINS_CHARS and normalized not in found:
+                found.append(normalized)
+    return found
+
+
 def identifier_tokens(query: str) -> list[str]:
     """查询里"一看就是个符号"的词：带 `::`、下划线或驼峰的那些。
 
@@ -107,10 +169,15 @@ def identifier_tokens(query: str) -> list[str]:
 
 def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
     """返回 [(档位, WHERE 片段, 参数)]，从最确定到最宽松。"""
+    stages: list[tuple[str, str, tuple[Any, ...]]] = []
+    # 地址排在所有名字之前：它不是"很像那一页"，它就是那一页。
+    if paths := target_paths(query):
+        stages.append(
+            ("exact_url", f"path IN ({','.join('?' for _ in paths)})", tuple(paths))
+        )
     names = query_names(query)
     if not names:
-        return []
-    stages: list[tuple[str, str, tuple[Any, ...]]] = []
+        return stages
     placeholders = ",".join("?" for _ in names)
     stages.append(("exact_slug", f"normalized_slug IN ({placeholders})", tuple(names)))
     # 整条查询对不上，但里面某个符号正好就是一页的名字——`duration_cast
@@ -142,6 +209,7 @@ def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
 
 def _collect(
     connection: sqlite3.Connection,
+    query: str,
     stages: list[tuple[str, str, tuple[Any, ...]]],
     *,
     status_clause: str,
@@ -151,15 +219,28 @@ def _collect(
     category_clause = " AND category=?" if category else ""
     category_params: tuple[Any, ...] = (category,) if category else ()
     order = f"ORDER BY {_priority_case()}, route_depth, id"
+    qualifiers = query_qualifiers(query)
     rows: list[sqlite3.Row] = []
     seen: set[int] = set()
     for stage, where, params in stages:
-        for row in connection.execute(
-            f"SELECT id, url, path, category, status, ? AS match_stage "
-            f"FROM pages WHERE ({where}) AND {status_clause}{category_clause} "
-            f"{order} LIMIT ?",
-            (stage, *params, *category_params, limit * 3),
-        ):
+        found = list(
+            connection.execute(
+                f"SELECT id, url, path, category, status, ? AS match_stage "
+                f"FROM pages WHERE ({where}) AND {status_clause}{category_clause} "
+                f"{order} LIMIT ?",
+                (stage, *params, *category_params, limit * 3),
+            )
+        )
+        # 同一档里若干页同名时，用户写出来的限定符就是区分它们的那一段：
+        # `std::ranges::sort` 的 `ranges` 明明白白写在正确那一页的地址里。
+        # 稳定排序，所以没有限定符命中时上面 SQL 的顺序原样保留。
+        if qualifiers:
+            found.sort(
+                key=lambda row: -sum(
+                    1 for q in qualifiers if q in _flatten(row["path"])
+                )
+            )
+        for row in found:
             if row["id"] in seen:
                 continue
             seen.add(row["id"])
@@ -185,7 +266,7 @@ def find_uncrawled_candidates(
     if exact_only:
         stages = [stage for stage in stages if stage[0] == "exact_slug"]
     return _collect(
-        connection, stages, status_clause=_PENDING, limit=limit, category=category
+        connection, query, stages, status_clause=_PENDING, limit=limit, category=category
     )
 
 
@@ -304,10 +385,11 @@ def inventory_lookup(
     """
     stages = _candidate_queries(query)
     pending = _collect(
-        connection, stages, status_clause=_PENDING, limit=limit, category=category
+        connection, query, stages, status_clause=_PENDING, limit=limit, category=category
     )
     crawled = _collect(
         connection,
+        query,
         stages,
         status_clause="status IN ('success', 'redirect')",
         limit=limit,

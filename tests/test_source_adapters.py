@@ -75,9 +75,32 @@ class BlenderManualAdapterTests(unittest.TestCase):
         self.assertIsNone(
             blender_manual.normalize_location(
                 self.dataset,
-                "https://docs.blender.org/manual/en/5.2/editors/geometry_node.html",
+                "https://docs.blender.org/manual/en/5.2/editors/dope_sheet/introduction.html",
             )
         )
+
+    def test_a_category_may_declare_several_directories(self):
+        """节点和"编辑节点的那个窗口"在手册里分处两地，却是同一件事的两半。
+
+        以前一个分类只能声明一个前缀，于是数据集要么整个 `editors/` 都收
+        （201 页，含视频序列器、摄影表这些与节点无关的），要么一页都收不到。
+        实测 126 个 shader 节点页里**没有任何一页**链向
+        `editors/shader_editor`，所以一跳引用闭包也够不到它——只能由数据集
+        自己声明，而声明得起的前提是一个分类能写多个目录。
+        """
+        for path in ("/editors/shader_editor", "/editors/geometry_node"):
+            self.assertEqual(
+                blender_manual.categorize_path(self.dataset, path), "node_editors", path
+            )
+        # 声明的是这两个编辑器，不是整个 editors/。
+        for path in (
+            "/editors/video_sequencer/introduction",
+            "/editors/dope_sheet/introduction",
+            "/editors/texture_node/introduction",
+        ):
+            self.assertIsNone(
+                blender_manual.categorize_path(self.dataset, path), path
+            )
 
     def test_search_index_and_html_parsing(self):
         index = (

@@ -47,6 +47,18 @@ DocAtlas 核心负责确定性检索、排序、关系和证据；开放式理�
 时 6000。知道分类就传 `category`；只用本地内容时传 `no_fetch=true`。默认返回
 Markdown，需要稳定字段时才用 `format="json"`。
 
+### 已知确切页面时，直接传地址
+
+`query` 接受官方 URL 或清单内路径，会直接定位到那一页，不再靠名字猜：
+
+```text
+docatlas_ask(query="https://cppreference.com/cpp/language/coroutines")
+docatlas_ask(query="/render/shader_nodes/index")
+```
+
+这是最强的定位方式，用于 `next_steps` 给出路径、或用户贴了官方链接的场合。
+限定符同样有效：`std::ranges::sort` 会命中 `ranges` 那一页，不会退回 `std::sort`。
+
 版本意图：
 
 - `strict`：用户明确限定目标版本。
@@ -61,7 +73,7 @@ Markdown，需要稳定字段时才用 `format="json"`。
 
 ## 关系与证据
 
-`related` 用于回答“属于什么、对应什么、作用于什么”。每条关系都带方向、证据、
+`related` 用于回答"属于什么、对应什么、作用于什么"。每条关系都带方向、证据、
 置信度和出处。
 
 - `confidence=1.0`：可按官方事实转述。
@@ -72,7 +84,7 @@ Markdown，需要稳定字段时才用 `format="json"`。
 `related` 返回 `entity_found_but_no_relations` 且 `next_steps` 列出同一清单内的
 pending 路径时，AI 应自动完成一次有上限的闭环：
 
-1. 用相同 `dataset_id` 调用 `docatlas_ask`，查询返回的精确 path 或官方页面名，
+1. 用相同 `dataset_id` 调用 `docatlas_ask`，`query` 直接传返回的那条路径，
    保持有限 `fetch_limit`。
 2. 补抓成功后，用原实体重试一次 `docatlas_related`。
 3. `target_outside_inventory`、站外目标、弱候选或抓取失败时停止，并说明实际边界；
@@ -94,8 +106,10 @@ pending 路径时，AI 应自动完成一次有上限的闭环：
 | `target_outside_inventory` | 官方目标存在，但来源清单未覆盖 |
 | `knowledge_id_not_found` | K 编号无效或已过期 |
 
-清单没有候选时只能说“当前数据集未收录或未找到”，不能据此断言官网没有该页面。
-不要用记忆补写缺失内容。
+**"本数据集没有"不等于"官方没有"。** 清单范围由数据集声明的目录决定，
+DocAtlas 没有联网核对过官网。空结果只能说成"当前数据集未收录或未找到"；
+用户坚持官网确实有那一页时，那是收录范围问题，改查询词无效，见
+`WORKFLOWS.md` 流程 B。不要用记忆补写缺失内容。
 
 ## 引用与上下文
 
