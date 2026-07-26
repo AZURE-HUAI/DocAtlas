@@ -1901,6 +1901,142 @@ class QualifiedTargetTests(unittest.TestCase):
         self.assertEqual(text.qualifier_segments("how do I sort a list"), [])
 
 
+class UrlFragmentTests(unittest.TestCase):
+    """URL 后面的 `#小节` 是用户能给出的最细的指认，不能被丢掉（BUG-014）。
+
+    页面级限定做好之后暴露出来的下一层：`…/on-screen-containers#screen-insets`
+    只被用到了 `/on-screen-containers`，`#screen-insets` 整个丢了，于是回答退回
+    页面概览，而目标小节的正文明明就在本地库里。
+
+    库里的锚点是拍平的（`screeninsets`），官方 href 是带连字符的
+    （`screen-insets`）——两边用同一条规范化规则才对得上。
+    """
+
+    PAGE = "/documentation/unreal-engine/on-screen-containers"
+    ROOT = "On-screen UI containers"
+    PROPS = f"{ROOT} > Container properties"
+    INSETS = f"{PROPS} > Screen insets"
+
+    # 照真实库的形状建：CoreUISafeInsets 自带锚点，但 heading_path 归在
+    # Screen insets 底下。只按锚点精确匹配会漏掉它。
+    CHUNKS = [
+        ("overview", ROOT, "", "On-screen UI containers hold interface elements."),
+        ("parameters", PROPS, "containerproperties", "Container properties table."),
+        ("details", INSETS, "screeninsets",
+         "ScreenInsets controls how a container is inset from the screen edges."),
+        ("details", INSETS, "coreuisafeinsets",
+         "CoreUISafeInsets keeps interface clear of the CoreUI top bar."),
+        ("details", PROPS, "displayorder", "DisplayOrder decides which container draws on top."),
+    ]
+
+    def setUp(self):
+        self.connection = temp_db(self)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status)"
+            " VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        page_url = f"https://example.invalid{self.PAGE}"
+        self.page_id = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, status, title, route_depth)"
+            " VALUES(?, ?, 'guides', 'https://example.invalid/s.xml', 'success', ?, 3)",
+            (page_url, self.PAGE, self.ROOT),
+        ).lastrowid
+        now = "2026-07-27T00:00:00Z"
+        self.by_anchor: dict[str, int] = {}
+        for index, (kind, heading_path, anchor, body) in enumerate(self.CHUNKS):
+            section_id = self.connection.execute(
+                "INSERT INTO sections(page_id, position, heading_level, heading_path,"
+                " title, content_md, content_text, source_url, token_estimate)"
+                " VALUES(?, ?, 2, ?, ?, ?, ?, '', 10)",
+                (self.page_id, index, heading_path, heading_path.split(" > ")[-1],
+                 body, body),
+            ).lastrowid
+            anchored = f"{page_url}#{anchor}" if anchor else page_url
+            chunk_id = self.connection.execute(
+                "INSERT INTO chunks(section_id, page_id, chunk_index, chunk_count,"
+                " knowledge_type, title, heading_path, context_prefix, content_md,"
+                " content_text, source_url, source_anchor, token_estimate,"
+                " content_hash, quality_score, created_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 20, ?, 1.0, ?, ?)",
+                (section_id, self.page_id, index, len(self.CHUNKS), kind,
+                 heading_path.split(" > ")[-1], heading_path, body, body,
+                 page_url, anchored, f"hash{index}", now, now),
+            ).lastrowid
+            self.by_anchor[anchor or "(root)"] = chunk_id
+        self.connection.commit()
+
+    def ask(self, query, **kwargs):
+        return context.build_context_pack(
+            self.connection, query, token_budget=3000, category=None, **kwargs
+        )
+
+    def url(self, fragment=""):
+        base = f"https://dev.epicgames.com{self.PAGE}"
+        return f"{base}#{fragment}" if fragment else base
+
+    def test_the_official_dash_form_maps_to_the_local_anchor(self):
+        """官方 href 是 `#screen-insets`，库里存的是 `screeninsets`。
+
+        两边都按"只留小写字母和数字"规范化，这条桥是通用的，不需要站点知识。
+        """
+        self.assertEqual(ondemand.target_fragment(self.url("screen-insets")), "screeninsets")
+        self.assertEqual(ondemand.target_fragment(self.url("ScreenInsets")), "screeninsets")
+        self.assertEqual(ondemand.target_fragment(self.url()), "")
+
+    def test_a_url_fragment_selects_that_section(self):
+        pack = self.ask(self.url("screen-insets"))
+        ids = [item["id"] for item in pack["primary_knowledge"]]
+        self.assertTrue(ids, "小节正文就在库里，不该是空的")
+        self.assertEqual(
+            ids[0], self.by_anchor["screeninsets"], "首位必须是 fragment 指的那一节"
+        )
+        self.assertNotIn(
+            self.by_anchor["(root)"], ids, "退回页面概览正是这个议题反对的"
+        )
+
+    def test_a_subsection_under_it_comes_along(self):
+        """`CoreUISafeInsets` 自带锚点，却归在 `Screen insets` 底下。
+
+        只按锚点精确匹配会把它漏掉，而它正是用户点进那一节要读的内容。
+        锚点负责认出是哪一节，`heading_path` 负责划定这一节到哪儿为止。
+        """
+        pack = self.ask(self.url("screen-insets"))
+        ids = set(item["id"] for item in pack["primary_knowledge"])
+        self.assertEqual(
+            ids,
+            {self.by_anchor["screeninsets"], self.by_anchor["coreuisafeinsets"]},
+        )
+
+    def test_a_fragment_that_matches_nothing_says_so(self):
+        """认不出来就说认不出来，不能静默退回页面概览。
+
+        静默退回时用户看到的是一个像模像样的答案，完全不知道自己指的那一节
+        根本没被用上。
+        """
+        pack = self.ask(self.url("no-such-section"))
+        intent = pack["fragment_intent"]
+        self.assertEqual(intent["fragment"], "nosuchsection")
+        self.assertFalse(intent["matched"])
+        # 认不出小节，但页面是对的——页面级合同照旧生效。
+        self.assertTrue(pack["primary_knowledge"])
+        self.assertEqual(
+            {item["page_id"] for item in pack["primary_knowledge"]}, {self.page_id}
+        )
+
+    def test_a_matched_fragment_is_reported_back(self):
+        intent = self.ask(self.url("screen-insets"))["fragment_intent"]
+        self.assertTrue(intent["matched"])
+        self.assertEqual(intent["section"], "Screen insets")
+
+    def test_a_url_without_a_fragment_keeps_the_page_level_contract(self):
+        """反向控制组：BUG-008 的页面级行为一个字都不能变。"""
+        pack = self.ask(self.url())
+        self.assertNotIn("fragment_intent", pack)
+        self.assertEqual(
+            {item["page_id"] for item in pack["primary_knowledge"]}, {self.page_id}
+        )
+
+
 class SampleQuotaTests(unittest.TestCase):
     """`--sample-per-category N` 是每类的上限，不是全局配额。
 

@@ -34,6 +34,7 @@ from .ondemand import (
     ensure_available,
     inventory_lookup,
     missing_exact_pages,
+    target_fragment,
     target_paths,
 )
 from .relations import page_link_status
@@ -180,6 +181,41 @@ def _named_pages(
     return list(connection.execute(sql, params))
 
 
+def _chunk_anchor(chunk: dict[str, Any]) -> str:
+    """这一块自己的锚点，拍平成和 fragment 一个口径。没有锚点就是空串。"""
+    url = chunk.get("source_url") or ""
+    return normalize_name(url.split("#", 1)[1]) if "#" in url else ""
+
+
+def _fragment_section(
+    chunks: list[dict[str, Any]], fragment: str
+) -> tuple[list[dict[str, Any]], str]:
+    """挑出 fragment 指的那一节，返回 (这一节的块, 小节名)。
+
+    两步缺一不可：
+
+    - **锚点认出是哪一节。** 锚点由标题拍平而来，官方 href 拍平之后正好对上。
+    - **`heading_path` 划定这一节到哪儿为止。** 一节里可以有好几块，其中带
+      自己小标题的那几块锚点并不等于这一节的锚点——Roblox 的
+      `CoreUISafeInsets` 就挂在 `Screen insets` 底下，只按锚点匹配会只给一块，
+      把用户点进这一节真正要读的内容留在外面。
+    """
+    roots = [chunk for chunk in chunks if _chunk_anchor(chunk) == fragment]
+    if not roots:
+        return [], ""
+    scopes = {chunk["heading_path"] for chunk in roots}
+    selected = [
+        chunk
+        for chunk in chunks
+        if any(
+            chunk["heading_path"] == scope
+            or chunk["heading_path"].startswith(f"{scope} > ")
+            for scope in scopes
+        )
+    ]
+    return selected, roots[0]["heading_path"].split(" > ")[-1]
+
+
 def build_context_pack(
     connection: sqlite3.Connection,
     query: str,
@@ -197,14 +233,32 @@ def build_context_pack(
     candidates = search_chunks(
         connection, retrieval_query, limit=60, category=category
     )
+    fragment_report: dict[str, Any] | None = None
     if named:
         named_ids = {row["id"] for row in named}
         candidates = [row for row in candidates if row["page_id"] in named_ids]
+        # 指名到小节时整页读回来自己挑：这时候用户已经把话说到最细了，
+        # 再让全文检索去撞只会把无关小节排前面。
+        fragment = target_fragment(query)
         # 检索没把它排进来（标题为空、或页内用词与标题不搭）就直接按页读。
         # 但**绝不**拿别的页面顶上：那会让 answer() 以为已经有答案，于是该
         # 补抓的那一页永远抓不到，用户拿到"答非所问但看着像答案"的东西。
-        if not candidates:
+        if fragment or not candidates:
             candidates = page_chunks(connection, sorted(named_ids), limit=60)
+        if fragment:
+            section, section_name = _fragment_section(candidates, fragment)
+            fragment_report = {
+                "fragment": fragment,
+                "matched": bool(section),
+                "section": section_name or None,
+            }
+            if section:
+                # 这一节排前面，本页其余内容跟在后面当上下文——预算不够时
+                # 自然被裁掉，够时多给几块也不亏。
+                chosen = {chunk["id"] for chunk in section}
+                candidates = section + [
+                    chunk for chunk in candidates if chunk["id"] not in chosen
+                ]
     # 版本意图在裁剪预算之前生效：先决定"哪些内容对这个版本算数"，再决定
     # "预算内放得下哪几条"。反过来的话，被排除的内容已经占掉了名额。
     candidates, version_report = versions.apply(
@@ -263,6 +317,10 @@ def build_context_pack(
     }
     if version_report:
         pack["version_intent"] = version_report
+    # 和版本条件同一个道理：限定条件用了就得说出来。悄悄按小节筛过、或者
+    # 认不出那一节而静默退回页面概览，都会让调用方以为看到的就是全部。
+    if fragment_report:
+        pack["fragment_intent"] = fragment_report
     return pack
 
 
@@ -639,6 +697,22 @@ def _render_empty(pack: dict[str, Any]) -> list[str]:
     return lines
 
 
+def describe_fragment(intent: dict[str, Any]) -> str:
+    """一句话说清 `#小节` 起没起作用。认不出来时尤其要说。
+
+    静默退回页面概览的话，用户看到的是一个像模像样的答案，完全不知道自己
+    指的那一节根本没被用上（BUG-014）。
+    """
+    if not intent:
+        return ""
+    if intent.get("matched"):
+        return f"已按地址里的 `#{intent['fragment']}` 限定到小节「{intent['section']}」。"
+    return (
+        f"注意：地址里的 `#{intent['fragment']}` 在本页没有对应的小节，"
+        "下面是整页的内容。小节名可能已经改过，按页内实际标题再查一次更准。"
+    )
+
+
 def render_context_markdown(pack: dict[str, Any]) -> str:
     """把上下文包渲染成给 AI 读的 Markdown。
 
@@ -657,6 +731,8 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
     # 按版本筛过就必须说出来。悄悄少几条，比排错更难被发现。
     if lines_about_version := versions.describe(pack.get("version_intent") or {}):
         lines.extend([*lines_about_version, ""])
+    if line_about_fragment := describe_fragment(pack.get("fragment_intent") or {}):
+        lines.extend([line_about_fragment, ""])
     if not pack["primary_knowledge"]:
         lines.extend(_render_empty(pack))
         return "\n".join(lines)

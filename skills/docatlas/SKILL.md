@@ -49,15 +49,21 @@ Markdown，需要稳定字段时才用 `format="json"`。
 
 ### 已知确切页面时，直接传地址
 
-`query` 接受官方 URL 或清单内路径，会直接定位到那一页，不再靠名字猜：
+`query` 接受官方 URL 或清单内路径，会直接定位到那一页，不再靠名字猜；地址带
+`#小节` 时继续限定到该小节：
 
 ```text
 docatlas_ask(query="https://cppreference.com/cpp/language/coroutines")
 docatlas_ask(query="/render/shader_nodes/index")
+docatlas_ask(query="https://create.roblox.com/docs/ui/on-screen-containers#screen-insets")
 ```
 
 这是最强的定位方式，用于 `next_steps` 给出路径、或用户贴了官方链接的场合。
 限定符同样有效：`std::ranges::sort` 会命中 `ranges` 那一页，不会退回 `std::sort`。
+
+传了 `#小节` 就要读回来的 `fragment_intent`：`matched=false` 表示这一节在本页
+没找到（多半是官方改过标题），此时给的是整页内容，应按页内实际标题重查，不要
+当成那一节的答案转述。
 
 版本意图：
 
