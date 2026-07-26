@@ -2,15 +2,15 @@
 id: ENH-002
 title: "Skill 与 MCP 形成明确的组合入口"
 type: enhancement
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: integrations
 labels: [skill, mcp, cli, contract]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [BUG-005]
 ---
 
@@ -75,6 +75,21 @@ related: [BUG-005]
 每个都有 handler（`test_every_advertised_tool_has_a_handler`）。
 
 回归测试：128 用例全过。
+
+### 2026-07-26：多数据集真实使用边界
+
+本议题现有验证证明“有 MCP 时优先、没有时回退 CLI”，但本轮进一步遇到一种中间
+状态：**MCP 存在，却服务错误的数据集**。
+
+- 当前 MCP 固定服务 `epic-ue-5.8`。
+- cppreference 与 Blender 两个目标数据集已在本机建立并通过小样合同，但
+  `docatlas_list_datasets` 只列出当前 server 的配置，查询工具没有
+  `dataset_id` 参数。
+- 三个方向因此不能把“有 MCP 就优先”机械理解为可用，必须先核对数据集，再将
+  181 次有效查询全部回退 CLI。
+
+这说明组合约定还需要加入“能力与目标数据集匹配”这一层；更完整的中立路由和
+结构化响应合同由 `ENH-006` 单独讨论。
 
 ## 解决记录
 

@@ -2,15 +2,15 @@
 id: BUG-009
 title: "非 Unreal 数据集仍被标记为 UE 和 ue_version"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: dataset
 labels: [dataset, versioning, context, reports, multi-dataset]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [ENH-003, ENH-004]
 ---
 

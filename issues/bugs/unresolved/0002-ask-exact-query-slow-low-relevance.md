@@ -71,6 +71,30 @@ python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-bud
 Principled Hair 与公共导航块仍能排在更精确正文之前，因此保留为本议题的新增排序
 证据。在线目标页均按对应版本核对可访问。
 
+### 2026-07-26：固定版本重建后的版本语义复现
+
+重新建立 `cppreference-2026-07-26` 与 `blender-manual-5.2` 小样并完成 36 轮后，
+主智能体确认普通本地调用约 0.2 秒，主要残余问题仍是相关性和版本语义：
+
+- 精确 `std::optional` 已能在 221 ms 内正确首位命中标准页面，说明单个精确实体
+  的基础路径可用。
+- 查询
+  `In strict C++20, should I return std::optional when a map lookup may find no value?`
+  在 199 ms 内返回，但首位是 C++23 的
+  `std::flat_map<...>::contains`，`std::optional` 只排第二，实验版 optional 也混在
+  前四位。固定 C++20 学习语境没有约束候选版本。
+- Blender 5.2 查询
+  `In Blender 5.2, what replaced the old Transfer Attribute node?`
+  在 204 ms 内返回，首位为当前版复数 `Transfer Attributes Node`。固定版本官网的
+  `Sample Index Node` 页面明确写着它重现的是 Blender 3.4 以前旧单数
+  `Transfer Attribute` 的行为；新复数节点不是该版本迁移问题的答案。
+- C++ 轮次还稳定复现：C++20 虚析构问题被 C++26 reflection
+  `std::meta::has_virtual_destructor` 压制；map/optional 问题被 experimental
+  optional 或 C++23 ranges 条目压制。
+
+这些结果证明当前缺口不是冷抓网络耗时，而是目标已本地化之后，查询里的版本/标准
+限定没有可靠进入排序和上下文组织。
+
 ## 验证
 
 ```powershell

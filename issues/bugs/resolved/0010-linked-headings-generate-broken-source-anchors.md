@@ -2,15 +2,15 @@
 id: BUG-010
 title: "含 Markdown 链接的标题会生成不可跳转的来源锚点"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: chunking
 labels: [chunking, source-url, citation, markdown]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: []
 ---
 
