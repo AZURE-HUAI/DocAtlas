@@ -2,7 +2,7 @@
 id: BUG-002
 title: "精确 `ask` 查询仍然偏慢，且结果相关性较低"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: high
 area: search
@@ -70,3 +70,50 @@ python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-bud
 这些结果与 BUG-008 的 pending 补抓缺口有关但不完全相同：即使目标页已经显式抓取，
 Principled Hair 与公共导航块仍能排在更精确正文之前，因此保留为本议题的新增排序
 证据。在线目标页均按对应版本核对可访问。
+
+## 验证
+
+```powershell
+python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-budget 2500 --category blueprint_api --fetch-limit 3
+```
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 耗时 | 39.2 秒 | **0.49 秒** |
+| 首位结果 | OpenCV Camera View Info | **Set Field Of View** |
+| 目标节点是否出现 | 完全没有 | 第 1 条 |
+
+前 6 条依次是 Set Field Of View、Make Open CVCamera View Info、Set First Person
+Field Of View、Get Effective Field Of View、Set Enable First Person Field Of
+View、Set Use Field Of View for LOD——查询里明确写出的那一个排到了首位，
+其余相关节点紧随其后。
+
+回归测试：128 用例全过，其中 `QualifierAndAliasTests`、`InventoryCandidateTests`
+覆盖名称扩展与候选定位。
+
+## 解决记录
+
+**根因有两个，都不是排序公式的问题。**
+
+1. **慢**：和 BUG-001 同一个根因（`--category` 让全文索引不再当外层循环）。
+   修复后 39.2 秒 → 0.49 秒。
+2. **不准**：目标页 `/BlueprintAPI/Camera/SetFieldOfView` 当时**根本不在本地**，
+   状态是 `pending`。原来的 `ask` 只在"本地一条结果都没有"或"整条查询规范化后
+   与某个 slug 完全一致"时才补抓；这条查询两个条件都不满足，于是拿一堆沾边的
+   Camera 页面凑了个答案。排序再怎么调，也排不出一条不存在的记录。
+
+**改动**：
+- `docatlas/search.py`：`CROSS JOIN` 修性能（同 BUG-001）。
+- `docatlas/context.py` 新增 `answer()`，把"要不要补抓"的判断从
+  "本地有没有结果"改成 **"本地有没有一条结果的页面标题就是用户问的名字"**
+  （`_has_exact_local_hit`）。弱相关的本地块不再能挡住真正的目标页。
+- 候选定位改成三档（见 BUG-008），"Set Field Of View" 这样带空格的官方名
+  能命中 `exact_slug`。
+
+排序权重一个都没动。首位命中的改善来自"目标页现在真的在库里了"，
+而不是把某类结果人为提权——后者会伤到概念查询。
+
+## 外部关联
+
+- GitHub Issue：
+- 修复 PR：

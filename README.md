@@ -68,16 +68,34 @@ python -m docatlas crawl --discovery-only    # 第一步：枚举全站页面清
 # → 然后直接给出答案
 ```
 
-匹配靠 URL 最后一段，所以怎么称呼都能对上：
+定位分三档，从最确定到最宽松，所以怎么称呼都能对上：
 
-| 你说 | 对上的页面 |
-|---|---|
-| `K2_SetTimer` | `…/UKismetSystemLibrary/K2_SetTimer` |
-| `Set Timer by Function Name` | `…/Time/SetTimerbyFunctionName` |
-| `ACharacter` | `…/Engine/ACharacter` |
+| 你说 | 对上的页面 | 靠什么 |
+|---|---|---|
+| `K2_SetTimer` | `…/UKismetSystemLibrary/K2_SetTimer` | 末段完全一致 |
+| `Set Timer by Function Name` | `…/Time/SetTimerbyFunctionName` | 同上（忽略空格大小写） |
+| `Fields` | `…/geometry_nodes/fields.html` | 同上（`.html` 不算名字的一部分） |
+| `std::from_chars` | `…/utility/from_chars` | 同上（限定名只取末段） |
+| `Nanite` | `…/nanite-virtualized-geometry-…` | 末段里含有这个词 |
+| `Wave Texture Node` | `…/shader_nodes/textures/wave.html` | 每个实词都出现在路径里 |
+
+最后一档要求**全部**实词命中，所以"怎么让物体发光"这类概念提问不会误触发补抓。
 
 想提前备好一批页面（比如要连着查一个类的成员），用 `get`。
 不想联网（离线、或只想看本地有什么）：`python -m docatlas ask "Nanite" --no-fetch`。
+
+### 查不到时会告诉你是哪一种"没有"
+
+空结果本身没有信息量，所以 `ask` / `find` / `links` 都会说清楚：
+
+| 情况 | 会看到 | 下一步 |
+|---|---|---|
+| 清单里有这一页，正文还没取 | 列出对得上的页面路径 | 照提示 `get`，或直接用 `ask`（自动补抓） |
+| 页面已经在本地，只是词没对上 | "同名页面已经抓过了" | 换个说法 |
+| 清单里也没有 | "全站清单里也没有对得上的页面" | 官方确实没有这一页 |
+
+`find` 还有一种情况：结果不空，但清单里躺着一个**名字完全一致**的页面没抓——
+它会在末尾单独提示，免得你拿一堆沾边的结果凑答案。
 
 ### `ask` 和 `find` 该用哪个？
 
@@ -239,11 +257,17 @@ $env:DOCATLAS_DATASET = 'epic-ue-5.9'
 
 两种接法，装哪个都行，也可以都装。
 
-### Claude Code 技能
+### Skill（Claude Code / Codex）
 
 ```powershell
-.\scripts\install-skill.ps1
+.\scripts\install-skill.ps1                 # 装到检测到的所有客户端
+.\scripts\install-skill.ps1 -Client codex   # 只装某一个
 ```
+
+支持 Claude Code（`~/.claude/skills/`）和 Codex（`~/.codex/skills/`），
+只装到真实存在的客户端目录。写出的文件一律是 **UTF-8 无 BOM**——
+Windows PowerShell 默认会加 BOM，而 Codex 读到 BOM 就认不出 `SKILL.md`。
+装完脚本会自己验一遍（文件非空、无 BOM、占位符都填掉了、frontmatter 完好）。
 
 装完之后任何会话里问到相关问题，AI 会自动先查本地库，而不是凭记忆或联网。
 
@@ -264,8 +288,9 @@ $env:DOCATLAS_DATASET = 'epic-ue-5.9'
 }
 ```
 
-提供四个工具：`docatlas_ask`（默认用这个）、`docatlas_search`、
-`docatlas_show`、`docatlas_list_datasets`。
+提供五个工具：`docatlas_ask`（默认用这个）、`docatlas_search`、
+`docatlas_show`、`docatlas_related`、`docatlas_list_datasets`。
+它们和命令行调用的是同一套检索代码，结果一致——有测试钉着这一点。
 
 想同时查多个版本，就配多个条目，各自加 `"env": {"DOCATLAS_DATASET": "epic-ue-5.9"}`。
 
@@ -283,7 +308,7 @@ $env:DOCATLAS_DATASET = 'epic-ue-5.9'
 ## 七、开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 离线测试，不联网，不碰真实数据库
+python -m unittest discover -s tests -v      # 128 个用例，离线，不碰真实数据库
 ```
 
 改代码前请先看 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

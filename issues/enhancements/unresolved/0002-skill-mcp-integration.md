@@ -2,7 +2,7 @@
 id: ENH-002
 title: "Skill 与 MCP 形成明确的组合入口"
 type: enhancement
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: medium
 area: integrations
@@ -56,3 +56,50 @@ related: [BUG-005]
 - 不要求 MCP 成为唯一入口。
 - 不要求把建库、全量抓取等长时间维护操作全部迁入 MCP。
 - 不在本议题中预先确定每个命令必须属于哪一种接入方式。
+
+## 验证
+
+契约测试（`SkillMcpContractTests`，全部离线）：
+
+| 用例 | 守住什么 |
+|---|---|
+| `test_every_argument_the_handlers_read_is_declared` | 反射每个 handler 源码里的 `arguments.get("…")`，必须全部出现在该工具的 `inputSchema.properties` 里 |
+| `test_skill_lists_the_tools_that_actually_exist` | `SKILL.md` 里的工具清单由 `mcpserver.TOOLS` 生成，不可能写出不存在的工具 |
+| `test_skill_tells_the_ai_to_prefer_mcp` | `SKILL.md` 必须写明 MCP 优先 |
+| `test_cli_and_mcp_answer_through_the_same_function` | 两边的 `ask` 必须都调 `context.answer()` |
+
+原有的 `test_documented_commands_all_exist` 继续守 CLI 一侧。
+
+握手与工具列表实测：5 个工具（`docatlas_ask` / `docatlas_search` /
+`docatlas_show` / `docatlas_related` / `docatlas_list_datasets`）全部列出，
+每个都有 handler（`test_every_advertised_tool_has_a_handler`）。
+
+回归测试：128 用例全过。
+
+## 解决记录
+
+**缺口有三条，逐条处理：**
+
+1. **能力不对齐**——MCP 少了 `related`。已补 `docatlas_related`，
+   返回和 CLI 同一套结构化状态（BUG-005）。`get` 不单独开工具：
+   `docatlas_ask` 已经会自动补抓，再开一个只会制造"该用哪个"的犹豫。
+   `stats` 和建库类命令**有意留在 CLI**——它们要跑几分钟到几小时，
+   不适合放进一次工具调用里，`WORKFLOWS.md` 负责这一半。
+2. **公开合同缺参数**——`tool_ask()` 一直在读 `fetch_limit`，
+   `inputSchema` 里却没有它，等于没有任何客户端知道可以传。已补，
+   并用上表第一条用例把这类漏洞钉死，以后加参数忘了公开会直接测试失败。
+3. **组合约定没写下来**——`SKILL.md` 新增"有 MCP 就用 MCP，没有才用命令行"
+   一节：能力对照表、判断方式（工具列表里有没有 `docatlas_` 开头的工具）、
+   参数对应关系（`--token-budget` ↔ `token_budget` …），
+   以及"长时间、会改数据的操作只有 CLI"这条分界。
+   表里的工具名由 `DOCATLAS_MCP_TOOLS` 占位符从 `mcpserver.TOOLS` 生成。
+
+**顺带消掉的重复实现**：`tool_ask()` 原本自己写了一遍"要不要补抓"的判断，
+和 CLI 的那份并行演化。现在两边都调 `context.answer()`，
+`docatlas_search` / `docatlas_related` 也共用 `describe_lookup()` 等函数——
+议题说的"两者最终共用同一套核心检索逻辑"从口头约定变成了有测试守着的事实。
+
+## 外部关联
+
+- GitHub Issue：
+- 修复 PR：

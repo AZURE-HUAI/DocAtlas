@@ -384,7 +384,8 @@ def chunk_section(
     context_prefix = " | ".join(
         part
         for part in (
-            f"UE {VERSION}",
+            # 产品和版本都来自数据集：写死 "UE" 会让 Blender 的知识块也标成 UE。
+            f"{DATASET.product} {VERSION}",
             label,
             document_type,
             page_title,

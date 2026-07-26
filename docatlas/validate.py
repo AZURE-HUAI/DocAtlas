@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any
 import zlib
 
-from .config import CHUNKER_VERSION, KNOWLEDGE, LANGUAGE, SOURCE
+from .config import CHUNKER_VERSION, DATASET, KNOWLEDGE, LANGUAGE, SOURCE
 from .dataset import knowledge_hook
 from .util import utc_now
 
@@ -66,12 +66,49 @@ def validate_contract(
             }
         )
 
+    feeds_total, feeds_ok = connection.execute(
+        "SELECT COUNT(*), COALESCE(SUM(status='success'), 0) FROM sitemaps"
+    ).fetchone()
     add(
-        "sitemaps_complete",
-        connection.execute(
-            "SELECT COUNT(*) FROM sitemaps WHERE status!='success'"
-        ).fetchone()[0],
-        "全部子站点地图必须成功",
+        "inventory_feeds_complete",
+        feeds_total - feeds_ok,
+        f"全部清单入口必须成功读取（共 {feeds_total}，成功 {feeds_ok}）",
+    )
+    # 只统计"不合格的行"是不够的：一个刚建好的空库一行都没有，于是一行都不
+    # 不合格，全部通过、退出码 0。空 ≠ 合格，得单独确认它确实有东西。
+    page_total = connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    add(
+        "inventory_not_empty",
+        0 if feeds_ok and page_total else 1,
+        "数据集至少要有一个成功的清单入口和一个页面；"
+        f"当前成功入口 {feeds_ok}、页面 {page_total:,}。"
+        "为 0 说明还没跑过 `crawl --discovery-only`，或者跑到一半失败了",
+    )
+    counts = {
+        row["category"]: row["count"]
+        for row in connection.execute(
+            "SELECT category, COUNT(*) AS count FROM pages GROUP BY category"
+        )
+    }
+    # 配置声明了一个分类，却一页都没枚举到，几乎总是分类规则写错了——
+    # 这种错不会报异常，只会让整整一类文档静静地缺席。
+    required = [
+        key
+        for key in DATASET.categories
+        if key not in DATASET.optional_categories
+    ]
+    empty = [key for key in required if not counts.get(key)]
+    add(
+        "declared_categories_have_pages",
+        len(empty),
+        "配置声明的每个分类都要枚举到页面："
+        + (
+            "、".join(f"{key} 为 0" for key in empty)
+            + "（确实可能为空的分类请写进 optional_categories）"
+            if empty
+            else "、".join(f"{key}×{counts.get(key, 0):,}" for key in required)
+            or "（没有声明任何分类）"
+        ),
     )
     add(
         "page_inventory_metadata",
@@ -79,7 +116,7 @@ def validate_contract(
             """
             SELECT COUNT(*) FROM pages
             WHERE url IS NULL OR path IS NULL OR category IS NULL
-               OR ue_version IS NULL OR locale IS NULL
+               OR doc_version IS NULL OR locale IS NULL
                OR route_depth IS NULL OR sitemap_url IS NULL
             """
         ).fetchone()[0],

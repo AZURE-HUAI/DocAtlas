@@ -2,7 +2,7 @@
 id: BUG-006
 title: "inventory 验收会把空数据集和空分类判为通过"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: high
 area: validation
@@ -83,10 +83,46 @@ python -m docatlas validate --phase inventory
 
 ## 验证
 
-修复后至少覆盖：完全空库、某个必需分类为空、正常非空清单三个场景。
+`InventoryValidationTests` 覆盖议题要求的三个场景，全部离线可重复：
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 全新空库 | fail | `inventory_not_empty` = fail，整体 `status: fail` |
+| 某个声明分类为 0 页 | fail | `declared_categories_have_pages` = fail，`requirement` 里点名是哪一类 |
+| 正常非空清单 | pass | 整体 `status: pass` |
+| 分类写进 `optional_categories` | pass | 该检查恢复 pass |
+
+真实库对照（`epic-ue-5.8`，6 个分类全部非空）：
+
+```powershell
+python -m docatlas validate --phase inventory
+# inventory_feeds_complete / inventory_not_empty /
+# declared_categories_have_pages / page_inventory_metadata /
+# unique_page_paths 全部 pass
+```
+
+回归测试：128 用例全过。
 
 ## 解决记录
 
+**根因**：所有检查都是"数不合格的行"。空库里一行都没有，于是一行都不不合格，
+`failures: 0` → `status: pass` → 退出码 0。**"没有不合格的行"和"有合格的数据"
+是两件事**，原来的合同只表达了前者。
+
+**改动**（`docatlas/validate.py`）新增两项，都在 `inventory` 阶段：
+
+- `inventory_not_empty`：成功清单入口数 > 0 **且** 页面数 > 0，
+  否则 fail，并在 `requirement` 里写出当前的两个数字和最可能的原因。
+- `declared_categories_have_pages`：数据集声明的每个分类都要枚举到页面。
+  确实可能为空的分类写进新增的 `optional_categories`（`docatlas/dataset.py`），
+  **由配置显式声明，而不是把检查放宽**。
+
+同时把 `sitemaps_complete` 改名为 `inventory_feeds_complete`，并在
+`requirement` 里带上总数和成功数——配合 ENH-004，清单入口已经不一定是 sitemap。
+
+**为什么不做成警告**：议题里那个较弱的变体（cppreference 分类规则写错，
+`compiler_support` 为 0 而 6,956 页整体通过）说明这类错误只会以"少了一整类
+文档"的形式表现出来，用户不会自己发现。它必须是红的。
 
 ## 外部关联
 

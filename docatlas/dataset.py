@@ -44,6 +44,9 @@ class Dataset:
     concept_category_bonus: dict[str, float] = field(default_factory=dict)
     # 同名候选优先抓哪一类。数字越小越优先。
     category_priority: dict[str, int] = field(default_factory=dict)
+    # 允许一页都没有的分类。默认所有声明的分类都必须枚举到页面——
+    # 一个分类空着，几乎总是分类规则写错了，而不是官方真的没有这类文档。
+    optional_categories: tuple[str, ...] = ()
     # 用户问题里出现哪些词，AI 就该想到查这个库。纯数据，没有逻辑——
     # 装技能时填进技能描述，Claude Code 靠它决定要不要唤起这个技能。
     skill_triggers: tuple[str, ...] = ()
@@ -96,6 +99,7 @@ def load_dataset(dataset_id: str, config_dir: Path) -> Dataset:
         category_priority={
             k: int(v) for k, v in (raw.get("category_priority") or {}).items()
         },
+        optional_categories=tuple(raw.get("optional_categories") or ()),
         skill_triggers=tuple((raw.get("skill") or {}).get("triggers") or ()),
     )
 

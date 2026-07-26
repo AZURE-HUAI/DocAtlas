@@ -21,13 +21,11 @@ from .config import (
     DB_PATH,
     LANGUAGE,
     REPO_ROOT,
-    VERSION,
 )
 from .util import log, set_log_file
 from .net import REQUEST_LIMITER
 from .db import connect_db, initialize_db
-from .discover import discover_sitemaps
-from .chunking import normalize_name
+from .discover import discover_inventory
 from .documents import fetch_document
 from .store import store_document_result
 from .crawl import crawl_documents, reprocess_stored_documents
@@ -36,14 +34,20 @@ from .crossindex import build_cross_index
 from .search import search_docs
 from .export import export_markdown
 from .reports import write_reports, write_site_inventory
-from .context import build_context_pack, render_context_markdown
+from .context import (
+    answer,
+    build_context_pack,
+    describe_lookup,
+    exact_page_hint,
+    related_payload,
+    render_context_markdown,
+)
 from .ondemand import (
     DEFAULT_FETCH_LIMIT,
-    ensure_available,
     fetch_now,
     find_uncrawled_candidates,
+    inventory_lookup,
     link_new_pages,
-    missing_exact_pages,
 )
 from .validate import validate_contract
 
@@ -65,6 +69,8 @@ def print_stats(stats: dict[str, Any]) -> None:
     print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 
+
+
 def command_crawl(args: argparse.Namespace) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     set_log_file(args.log_file)
@@ -72,7 +78,7 @@ def command_crawl(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
     if not args.skip_discovery:
-        discover_sitemaps(
+        discover_inventory(
             connection,
             workers=args.sitemap_workers,
             refresh=args.refresh_sitemaps,
@@ -225,19 +231,27 @@ def command_search(args: argparse.Namespace) -> int:
     rows = search_docs(
         connection, args.query, limit=args.limit, category=args.category
     )
-    if not rows:
-        print(f"没有找到结果。原文语言是 {LANGUAGE}，换成原文里的写法往往能命中。")
-        return 1
+    hint = exact_page_hint(connection, args.query, args.category)
     if args.json:
-        print(
-            json.dumps(
-                [dict(row) for row in rows],
-                ensure_ascii=False,
-                indent=2,
+        # 空结果和非空结果用同一种形状：调用方不该为了"这次有没有命中"
+        # 写两套解析。空的时候多给一个 lookup 说明是哪一种"没有"。
+        payload: dict[str, Any] = {"results": [dict(row) for row in rows]}
+        if hint:
+            payload["exact_page_pending"] = True
+        if not rows:
+            payload["lookup"] = inventory_lookup(
+                connection, args.query, category=args.category
             )
-        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         connection.close()
-        return 0
+        return 0 if rows else 1
+    if not rows:
+        for line in describe_lookup(
+            inventory_lookup(connection, args.query, category=args.category)
+        ):
+            print(line)
+        connection.close()
+        return 1
     for index, row in enumerate(rows, 1):
         label = CATEGORY_LABELS.get(row["category"], row["category"])
         print(
@@ -248,6 +262,8 @@ def command_search(args: argparse.Namespace) -> int:
         print(f"知识类型：{row['knowledge_type']}")
         print(f"摘要：{row['snippet']}")
         print(f"DOC 原出处：{row['source_url']}")
+    for line in hint:
+        print(f"\n{line}" if line.startswith("提示") else line)
     connection.close()
     return 0
 
@@ -310,41 +326,21 @@ def command_context(args: argparse.Namespace) -> int:
 def command_ask(args: argparse.Namespace) -> int:
     """一条命令拿到"直接能读的答案材料"。AI 和人都用这个。
 
-    本地没有时会自动去 Epic 补抓那几页——不需要提前把二十万页全抓下来。
+    本地没有时会自动补抓那几页——不需要提前把全站抓下来。
     """
     connection = connect_db()
     initialize_db(connection)
     require_inventory(connection)
     REQUEST_LIMITER.configure(0)
-
-    def build() -> dict[str, Any]:
-        return build_context_pack(
-            connection,
-            args.query,
-            token_budget=args.token_budget,
-            category=args.category,
-        )
-
-    payload = build()
-    fetched = None
-    if not args.no_fetch:
-        has_local = bool(payload["primary_knowledge"])
-        # 补抓的两种理由：本地什么都没有；或者清单里有一页正好就叫这个名字，
-        # 而本地只是"顺带提到过"它（例如某篇教程的代码示例里出现过）。
-        exact_missing = missing_exact_pages(connection, args.query, args.category)
-        if not has_local or exact_missing:
-            fetched = ensure_available(
-                connection,
-                args.query,
-                limit=args.fetch_limit,
-                category=args.category,
-                quiet=args.json,
-                exact_only=has_local,
-            )
-            if fetched["succeeded"]:
-                payload = build()
-    if fetched:
-        payload["on_demand_fetch"] = fetched
+    payload = answer(
+        connection,
+        args.query,
+        token_budget=args.token_budget,
+        category=args.category,
+        allow_fetch=not args.no_fetch,
+        fetch_limit=args.fetch_limit,
+        quiet=args.json,
+    )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -363,18 +359,14 @@ def command_get(args: argparse.Namespace) -> int:
         connection, args.query, limit=args.limit, category=args.category
     )
     if not candidates:
-        already = connection.execute(
-            """
-            SELECT COUNT(*) FROM pages
-            WHERE normalized_slug=? AND status IN ('success', 'redirect')
-            """,
-            (normalize_name(args.query),),
-        ).fetchone()[0]
-        if already:
-            print(f"这一页本地已经有了，直接查即可：ask \"{args.query}\"")
+        lookup = inventory_lookup(connection, args.query, category=args.category)
+        if lookup["crawled_pages"]:
+            print(f'这一页本地已经有了，直接查即可：ask "{args.query}"')
+            for page in lookup["crawled_pages"]:
+                print(f"  {page['path']}")
         else:
-            print(f"全站清单里没有和「{args.query}」对得上的页面。")
-            print("换个更接近官方名称的写法试试，例如 K2_SetTimer、ACharacter。")
+            for line in describe_lookup(lookup):
+                print(line)
         connection.close()
         return 1
     print(f"准备抓取 {len(candidates)} 页：")
@@ -406,86 +398,14 @@ def command_cross_index(_: argparse.Namespace) -> int:
 
 
 def command_related(args: argparse.Namespace) -> int:
+    """一跳交叉关系。实现在 context.related_payload，MCP 用的是同一个。"""
     connection = connect_db()
     initialize_db(connection)
     require_inventory(connection)
-    value = str(args.subject).strip()
-    entities: list[sqlite3.Row]
-    if re.fullmatch(r"[Kk]?\d+", value):
-        chunk_id = int(value[1:] if value[:1].casefold() == "k" else value)
-        entities = list(
-            connection.execute(
-                """
-                SELECT e.* FROM knowledge_entities ke
-                JOIN entities e ON e.id=ke.entity_id
-                WHERE ke.chunk_id=?
-                ORDER BY ke.confidence DESC
-                """,
-                (chunk_id,),
-            )
-        )
-    else:
-        normalized = normalize_name(value)
-        entities = list(
-            connection.execute(
-                """
-                SELECT DISTINCT e.* FROM entities e
-                LEFT JOIN entity_aliases a ON a.entity_id=e.id
-                WHERE e.normalized_name=? OR a.normalized_alias=?
-                ORDER BY e.entity_type, e.canonical_name
-                LIMIT 20
-                """,
-                (normalized, normalized),
-            )
-        )
-    payload: list[dict[str, Any]] = []
-    for entity in entities:
-        relations = [
-            dict(row)
-            for row in connection.execute(
-                """
-                SELECT
-                    r.relation_type,
-                    r.evidence_kind,
-                    r.confidence,
-                    r.source_url AS evidence_url,
-                    r.note,
-                    CASE WHEN r.from_entity_id=? THEN 'outgoing' ELSE 'incoming' END
-                        AS direction,
-                    related.id AS related_entity_id,
-                    related.canonical_name AS related_name,
-                    related.entity_type AS related_type,
-                    related.qualified_name AS related_qualified_name,
-                    related.source_url AS related_source_url
-                FROM relations r
-                JOIN entities related ON related.id=CASE
-                    WHEN r.from_entity_id=? THEN r.to_entity_id
-                    ELSE r.from_entity_id
-                END
-                WHERE r.from_entity_id=? OR r.to_entity_id=?
-                ORDER BY r.confidence DESC, r.relation_type, related.canonical_name
-                """,
-                (entity["id"], entity["id"], entity["id"], entity["id"]),
-            )
-        ]
-        payload.append(
-            {
-                "entity": {
-                    "id": entity["id"],
-                    "name": entity["canonical_name"],
-                    "type": entity["entity_type"],
-                    "qualified_name": entity["qualified_name"],
-                    "module": entity["module"],
-                    "owner_type": entity["owner_type"],
-                    "source_url": entity["source_url"],
-                    "version": entity["version"],
-                },
-                "relations": relations,
-            }
-        )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    result = related_payload(connection, str(args.subject).strip())
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     connection.close()
-    return 0
+    return 0 if result["status"] == "ok" else 1
 
 
 def command_inventory(_: argparse.Namespace) -> int:
@@ -555,9 +475,12 @@ def skill_substitutions() -> dict[str, str]:
     技能文档是给 AI 看的操作手册，措辞必须是通用的——"当前装的是什么库"
     由数据集填，不能写死。写死了就等于假定所有人装的都是同一份文档。
     """
+    from .mcpserver import TOOLS
     from .validate import expected_evidence_kinds
 
     return {
+        # 工具名从 MCP 服务器自己那里取：技能手册永远不会写出一个不存在的工具。
+        "DOCATLAS_MCP_TOOLS": "、".join(f"`{tool['name']}`" for tool in TOOLS),
         "DOCATLAS_ROOT": str(REPO_ROOT),
         "DATASET_ID": DATASET_ID,
         "DATASET_NAME": DATASET.name,

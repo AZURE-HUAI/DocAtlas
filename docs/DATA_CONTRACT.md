@@ -11,14 +11,23 @@
 
 ### 阶段 A：页面目录（Inventory）
 
-只读取官方站点地图，不抓正文。必须满足：
+只读取**清单入口**，不抓正文。清单入口默认是站点地图的子地图；来源适配器
+实现 `inventory_feeds` / `read_feed` 时也可以是分页 API、目录页或静态搜索索引，
+后续处理完全一致。必须满足：
 
-- 适配器认领的子站点地图全部成功（`epic-ue-5.8` 是 424 个）。
+- 适配器认领的清单入口全部成功（`inventory_feeds_complete`；`epic-ue-5.8` 是 424 个）。
+- **至少有一个成功入口和一个页面**（`inventory_not_empty`）。空库不算合格：
+  没有不合格的行，不等于有数据。
+- **配置声明的每个分类都枚举到了页面**（`declared_categories_have_pages`）。
+  确实可能为空的分类要显式写进 `optional_categories`。
 - 页面按规范化 `path` 去重。
-- 每条页面记录包含 `url`、`path`、分类、版本、语言、父路径、路由深度和所属站点地图。
-- 生成 `site_inventory.jsonl`、摘要和 SHA-256；失败站点地图为 0 时才标记 `complete`。
+- 每条页面记录包含 `url`、`path`、分类、版本、语言、父路径、路由深度和所属清单入口。
+- 生成 `site_inventory.jsonl`、摘要和 SHA-256；失败入口为 0 时才标记 `complete`。
 
 目录未达到 `complete` 时，不允许启动全量正文阶段。
+
+抽样抓取（`--sample-per-category N`）是**每一类**的上限：某类只有 9 页就抓 9 页，
+缺额不转给别的类；已成功的页面计入该类额度，重复运行不会继续扩大。
 
 ### 阶段 B：原始正文（Raw / Bronze）
 
@@ -51,18 +60,18 @@
 | 字段 | 含义 |
 |---|---|
 | `id` | 本地稳定页面 ID |
-| `url` | 带 `application_version=5.8` 的 Epic DOC 原网址 |
+| `url` | 适配器给出的官方正式网址 |
 | `path` | 规范化官方路由 |
 | `title` | 官方标题 |
 | `description` | 官方摘要 |
 | `category` | `guides`、`blueprint_api`、`cpp_api` 等 |
 | `source_type` | 官方标注的数据源类型 |
 | `document_type` | landing、article、API 等官方类型 |
-| `ue_version` | 数据集的版本（`epic-ue-5.8` 是 `5.8`） |
+| `doc_version` | 数据集的版本（`epic-ue-5.8` 是 `5.8`；与产品无关的通用字段） |
 | `locale` | 数据集的语言（`epic-ue-5.8` 是 `en-US`） |
 | `parent_path` | 路由父级 |
 | `route_depth` | 路由深度 |
-| `sitemap_url` | 发现该页的官方站点地图 |
+| `sitemap_url` | 发现该页的清单入口（sitemap 或适配器提供的其它入口） |
 | `updated_at` | 官方标注的文档更新时间 |
 | `content_hash` | 原始响应哈希 |
 | `parser_version` | 这一页由哪版切分规则加工的 |
@@ -103,6 +112,8 @@
 - 每块记录 `parser_version`，改规则时能精确查出哪些还没升级。
 - 每块保存页面标题、完整标题路径、知识类型、版本、分类和精确来源 URL。
 - 每块末尾重复 `DOC 原出处`，避免脱离页面后丢失证据。
+- 小节锚点由标题的**可见文字**生成。标题里的 Markdown 链接目标只是给浏览器的
+  地址，不是标题文字——拼进 fragment 会造出官方页面里不存在的来源地址。
 
 ## 5. 交叉索引
 
@@ -153,6 +164,23 @@
 
 每条结果都带 `match_stage` 与 `score`，便于判断可信度。
 
+全文检索的 SQL 必须让**全文索引当外层循环**（用 `CROSS JOIN` 锁死连接顺序）。
+放任优化器重排时，只要带上 `--category`，它就会改从分类索引出发，于是每个候选
+块都要单独跑一次全文匹配——实测同一条查询 0.05 秒变 44 秒。
+
+### 查不到时必须说明是哪一种"没有"
+
+`search` / `ask` / `related` 空结果时要区分并给出可执行的下一步：
+
+| 情况 | 依据 | 下一步 |
+|---|---|---|
+| 清单里有对得上的页面，正文未抓 | `lookup.pending_pages` 非空 | `get` 补抓，或直接用 `ask`（自动补抓） |
+| 同名页面已抓，只是查询词没命中 | `lookup.crawled_pages` 非空 | 换写法 |
+| 清单里也没有 | 两者皆空 | 官方确实没有这一页 |
+
+`related` 另外返回 `status`：`ok` / `entity_found_but_no_relations` /
+`entity_not_found`，以及 `next_steps`。裸 `[]` 同时表示多种状态是不合格的契约。
+
 ### 上下文包：硬预算
 
 默认预算 3000 tokens，规则如下（`docatlas/context.py`）：
@@ -177,11 +205,26 @@ python -m docatlas context "Set Timer" --token-budget 3000  # 等价于上一行
 python -m docatlas related "Set Timer by Function Name"     # 全部关系与证据
 ```
 
+### 按需抓取：清单里有就取得回来
+
+页面在冻结清单里但正文为 pending 时，`ask` 会当场补抓。候选定位分三档：
+
+| 档位 | 命中方式 | 例子 |
+|---|---|---|
+| `exact_slug` | 末段 slug 完全一致（去掉 `.html` 等文档扩展名、剥掉 `std::` 这类限定符） | `Fields` → `/…/fields.html` |
+| `slug_contains` | slug 含有该词（词长 ≥ 5） | `Nanite` → `/…/nanite-virtualized-geometry` |
+| `path_covers_query` | 查询里**每个**实词都出现在路径中（实词 ≥ 2 个） | `Wave Texture Node` → `/render/shader_nodes/textures/wave.html` |
+
+覆盖档要求全部实词命中，所以概念性提问不会误触发补抓。本地已有结果但**没有
+一条的页面标题就是所问的名字**时，同样允许补抓——否则弱相关的本地块会一直把
+真正的目标页挡在门外。
+
 ## 7. 质量要求
 
-- 全量目录：失败站点地图必须为 0。
+- 全量目录：失败清单入口必须为 0，且页面数与各声明分类均不为 0。
 - 正文：成功、失败、重定向分别统计，禁止静默丢弃。
-- 版本：成功页面必须包含 UE 5.8 适用声明或通过官方 5.8 路由返回。
+- 版本：成功页面必须来自数据集声明版本的官方路由。
+- 语言：抓回来的正文语言必须与数据集声明一致（`fetched_language_matches_declaration`）。
 - 知识块：标题路径、正文、类型、版本、来源 URL 不得为空。
 - 关系：必须有证据类型、置信度和来源。
 - 所有加工步骤可重复运行且不产生重复数据。

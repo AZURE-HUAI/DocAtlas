@@ -60,6 +60,34 @@ RELATION_PRIORITY = {
 }
 
 
+# 蓝图里 `BlueprintReadWrite` 属性会自动生成 `Set X` / `Get X` 节点，
+# 但官方**不给这些访问器单独出页面**——属性只记在所属类的 API 页里。
+# 所以用户按访问器名字搜时，要顺带按属性本名再找一次。
+ACCESSOR_PREFIX_RE = re.compile(r"^(?:set|get)[\s_]*(?=[A-Za-z])", re.I)
+
+
+def query_aliases(query: str) -> list[str]:
+    """这条查询在 Unreal 里还可能叫什么。
+
+    只补"同一个东西的另一种叫法"，不做联想：多给一个名字就多一批候选页，
+    宁可漏也不要把不相干的页面拉进来。
+    """
+    subject = query.strip()
+    aliases: list[str] = []
+    stripped = ACCESSOR_PREFIX_RE.sub("", subject)
+    if stripped and stripped != subject:
+        aliases.append(stripped)
+        aliases.append(humanize_cpp_identifier(stripped))
+    # `K2_SetTimer` 的页面地址带前缀，用户敲的多半不带。只对看起来像单个
+    # 标识符的查询做这件事——整句话前面加 K2_ 是没有意义的。
+    if subject and " " not in subject:
+        if subject.startswith(K2_PREFIX):
+            aliases.append(subject[len(K2_PREFIX):])
+        else:
+            aliases.append(f"{K2_PREFIX}{subject}")
+    return aliases
+
+
 def extra_entity_aliases(
     *, title: str, category: str, segments: list[str]
 ) -> set[tuple[str, str]]:

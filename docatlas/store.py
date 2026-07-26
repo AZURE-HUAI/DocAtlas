@@ -288,7 +288,7 @@ def store_document_result(
         tag_values = {
             (category, "category"),
             (chunk["knowledge_type"], "knowledge_type"),
-            (VERSION, "ue_version"),
+            (VERSION, "doc_version"),
         }
         if result["source_type"]:
             tag_values.add((str(result["source_type"]), "source_type"))
