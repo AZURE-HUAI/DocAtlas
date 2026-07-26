@@ -1,0 +1,75 @@
+# Roblox Creator Hub。
+#
+# 站点没有产品版本号，文档持续更新，所以版本用**快照日期**——
+# 不能声明成"无版本"，那样以后没法说清楚一条结论是照着哪一天的文档得出的。
+# 溯源依据是索引文件第一行的 `<!-- Last updated: … -->`，本次是
+# 2026-07-24T23:56:32Z。
+id = "roblox-creator-2026-07-26"
+name = "Roblox Creator Hub（2026-07-26 快照）"
+product = "roblox-creator"
+version = "2026-07-26"
+language = "en-us"
+
+source = "roblox_creator"
+# 没有领域知识包。第一轮就是要验证：没有知识包时，通用的官方链接关系、
+# 查询、按需抓取是不是照样能用。
+
+api_categories = ["engine_api", "open_cloud"]
+
+[source_options]
+base_url = "https://create.roblox.com"
+doc_prefix = "/docs/"
+home_path = "/docs/en-us/get-started"
+# 三份机器可读索引。刻意不含 /docs/llms-full.txt：那是整站正文拼成的
+# 单个文件，下载它等于绕过按需抓取，也拿不到逐页的出处。
+indexes = [
+    "/docs/llms.txt",
+    "/docs/reference/engine/llms.txt",
+    "/docs/cloud/llms.txt",
+]
+
+# Engine API 与 Open Cloud API 是两套完全不同的东西，官方索引开篇就在强调。
+# 分类按**地址**划，不按关键词——`Assets`、`Analytics` 这些词两边都有，
+# 靠词去认必然混。
+[categories]
+studio_guides = "/docs/en-us/"
+luau = "/docs/en-us/luau/"
+engine_api = "/docs/reference/engine/"
+open_cloud = "/docs/cloud/"
+
+[category_labels]
+studio_guides = "Studio 与创作指南"
+luau = "Luau 语言"
+engine_api = "Engine API（实验内 Luau 对象）"
+open_cloud = "Open Cloud API（外部 HTTP 接口）"
+
+[entity_types]
+studio_guides = "guide"
+luau = "luau_topic"
+engine_api = "engine_api_member"
+open_cloud = "open_cloud_feature"
+
+# 用户问一个名字，多半想先看指南；两套 API 同名时不预设谁优先，
+# 由 AI 用结构化条件指定 category。
+[category_priority]
+studio_guides = 1
+luau = 2
+engine_api = 3
+open_cloud = 4
+
+[skill]
+triggers = [
+    "Roblox", "Roblox Studio", "Luau", "Open Cloud",
+    "game:GetService", "DataStore", "RemoteEvent",
+    "Engine API", "create.roblox.com",
+]
+
+[search]
+# Engine API 的类页会把属性、方法、事件整页罗列，很占预算又很少直接回答问题。
+verbose_categories = ["engine_api"]
+
+[search.concept_category_bonus]
+studio_guides = 4.0
+luau = 3.0
+engine_api = -1.0
+open_cloud = -1.0
