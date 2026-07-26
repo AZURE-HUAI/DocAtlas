@@ -1146,6 +1146,134 @@ class PageSlugTests(unittest.TestCase):
         connection.close()
 
 
+class MetadataAndTagRenameTests(unittest.TestCase):
+    """列改名只改了 `pages` 表；`metadata`/`tags` 是键值表，改名不能靠
+    RENAME COLUMN，得单独迁移，否则老库里旧 key/tag_type 会一直残留。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        self.addCleanup(self.connection.close)
+        initialize_db(self.connection)
+
+    def _real_chunk_id(self):
+        # chunk_tags 对 chunk_id 有外键约束，得挂在一个真实存在的块上。
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        cursor = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+            " locale, route_depth, discovered_at, last_seen_at) VALUES("
+            "'https://example.invalid/x', '/x', 'guides',"
+            " 'https://example.invalid/s.xml', '5.8', 'en-US', 1,"
+            " '2026-01-01', '2026-01-01')"
+        )
+        row = FakeRow(
+            id=cursor.lastrowid,
+            path="/x",
+            url="https://example.invalid/x",
+            category="guides",
+        )
+        store.store_document_result(
+            self.connection,
+            transform_document(row, make_document("X", [text_block("body text")])),
+            "guides",
+        )
+        self.connection.commit()
+        return self.connection.execute("SELECT id FROM chunks").fetchone()[0]
+
+    def test_metadata_key_renamed_when_only_old_key_present(self):
+        self.connection.execute("DELETE FROM metadata WHERE key='doc_version'")
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('ue_version', '5.8')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='ue_version'"
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT value FROM metadata WHERE key='doc_version'"
+            ).fetchone()[0],
+            "5.8",
+        )
+
+    def test_stale_old_key_dropped_when_new_key_already_written(self):
+        # 老库先跑过一次旧代码写下 ue_version，再跑新代码又写了 doc_version：
+        # 两行同时存在，旧的那行就是死数据。
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('ue_version', '5.8')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='ue_version'"
+            ).fetchone()
+        )
+
+    def test_tag_type_renamed_when_only_old_type_present(self):
+        self.connection.execute("DELETE FROM tags WHERE tag_type='doc_version'")
+        self.connection.commit()
+        self.connection.execute(
+            "INSERT INTO tags(name, tag_type) VALUES('5.8', 'ue_version')"
+        )
+        self.connection.commit()
+        db.migrate_tag_type(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM tags WHERE tag_type='ue_version'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM tags WHERE tag_type='doc_version' AND name='5.8'"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_chunk_tags_repointed_when_both_tag_types_collide(self):
+        # 挂真实的块，storing 时已经自动打上 (VERSION, 'doc_version') 标签；
+        # 手造一个同名的 'ue_version' 旧标签，制造 UNIQUE(name, tag_type) 撞车。
+        chunk_id = self._real_chunk_id()
+        new_id = self.connection.execute(
+            "SELECT id FROM tags WHERE name=? AND tag_type='doc_version'",
+            (config.DATASET.version,),
+        ).fetchone()[0]
+        old_id = self.connection.execute(
+            "INSERT INTO tags(name, tag_type) VALUES(?, 'ue_version')",
+            (config.DATASET.version,),
+        ).lastrowid
+        self.connection.execute(
+            "INSERT INTO chunk_tags(chunk_id, tag_id) VALUES(?, ?)",
+            (chunk_id, old_id),
+        )
+        self.connection.commit()
+        db.migrate_tag_type(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM tags WHERE id=?", (old_id,)
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM chunk_tags WHERE chunk_id=? AND tag_id=?",
+                (chunk_id, new_id),
+            ).fetchone()[0],
+            1,
+        )
+
+
 class InventoryCandidateTests(unittest.TestCase):
     """清单里明明有那一页，却因为写法差一点就找不到——这条路必须走得通。"""
 
@@ -1568,6 +1696,91 @@ class RelatedContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "entity_not_found")
         self.assertEqual(result["lookup"]["pending_pages"], [])
 
+    def test_missing_knowledge_id_is_not_treated_as_a_missing_page(self):
+        # K 编号是知识块 ID，不是页面名字——查不到的话是"编号不存在"，
+        # 跟"官方没有这一页/清单里有还没抓"是完全不同的诊断，不能套用
+        # inventory_lookup（那是拿名字去比对页面标题/路径，对数字编号毫无意义）。
+        result = context.related_payload(self.connection, "K999999")
+        self.assertEqual(result["status"], "knowledge_id_not_found")
+        self.assertNotIn("lookup", result)
+        self.assertTrue(result["next_steps"])
+
+
+class McpRelatedEvidenceTests(unittest.TestCase):
+    """SKILL.md 明确承诺 `related` 每条关系都带 `note` 和出处；MCP 是
+    Skill 优先用的入口，文本渲染丢了这两个字段，承诺就是空的。"""
+
+    class _NoCloseConnection:
+        """`tool_related` 用完连接会自己 close；测试要在同一个连接上继续
+        断言，所以拿一层代理挡掉 close，真连接留给 tearDown 收尾。"""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def close(self):
+            pass
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        self.addCleanup(self.connection.close)
+        initialize_db(self.connection)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        self.connection.commit()
+
+    def _add_page_entity(self, path, title):
+        cursor = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+            " locale, route_depth, discovered_at, last_seen_at) VALUES(?, ?,"
+            " 'guides', 'https://example.invalid/s.xml', '5.8', 'en-US', 3,"
+            " '2026-01-01', '2026-01-01')",
+            (f"https://example.invalid{path}", path),
+        )
+        row = FakeRow(
+            id=cursor.lastrowid,
+            path=path,
+            url=f"https://example.invalid{path}",
+            category="guides",
+        )
+        store.store_document_result(
+            self.connection,
+            transform_document(row, make_document(title, [text_block(title)])),
+            "guides",
+        )
+        self.connection.commit()
+        return self.connection.execute(
+            "SELECT id FROM entities WHERE canonical_name=?", (title,)
+        ).fetchone()[0]
+
+    def test_related_text_includes_evidence_url_and_note(self):
+        from_id = self._add_page_entity("/a", "Alpha Component")
+        self._add_page_entity("/b", "Beta Component")
+        self.connection.execute(
+            "INSERT INTO relations(from_entity_id, to_entity_id, relation_type,"
+            " evidence_kind, confidence, source_url, note, created_at, updated_at)"
+            " VALUES(?, (SELECT id FROM entities WHERE canonical_name='Beta"
+            " Component'), 'references', 'name_match', 0.6,"
+            " 'https://example.invalid/evidence-page', '同名但未核实',"
+            " '2026-01-01', '2026-01-01')",
+            (from_id,),
+        )
+        self.connection.commit()
+        original_open = mcpserver._open
+        mcpserver._open = lambda: self._NoCloseConnection(self.connection)
+        try:
+            output = mcpserver.tool_related({"subject": "Alpha Component"})
+        finally:
+            mcpserver._open = original_open
+        self.assertIn("https://example.invalid/evidence-page", output)
+        self.assertIn("同名但未核实", output)
+
 
 class NeutralNamingTests(unittest.TestCase):
     """接了 cppreference / Blender 之后，输出里还写着 UE 就是在骗人。"""
@@ -1578,8 +1791,15 @@ class NeutralNamingTests(unittest.TestCase):
             for number, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), 1
             ):
-                # 老库改名那一行必须留着旧名字，否则升级不上来。
-                if "rename_column_if_present" in line:
+                # 老库改名那几行必须留着旧名字，否则升级不上来。
+                if any(
+                    marker in line
+                    for marker in (
+                        "rename_column_if_present",
+                        "migrate_metadata_key",
+                        "migrate_tag_type",
+                    )
+                ):
                     continue
                 if re.search(r'f"UE \{|"ue_version"', line):
                     offenders.append(f"{path.name}:{number} {line.strip()}")

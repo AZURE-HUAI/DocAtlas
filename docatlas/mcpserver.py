@@ -255,6 +255,9 @@ def tool_related(arguments: dict[str, Any]) -> str:
                     f"　依据：{relation['evidence_kind']}"
                     f"　置信度 {relation['confidence']:.2f}"
                 )
+                lines.append(f"     出处：{relation['evidence_url']}")
+                if relation["note"]:
+                    lines.append(f"     备注：{relation['note']}")
         if result["next_steps"]:
             lines.extend(["", *result["next_steps"]])
         return "\n".join(lines)
