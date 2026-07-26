@@ -42,9 +42,7 @@ python -m docatlas validate --phase inventory
 
 按需实现 `document_locale`、`page_members`、`version_marks` 和
 `version_sort_key`。配置至少声明数据集身份、语言、来源、分类、实体类型和
-Skill 触发词。
-
-注意：
+Skill 触发词。三条容易踩的：
 
 - "是否官方地址"和"是否纳入本数据集"是两件事，不能共用一个判断。
 - 正文站内链接必须统一成固定版本正式地址，否则关系无法对上清单。
@@ -54,16 +52,14 @@ Skill 触发词。
 
 | 现象 | 处理 |
 |---|---|
-| 清单里有，正文没抓 | `ask` / `get` 按需补抓即可，不是缺页 |
+| 清单里有，正文没抓 | `ask` / `get` 按需补抓即可，不算缺页 |
 | 已收正文链过去，清单里没有 | 配 `[inventory].referenced_category`，一跳引用闭包自动收 |
 | 站点从不链过去 | 闭包够不到，只能由数据集显式声明目录 |
 
-第三种要先用实测数字确认，不要凭感觉扩范围。例：Blender 的
-`editors/shader_editor` 在 126 个 shader 节点页里被引用 **0** 次，所以闭包永远
-到不了它。
-
-声明时用最小范围。一个分类可以写多个目录，专门用于收"分散在别处、但属于同一件
-事"的少量页面，而不是把整个上级目录一锅端：
+第三种要先用实测数字确认，不要凭感觉扩范围（例：`editors/shader_editor` 在
+126 个 shader 节点页里被引用 **0** 次，闭包永远到不了它）。声明时用最小范围：
+一个分类可以写多个目录，用来收"分散在别处、但属于同一件事"的少量页面，而不是
+把整个上级目录一锅端。
 
 ```toml
 [categories]
@@ -72,7 +68,7 @@ shader_nodes = "render/shader_nodes/"
 node_editors = ["editors/shader_editor", "editors/geometry_node"]
 ```
 
-改完范围要 `crawl --discovery-only --refresh-sitemaps`——不加这个参数，
+改完范围必须 `crawl --discovery-only --refresh-sitemaps`——不加这个参数，
 已成功的清单入口不会重读，新目录进不来。
 
 ## 领域关系
@@ -83,19 +79,14 @@ node_editors = ["editors/shader_editor", "editors/geometry_node"]
 ```python
 def relation_rules(graph):
     for source, target, _ in graph.name_matches("ui_node", "api_symbol"):
-        yield RelationCandidate(
-            source=source,
-            target=target,
-            relation_type="node_api",
-            evidence_kind="exact_name",
-            confidence=0.9,
-        )
+        yield RelationCandidate(source=source, target=target,
+                                relation_type="node_api",
+                                evidence_kind="exact_name", confidence=0.9)
 ```
 
-领域包只生成候选，不写 SQL、不依赖数据库 ID。通用核心负责验证、去重、存储、
-全量与增量更新。没有领域包时，通用关系仍应可用。
-
-没有官方独立目标的自动生成节点只做检索别名；只有双方实体和证据真实存在时才建关系。
+领域包只生成候选，不写 SQL、不依赖数据库 ID；通用核心负责验证、去重、存储、
+全量与增量更新。没有领域包时通用关系仍应可用。没有官方独立目标的自动生成节点
+只做检索别名——只有双方实体和证据都真实存在时才建关系。
 
 ## 小样验收
 
