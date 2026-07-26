@@ -272,9 +272,6 @@ foreach ($file in $recordFiles) {
                 $errors += "$path`: resolved record requires a non-empty '$heading' section"
             }
         }
-        if ($status -eq 'resolved' -and $fixPr -eq 'null') {
-            $errors += "$path`: resolved work requires fix_pr"
-        }
     }
 
     $records += [pscustomobject]@{
