@@ -1,157 +1,81 @@
-# DocAtlas 建库与维护流程
+# DocAtlas 建库与维护
 
-**什么时候读这份**：加新版本、加新文档站、改了加工规则要重来、或要做体检。
-日常查资料不需要，`SKILL.md` 就够了。
+用于新增版本、接入新站点、重加工和体检。程序位置：`{{DOCATLAS_ROOT}}`。
 
-当前装着《{{DATASET_NAME}}》（id `{{DATASET_ID}}`），下面拿它当参照，流程本身
-跟具体产品无关。程序位置：`{{DOCATLAS_ROOT}}`，所有命令在这个目录下执行。
+## 原则
 
----
+1. 新站先做每类 20 页小样，验收后再全量。
+2. 每步运行 `validate` 并检查实际数字，不只看退出码。
+3. 新版本使用新 `id`，不复制旧数据库。
+4. 测试与回归数据库默认保留，除非用户明确要求删除。
+5. 只报告实测结果；失败和覆盖缺口要如实保留。
 
-## 四条铁律
+## 加同站新版本
 
-1. **先小样，再全量。** 全站可能有几十万页，抓错了要重来一整天。新站点一律先
-   `crawl --sample-per-category 20`，验收过了再放开。`--sample-per-category N`
-   是**每一类最多 N 页**，不是总共 N × 类数；已成功的页面算在额度里，同一条
-   命令跑第二遍不会越抓越多。
+```powershell
+Copy-Item datasets/{{DATASET_ID}}.toml datasets/<新 id>.toml
+$env:DOCATLAS_DATASET='<新 id>'
+python -m docatlas crawl --discovery-only
+python -m docatlas validate --phase inventory
+```
 
-2. **每一步都验收，看数字，不看退出码。**"跑完没报错"骗过人。`validate` 输出
-   JSON，逐项看 `status`。重点看两项，专门抓"空得很整齐"的库：
-   - `inventory_not_empty` —— 一页都没有的空库不算通过。
-   - `declared_categories_have_pages` —— 配置声明了某一类却一页都没枚举到，
-     几乎总是 `[categories]` 匹配片段写错了。确实可能为空的分类写进
-     `optional_categories`，别为了变绿把检查删掉。
+只改数据集身份、版本和版本相关来源地址。清单建好后即可按需使用；用户明确要求
+完整离线库时才运行全量 `crawl`。清单为空或明显偏少时，按“新站点”处理。
 
-3. **不动用户已有数据。** 新数据集用新 `id`，自动生成新目录、新数据库。
-   **永远不要**把旧库数据目录复制过去当新版本用——里面的正文是旧版本的。
+## 加新站点
 
-4. **如实报告。** 抓了多少页、验收哪几项通过，报实测数字；失败就说失败，
-   不说"应该没问题"。
+先确认页面清单、正文格式、正式 URL、语言和版本来源，再新增：
 
----
+- `datasets/<id>.toml`
+- `docatlas/sources/<source>.py`
+- 来源适配器测试
 
-## 流程 A：加同一个站点的新版本
+适配器最少要完成：
 
-触发：用户说"升到新版本""再加一个 X.Y 版的库"。**不用写代码**——同一站点新
-版本页面结构一般不变。
-
-1. 复制配置，只改 `id`、`name`、`version`、`[source_options].home_path`
-   （文档首页路径通常带版本号），其余别动：
-   ```powershell
-   Copy-Item datasets/{{DATASET_ID}}.toml datasets/<新 id>.toml
-   ```
-2. 枚举全站清单（只读站点地图，不抓正文，几分钟）：
-   ```powershell
-   $env:DOCATLAS_DATASET='<新 id>'; python -m docatlas crawl --discovery-only
-   ```
-3. 验收清单阶段：
-   ```powershell
-   $env:DOCATLAS_DATASET='<新 id>'; python -m docatlas validate --phase inventory
-   ```
-4. **到这里就能用了**——查到本地没有的页面会当场补抓，不必先下载全站。告诉
-   用户切换方式：`$env:DOCATLAS_DATASET='<新 id>'`。
-5. 用户明确要"全都下下来"才跑全量 `crawl`（慢，建议后台跑）。
-
-清单枚举出 0 页或少得离谱，说明站点改版了、路径规则变了——不是流程 A，转
-流程 B 改适配器。
-
----
-
-## 流程 B：加一个新的文档站点
-
-触发：用户说"把某某站的文档也收进来"（另一个产品、另一个官网）。**不是一条
-命令的事**，先摸清那个站怎么组织，再写适配器；摸不清就先问用户，不要瞎猜。
-
-### B1. 先侦查
-
-- **怎么知道有哪些页面**：`sitemap.xml`？没有的话分页 API、目录页，或
-  Sphinx `searchindex.js` 这类静态索引？
-- **正文怎么拿**：有结构化数据接口最省事，没有就得解析 HTML。
-- **语言怎么选**：URL 带 `lang=`？路径前缀？还是只有一种语言？
-
-### B2. 写适配器
-
-新建 `docatlas/sources/<名字>.py`（照现成的抄结构最快），核心函数：
-
-| 函数 | 干什么 |
+| 能力 | 接口 |
 |---|---|
-| `sitemap_index_url(dataset)` | 站点地图总入口（没有站点地图就不写，见下） |
-| `categorize_sitemap(dataset, url)` | 子地图属于哪一类；不要的返回 `None` |
-| `normalize_location(dataset, location)` | URL → `(标准路径, 正式地址)`；滤掉别的语言和非文档页 |
-| `canonical_url(dataset, path)` | 给人看、给引用用的正式地址 |
-| `document_request_url(dataset, path)` | 真正去要内容的地址 |
-| `parse_document(dataset, path, body)` | 内容 → 标题、正文 Markdown、小节 |
-| `normalize_link_target(dataset, url)` | 正文链接 → 本站路径（建交叉关系用） |
-| `is_official_url(dataset, url)` | 是不是官方地址（影响内容质量分） |
-| `entity_placement(dataset, category, segments)` | 路径片段 → 模块 / 归属类型 |
-| `document_locale(payload)` | **服务器实际给的语言**，没有返回 `None`——别省，站点没那个语言时通常不报错、默默给默认语言，不判断就会得到一个标着甲语言、装着乙语言的库 |
+| 枚举页面 | sitemap 接口，或 `inventory_feeds` + `read_feed` |
+| URL 统一 | `normalize_location`、`canonical_url`、`document_request_url` |
+| 正文与链接 | `parse_document`、`normalize_link_target` |
+| 边界与分类 | `is_official_url`、`categorize_path` |
+| 实体归属 | `entity_placement` |
 
-站点没有 sitemap 时，改实现这两个，上表前两行整个不用写：
+按需实现 `document_locale`、`page_members`、`version_marks` 和
+`version_sort_key`。
 
-| 函数 | 干什么 |
-|---|---|
-| `inventory_feeds(dataset)` | 返回 `[(清单入口地址, 分类或 None)]` |
-| `read_feed(dataset, url)` | 一个入口 → `[(分类或 None, 页面地址)]`；翻页/限流/重试自己处理 |
+注意：
 
-并发、写库、失败诊断、`inventory` 验收一律复用核心，不用动。分类优先取条目
-自己给的，其次才是入口所属的。
+- “是否官方地址”和“是否纳入本数据集”是两件事，不能共用一个判断。
+- 正文站内链接必须统一成固定版本正式地址，否则关系无法对上清单。
+- 被已收正文引用的范围内页面，可通过 `[inventory].referenced_category`
+  一跳加入清单；不要手写缺页名单。
+- 类页面内的成员可通过 `page_members` 提升为独立实体。
 
-**正文里的站内链接一定要规范化成绝对的固定版本地址**（`normalize_link_target`）。
-不做这一步，内容能检索但关系数为 0，`relation_evidence_coverage` 会失败——
-关系就是靠这些链接建起来的。
+配置至少声明数据集身份、语言、来源、分类、实体类型和 Skill 触发词。
 
-### B2b. 关系：要不要写领域包
+## 领域关系
 
-**先不写。** 没有领域知识包，核心照样从正文的官方链接建出关系（`official_link`，
-置信度 1.0）、页面归属、参数/返回值类型。绝大多数站点这就够了。
-
-只有当"为什么这两个东西有关"依赖该产品的行话时才写一个
-`docatlas/knowledge/<名字>.py`，在配置里挂 `knowledge = "<名字>"`。合同只有
-一个函数：
+先使用通用官方链接和页面归属关系。只有关系依赖产品专属语义时，才新增
+`docatlas/knowledge/<name>.py`：
 
 ```python
 def relation_rules(graph):
-    for source, target, name in graph.name_matches("ui_node", "api_symbol"):
+    for source, target, _ in graph.name_matches("ui_node", "api_symbol"):
         yield RelationCandidate(
-            source=source, target=target,
-            relation_type="node_api",          # 关系类型自己起名
-            evidence_kind="exact_name",        # 凭什么这么说
-            confidence=0.9,                    # 官方明写用 1.0，推断要压低
-            note="名称完全一致；需要核对签名",
+            source=source,
+            target=target,
+            relation_type="node_api",
+            evidence_kind="exact_name",
+            confidence=0.9,
         )
 ```
 
-`graph` 给四个只读原语，实体只能从它们拿：
+领域包只生成候选，不写 SQL、不依赖数据库 ID。通用核心负责验证、去重、存储、
+全量与增量更新。没有领域包时，通用关系仍应可用。
 
-| 原语 | 干什么 |
-|---|---|
-| `entities(*类型)` | 遍历实体 |
-| `find(名字, entity_type=…, alias_type=…)` | 按名字/别名找实体；找不到会记进诊断 |
-| `name_matches(起点类型, 终点类型, source_alias=…, target_alias=…)` | 成批把两类实体按名字或别名对起来 |
-| `texts(*类型, containing="…")` | 遍历实体所在页面的正文，用于"文档自己写着有关" |
+没有官方独立目标的自动生成节点只做检索别名；只有双方实体和证据真实存在时才建关系。
 
-**不写 SQL，不碰表结构，不需要知道 entity id。** 解析实体、验证目标存在、
-挡撞名（一个名字对上太多就整组丢弃）、夹置信度、去重、存储、全量/增量、
-失败诊断全归核心。同一个函数同时服务全量重建和按需增量——`graph` 自己带
-范围，领域包不用关心这次是哪一种。
-
-另外可以声明（都可选）：`RELATION_LABELS` / `EVIDENCE_LABELS`（给人看的说法）、
-`RELATION_PRIORITY`（相关项排序）、`DERIVED_EVIDENCE_KINDS`（`validate` 据此
-检查某类关系有没有被整类做没）、`query_aliases` / `extra_entity_aliases` /
-`document_aliases`（检索别名）、`IDENTIFIER_PATTERN`（这个领域的符号长什么样）。
-
-### B3. 写配置
-
-新建 `datasets/<id>.toml`（照 `datasets/{{DATASET_ID}}.toml` 结构）。必填
-`id`/`name`/`product`/`version`/`language`/`source`、`[categories]`（站点地图
-URL 片段 → 分类）、`[entity_types]`，别忘了 `[skill] triggers`（AI 靠它判断该
-不该唤起这个知识库）。
-
-`knowledge` 可留空——没有领域知识包一样能抓能搜，只是少了该领域特有的线索
-（同义词归并、"作用在什么类型上"这类推断）。先跑通再考虑加，参照
-`docatlas/knowledge/` 下现成的。
-
-### B4. 小样验收（不能跳）
+## 小样验收
 
 ```powershell
 $env:DOCATLAS_DATASET='<id>'
@@ -159,67 +83,28 @@ python -m docatlas crawl --discovery-only
 python -m docatlas validate --phase inventory
 python -m docatlas crawl --skip-discovery --sample-per-category 20
 python -m docatlas validate --phase content
-python -m docatlas ask "<那个站里一定有的东西>"
+python -m docatlas ask "<明确存在的官方术语>" --token-budget 1500
 ```
 
-`ask` 这步自己实际看几条：正文有没有 HTML 残留、标题层级对不对、原出处 URL
-点开是不是那一页。不对就回去改适配器，**别带着脏数据跑全量**。
+检查正文、标题、原出处、分类、语言、关系和缺页报告。新领域还要通过同一 MCP
+连接验证 `dataset_id` 路由，不得修改 MCP 或通用关系核心才能接入。
 
-### B5. 放开全量
+## 重加工
 
-小样干净了才 `crawl`。页数多就后台跑，跑完再 `validate --phase content`。
+- 切分规则变化：增加 `CHUNKER_VERSION`，运行 `python -m docatlas reprocess`。
+- 仅关系规则变化：运行 `python -m docatlas cross-index`。
+- 两者都要运行 `python -m docatlas validate --phase content`，重点检查
+  `relation_evidence_coverage` 和 `inventory_link_coverage`。
 
----
-
-## 流程 C：改了加工规则，要重来
-
-触发：改了切分逻辑、别名规则、关系推导。
-
-- 改了**切分**（`chunking.py`）：`docatlas/constants.py` 里
-  `CHUNKER_VERSION` 加一，然后 `python -m docatlas reprocess`——只处理还没
-  升级到当前版本的页，断了重跑接着做，跑完自动重建交叉关系。
-- 只改了**关系推导**（`relations.py` 或知识包的 `relation_rules`），切分没
-  动：单跑 `python -m docatlas cross-index` 就够。
-- 两种情况都要 `python -m docatlas validate --phase content`，**重点看
-  `relation_evidence_coverage`**——它专抓"某类关系被整类做没"，这种错不会报
-  任何异常，其余检查照样全过。
-
----
-
-## 流程 D：例行体检
+## 体检与迁移
 
 ```powershell
-.\docatlas.ps1 status                          # 抓了多少、失败多少
-python -m docatlas validate --phase content    # 逐项过数据合同
+.\docatlas.ps1 status
+python -m docatlas validate --phase content
 ```
 
-任何一项 `fail`，把那一项的 `requirement` 原文念给用户听——写的就是哪里不对。
-
-报告里还有一段 `observations`，**不参与 pass/fail**，但值得看：
-`inventory_link_coverage` 会告诉你有多少链接指向"清单里有、正文还没抓"的页面
-（补抓就行），以及多少指向"清单里根本没有"的页面。后者集中在某几个目录时，
-说明来源适配器的枚举范围划漏了——那类页面官方有，抓多少次都不会进库，
-要回流程 B 改适配器。
-
----
-
-## 流程 E：项目搬了地方 / 改了名
-
-技能文件里写着程序的绝对路径，搬完必须重装：
+项目移动或 Skill 内容变化后重新安装：
 
 ```powershell
 .\scripts\install-skill.ps1
 ```
-
----
-
-## 常见岔路
-
-| 现象 | 多半是 | 怎么办 |
-|---|---|---|
-| 清单枚举出 0 页 | 清单入口地址或分类片段不对 | `inventory_not_empty` 会直接报出来；打开入口看结构，对 `[categories]` |
-| 某一类是 0 页 | 那一类的匹配片段写错了 | 看 `declared_categories_have_pages` 说的是哪一类 |
-| 抓回来正文是空的 | `parse_document` 没认出正文结构 | 存一份原始返回下来看 |
-| `validate` 报语言不符 | `language` 那个站不支持，被默默换了 | 改成站点真有的语言，或确认它只有一种 |
-| 查什么都查不到 | 清单没冻结，或用错了数据集 | `python -m docatlas paths` 看当前是哪个 |
-| 某类关系突然归零 | 加工规则改动打断了别处的假设 | 看 `relation_evidence_coverage` 说缺哪一类 |
