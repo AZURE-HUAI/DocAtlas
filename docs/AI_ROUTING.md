@@ -6,7 +6,9 @@
 当前数据集是 Unreal Engine 5.8 官方文档，下面的分类名以它为例；
 换数据集时分类名会变，但规则本身通用。
 
-Claude Code 技能在项目的 `skills/docatlas/`，下面是它遵循的完整规则。
+Skill 原本在项目的 `skills/docatlas/`（装到 Claude Code 和 Codex），
+下面是它遵循的完整规则。**客户端接了 MCP 服务器时，同名的 `docatlas_*` 工具
+优先于命令行**——两者调用的是同一套检索代码，结果一致。
 
 ---
 
@@ -34,6 +36,10 @@ python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
 | 要展开某一条完整正文 | `show K<编号>` |
 | 要看蓝图/C++/类型对应关系的全部证据 | `related "<名称>"` |
 | 要程序可解析的结构 | `ask ... --json` 或 `context ...` |
+
+对应的 MCP 工具依次是 `docatlas_ask` / `docatlas_search` / `docatlas_show` /
+`docatlas_related` / `docatlas_list_datasets`；参数名去掉 `--` 并把连字符换成
+下划线（`--token-budget` → `token_budget`）。
 
 ---
 
@@ -100,6 +106,14 @@ python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
 
 上下文包只纳入置信度 ≥ 0.8 的关系。
 
+`related` 的返回带 `status`，**不要把三种情况当成同一件事**：
+
+| `status` | 含义 | 下一步 |
+|---|---|---|
+| `ok` | 找到实体也有关系 | 直接读 |
+| `entity_found_but_no_relations` | 实体在库里，一条关系都没有 | 多半是它指向的页面还没抓 |
+| `entity_not_found` | 没有这个实体 | 看 `lookup.pending_pages` 决定补抓还是如实说没有 |
+
 ---
 
 ## 六、回答规则
@@ -107,10 +121,11 @@ python -m docatlas ask "Set Timer by Function Name" --token-budget 3000
 - 明确限定当前数据集的版本（`docatlas paths` 能看到是哪个），
   不要把其他版本的行为混进来。
 - 每个关键结论旁边附对应的 DOC 原出处 URL，不要自己拼 URL。
-- **查不到就说查不到。** `ask` 已经会自动补抓，所以查不到通常意味着
-  官方文档里确实没有这一页，或者名字和官方对不上（先换官方写法再试一次：
-  「角色移动组件」→ `UCharacterMovementComponent`）。
-  确认没有之后如实说，不要改用记忆作答，也不要假装库里有。
+- **查不到就说查不到，但先看清是哪一种"没有"。** 三种情况的下一步完全不同：
+  清单里有这一页只是没抓（照提示 `get`）、页面已在本地只是词没对上（换写法）、
+  清单里也没有（官方确实没有）。工具输出会明说是哪一种。
+  用户用别的语言提问时，先把说法落成原文里的官方写法再查。
+  确认真的没有之后如实说，不要改用记忆作答，也不要假装库里有。
 - 教程文档与 API 表面冲突时，先核对更新时间与具体类型，再解释适用范围。
 - 蓝图 API 官方自身也可能不完整，回答时保留这个限制。
 

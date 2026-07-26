@@ -657,7 +657,14 @@ cpp_api         = { pattern = "/unreal_engine/ue_cpp_api_external/",           l
 | `product` | TEXT | `unreal-engine` |
 | `canonical_url` | TEXT | 去掉 query 参数的规范化 URL，与 `url` 分开 |
 
-（`ue_version` 已有，语义上应改称 `version`，但**不要改名**——加一个视图或就沿用旧名，避免为了整洁而冒险。）
+（`ue_version` 已有，语义上应改称 `version`。当时的结论是**不要改名**，理由是
+“为了整洁而冒险”不值得。
+
+**2026-07-26 推翻。** BUG-009 拿出了新证据：接入 cppreference 和 Blender 之后，
+`ue_version` 会让完全不同的产品被标成 UE——那是错误信息，不只是不整洁。
+SQLite 的 `ALTER TABLE … RENAME COLUMN` 只改元数据、不重写数据，在 199,883 页的
+真实库上实测整套迁移 2.6 秒，风险与收益已不成比例。现列名为 `doc_version`，
+迁移写在 `db.rename_column_if_present()`。）
 
 **`chunks` 表新增（最重要）：**
 
@@ -676,7 +683,7 @@ cpp_api         = { pattern = "/unreal_engine/ue_cpp_api_external/",           l
 |---|---|---|
 | 文档来源 | metadata.source | `pages.source` ✅ |
 | 产品/文档集 | 隐含 | `pages.product` ✅ |
-| 版本 | `pages.ue_version` ✅ | 保持 |
+| 版本 | `pages.ue_version` ✅ | 改名为 `pages.doc_version`（见上，2026-07-26） |
 | 语言 | `pages.locale` ✅ | 保持 |
 | 文档类型 | `pages.category` + `document_type` ✅ | 保持 |
 | 原始 URL | `pages.url` ✅ | 保持 |

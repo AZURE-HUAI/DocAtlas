@@ -6,12 +6,12 @@
     不用记 Python 命令，所有事情都从这里做：
 
         .\docatlas.ps1                          打开交互式搜索（不带参数时）
-        .\docatlas.ps1 ask   "Nanite"           直接给出可读的答案材料（推荐；
+        .\docatlas.ps1 ask   "<要查的东西>"     直接给出可读的答案材料（推荐；
                                                 本地没有会自动去官网补抓那一页）
-        .\docatlas.ps1 get   "ACharacter"       只把指定的页面抓到本地
-        .\docatlas.ps1 find  "Nanite"           只列标题和出处，不展开正文
+        .\docatlas.ps1 get   "<页面名>"         只把指定的页面抓到本地
+        .\docatlas.ps1 find  "<关键词>"         只列标题和出处，不展开正文
         .\docatlas.ps1 show  K9290              展开某一条知识
-        .\docatlas.ps1 links "Set Timer by Function Name"
+        .\docatlas.ps1 links "<名称或 K 编号>"
                                                 看蓝图 / C++ / 类型的对应关系
         .\docatlas.ps1 status                   看抓取进度
         .\docatlas.ps1 start                    开始 / 继续抓取（可随时中断续传）
@@ -33,7 +33,8 @@ param(
 
     [int]$Limit = 10,
     [int]$TokenBudget = 3000,
-    [ValidateSet('guides', 'community_docs', 'blueprint_api', 'cpp_api', 'python_api', 'node_reference')]
+    # 分类名由数据集决定，这里不写死——写死了换个数据集就会拒绝合法的分类。
+    # 合不合法交给 Python 那一层判断，它认识当前数据集。
     [string]$Category
 )
 
@@ -61,7 +62,7 @@ function Show-Menu {
     Write-Host "  DocAtlas — $DatasetId"
     Write-Host '========================================'
     Write-Host '直接输入要查的东西；回车留空退出。'
-    Write-Host '英文关键词命中率最高，例：Nanite、Set Timer、Lumen'
+    Write-Host "用原文语言（$DatasetLanguage）里的官方写法命中率最高。"
     Write-Host ''
 
     while ($true) {
@@ -91,21 +92,21 @@ switch ($Action) {
     'menu' { Show-Menu }
 
     'ask' {
-        Require-Subject '.\docatlas.ps1 ask "Nanite"'
+        Require-Subject '.\docatlas.ps1 ask "<要查的东西>"'
         $kbArgs = @('ask', $subject, '--token-budget', $TokenBudget)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
     }
 
     'get' {
-        Require-Subject '.\docatlas.ps1 get "ACharacter"'
+        Require-Subject '.\docatlas.ps1 get "<页面名>"'
         $kbArgs = @('get', $subject, '--limit', $Limit)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
     }
 
     'find' {
-        Require-Subject '.\docatlas.ps1 find "Nanite"'
+        Require-Subject '.\docatlas.ps1 find "<关键词>"'
         $kbArgs = @('search', $subject, '--limit', $Limit)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
@@ -117,7 +118,7 @@ switch ($Action) {
     }
 
     'links' {
-        Require-Subject '.\docatlas.ps1 links "Set Timer by Function Name"'
+        Require-Subject '.\docatlas.ps1 links "<名称或 K 编号>"'
         Invoke-Kb @('related', $subject)
     }
 

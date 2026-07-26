@@ -44,7 +44,8 @@ def database_stats(connection: sqlite3.Connection) -> dict[str, Any]:
     }
     return {
         "generated_at": utc_now(),
-        "ue_version": VERSION,
+        "product": DATASET.product,
+        "version": VERSION,
         "language": LANGUAGE,
         "pages_total": sum(page_counts.values()),
         "pages": page_counts,
@@ -142,15 +143,15 @@ def write_reports(
             "## 怎么查",
             "",
             "```powershell",
-            ".\\ue.ps1                                  # 交互式搜索",
-            '.\\ue.ps1 ask   "Nanite virtualized geometry"',
-            '.\\ue.ps1 find  "Gameplay Ability System" -Limit 20',
-            '.\\ue.ps1 links "Set Timer by Function Name"',
+            ".\\docatlas.ps1                    # 交互式搜索",
+            '.\\docatlas.ps1 ask "<要查的东西>"',
+            'python -m docatlas search "<关键词>" --limit 20',
+            'python -m docatlas related "<名称或 K 编号>"',
             "```",
             "",
-            "`ask` 会按 token 预算返回整理好的知识块和 Epic DOC 原出处，是 AI 的默认入口。"
+            "`ask` 会按 token 预算返回整理好的知识块和原出处，是 AI 的默认入口。"
             "结构化总索引位于 `knowledge.sqlite3`；逐页清单需要时用 "
-            "`python ue58_docs.py stats --manifest` 生成到 `manifest.jsonl`；"
+            "`python -m docatlas stats --manifest` 生成到 `manifest.jsonl`；"
             "整本 Markdown 位于 `exports/`（体积大，AI 不要整篇读）。",
             "",
             "## 数据保证",
@@ -179,7 +180,7 @@ def write_site_inventory(connection: sqlite3.Connection) -> dict[str, Any]:
     with inventory_path.open("w", encoding="utf-8", newline="\n") as output:
         for row in connection.execute(
             """
-            SELECT id, url, path, category, sitemap_url, ue_version, locale,
+            SELECT id, url, path, category, sitemap_url, doc_version, locale,
                    route_depth, parent_path, discovered_at, last_seen_at
             FROM pages
             WHERE deleted_at IS NULL
@@ -200,7 +201,8 @@ def write_site_inventory(connection: sqlite3.Connection) -> dict[str, Any]:
     summary = {
         "status": status,
         "generated_at": utc_now(),
-        "ue_version": VERSION,
+        "product": DATASET.product,
+        "version": VERSION,
         "language": LANGUAGE,
         "sitemap_count": connection.execute(
             "SELECT COUNT(*) FROM sitemaps"

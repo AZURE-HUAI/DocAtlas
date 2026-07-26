@@ -10,6 +10,17 @@ from .config import DATASET, DB_PATH, DOC_PREFIX, LANGUAGE, SOURCE, VERSION
 from .util import utc_now
 
 
+def inventory_index_url() -> str:
+    """清单入口的总地址，纯粹是溯源信息，没有任何代码依赖它。
+
+    只有站点地图型来源才有"一个总入口"这个概念。用分页 API、目录页或静态
+    索引列页的来源（`inventory_feeds` / `read_feed`）压根没有总入口——那种
+    来源不实现 `sitemap_index_url`，这里就留空，而不是让开库直接崩掉。
+    """
+    index_url = getattr(SOURCE, "sitemap_index_url", None)
+    return index_url(DATASET) if index_url else ""
+
+
 def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
     # 第一次用的时候数据目录还不存在，不建的话 sqlite 只会甩一句
     # "unable to open database file"，看不出该干嘛。
@@ -245,7 +256,11 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    add_column_if_missing(connection, "pages", "ue_version", "TEXT")
+    rename_column_if_present(connection, "pages", "ue_version", "doc_version")
+    migrate_metadata_key(connection, "ue_version", "doc_version")
+    migrate_metadata_key(connection, "sitemap_index", "inventory_index")
+    migrate_tag_type(connection, "ue_version", "doc_version")
+    add_column_if_missing(connection, "pages", "doc_version", "TEXT")
     add_column_if_missing(connection, "pages", "locale", "TEXT")
     add_column_if_missing(connection, "pages", "route_depth", "INTEGER")
     add_column_if_missing(connection, "pages", "parent_path", "TEXT")
@@ -361,12 +376,12 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         [
             ("dataset", DATASET.id),
             ("product", DATASET.product),
-            ("ue_version", VERSION),
+            ("doc_version", VERSION),
             ("language", LANGUAGE),
             ("source", DATASET.name),
             ("source_adapter", DATASET.source),
             ("knowledge_pack", DATASET.knowledge or ""),
-            ("sitemap_index", SOURCE.sitemap_index_url(DATASET)),
+            ("inventory_index", inventory_index_url()),
             ("schema_version", "3"),
         ],
     )
@@ -391,6 +406,68 @@ def add_column_if_missing(
     return True
 
 
+def rename_column_if_present(
+    connection: sqlite3.Connection, table: str, old: str, new: str
+) -> bool:
+    """老库改名用；SQLite 的 RENAME COLUMN 只改元数据，不重写数据。"""
+    columns = {
+        row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+    if old not in columns or new in columns:
+        return False
+    connection.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+    return True
+
+
+def migrate_metadata_key(connection: sqlite3.Connection, old: str, new: str) -> None:
+    """老库改名用；`metadata.key` 是主键，改名不能靠 UPDATE 就完事——如果两个
+    key 都在（旧库跑过一次 initialize 之后新 key 已经写入），旧的那行就是
+    死数据，删掉；如果只有旧 key，直接把它改名。"""
+    old_row = connection.execute(
+        "SELECT value FROM metadata WHERE key=?", (old,)
+    ).fetchone()
+    if old_row is None:
+        return
+    new_exists = (
+        connection.execute("SELECT 1 FROM metadata WHERE key=?", (new,)).fetchone()
+        is not None
+    )
+    if new_exists:
+        connection.execute("DELETE FROM metadata WHERE key=?", (old,))
+    else:
+        connection.execute(
+            "UPDATE metadata SET key=? WHERE key=?", (new, old)
+        )
+
+
+def migrate_tag_type(connection: sqlite3.Connection, old: str, new: str) -> None:
+    """老库改名用。`tags` 表 `UNIQUE(name, tag_type)`，同一个 name 在旧库里可能
+    已经同时有 old 和 new 两个 tag_type（新代码跑过一次之后）。逐个改名会撞
+    UNIQUE 约束，所以撞了就把引用旧 tag 的 chunk_tags 转投新 tag，再删旧
+    tag；没撞就直接改名。"""
+    old_tags = list(
+        connection.execute("SELECT id, name FROM tags WHERE tag_type=?", (old,))
+    )
+    for row in old_tags:
+        old_id, name = row["id"], row["name"]
+        new_row = connection.execute(
+            "SELECT id FROM tags WHERE name=? AND tag_type=?", (name, new)
+        ).fetchone()
+        if new_row is None:
+            connection.execute(
+                "UPDATE tags SET tag_type=? WHERE id=?", (new, old_id)
+            )
+            continue
+        new_id = new_row["id"]
+        connection.execute(
+            "INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_id) "
+            "SELECT chunk_id, ? FROM chunk_tags WHERE tag_id=?",
+            (new_id, old_id),
+        )
+        connection.execute("DELETE FROM chunk_tags WHERE tag_id=?", (old_id,))
+        connection.execute("DELETE FROM tags WHERE id=?", (old_id,))
+
+
 def route_metadata(path: str) -> tuple[int, str | None]:
     relative = path[len(DOC_PREFIX) :] if path.lower().startswith(DOC_PREFIX.lower()) else path.strip("/")
     segments = [segment for segment in relative.split("/") if segment]
@@ -403,7 +480,7 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             SELECT id, path FROM pages
-            WHERE ue_version IS NULL OR locale IS NULL OR route_depth IS NULL
+            WHERE doc_version IS NULL OR locale IS NULL OR route_depth IS NULL
                OR discovered_at IS NULL OR last_seen_at IS NULL
             """
         )
@@ -418,7 +495,7 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     connection.executemany(
         """
         UPDATE pages SET
-            ue_version=COALESCE(ue_version, ?),
+            doc_version=COALESCE(doc_version, ?),
             locale=COALESCE(locale, ?),
             route_depth=COALESCE(route_depth, ?),
             parent_path=COALESCE(parent_path, ?),
@@ -430,30 +507,50 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     )
 
 
+# 静态站点会把实现细节写进地址（`fields.html`、`index.php`）。用户说的是
+# 页面名，不会带这一截，所以定位前先去掉。只认这几种确定是"文件类型"的后缀，
+# 免得把 `UObject.Tick` 这种名字里的点当成扩展名切掉。
+PAGE_EXTENSIONS = frozenset(
+    {"html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "md", "txt"}
+)
+# 改了 page_slug 的规则就 +1：已有库里的 slug 会被整批重算，
+# 否则新规则只对以后发现的页面生效，同一个库里两套 slug 并存。
+SLUG_VERSION = "2"
+
+
 def page_slug(path: str) -> str:
     """URL 最后一段，标准化后用于精确定位。
 
     `/…/UKismetSystemLibrary/K2_SetTimer` → `k2settimer`，
-    而用户问的 `K2_SetTimer` 标准化后也是 `k2settimer`——两边能对上。
+    `/modeling/geometry_nodes/fields.html` → `fields`，
+    而用户问的 `K2_SetTimer` / `Fields` 标准化后正好是同一串。
     """
     from .text import normalize_name
 
     tail = urllib.parse.unquote(path.rstrip("/").rsplit("/", 1)[-1])
+    stem, dot, extension = tail.rpartition(".")
+    if dot and extension.casefold() in PAGE_EXTENSIONS:
+        tail = stem
     return normalize_name(tail)
 
 
 def backfill_page_slugs(connection: sqlite3.Connection) -> None:
-    rows = list(
-        connection.execute(
-            "SELECT id, path FROM pages WHERE normalized_slug IS NULL LIMIT 400000"
+    stored = connection.execute(
+        "SELECT value FROM metadata WHERE key='slug_version'"
+    ).fetchone()
+    stale = not stored or stored[0] != SLUG_VERSION
+    condition = "" if stale else " WHERE normalized_slug IS NULL"
+    rows = list(connection.execute(f"SELECT id, path FROM pages{condition}"))
+    if rows:
+        connection.executemany(
+            "UPDATE pages SET normalized_slug=? WHERE id=?",
+            [(page_slug(row["path"]), row["id"]) for row in rows],
         )
-    )
-    if not rows:
-        return
-    connection.executemany(
-        "UPDATE pages SET normalized_slug=? WHERE id=?",
-        [(page_slug(row["path"]), row["id"]) for row in rows],
-    )
+    if stale:
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('slug_version', ?)",
+            (SLUG_VERSION,),
+        )
     connection.commit()
 
 

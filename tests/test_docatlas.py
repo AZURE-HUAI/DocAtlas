@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -29,7 +31,8 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, dataset, net, ondemand, search, store, validate,
+    chunking, config, context, crawl, dataset, db, discover, net, ondemand,
+    search, store, text, validate,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
@@ -163,6 +166,22 @@ class SearchQueryTests(unittest.TestCase):
 
     def test_entity_hit_forces_api_profile(self):
         self.assertEqual(search.query_profile("nanite", entity_hit=True), "api")
+
+    def test_member_listings_are_pushed_back_only_for_concept_questions(self):
+        # 大段成员罗列回答不了"这是什么"，但问一个具体符号时，答案往往**就在**
+        # 那张表里：官方不给属性单独出页面，`TargetArmLength` 只记在所属类的
+        # 成员表中。一律压后就等于把唯一的官方定义压掉。
+        row = {
+            "knowledge_type": "details",
+            "category": (config.DATASET.verbose_categories or ("cpp_api",))[0],
+            "token_estimate": 600,
+            "quality_score": 1.0,
+            "page_title": "USpringArmComponent",
+            "heading_path": "USpringArmComponent > Variables",
+        }
+        api = search._score(row, "all_terms", 0, set(), "api", "targetarmlength")
+        concept = search._score(row, "all_terms", 0, set(), "concept", "targetarmlength")
+        self.assertGreater(api - concept, 5.0)
 
     def test_concept_profile_prefers_overview_over_return_tables(self):
         self.assertGreater(
@@ -435,7 +454,7 @@ class EndToEndTests(unittest.TestCase):
     def add_page(self, path: str, category: str, title: str, blocks: list[dict]) -> int:
         cursor = self.connection.execute(
             """
-            INSERT INTO pages(url, path, category, sitemap_url, ue_version, locale,
+            INSERT INTO pages(url, path, category, sitemap_url, doc_version, locale,
                               route_depth, discovered_at, last_seen_at)
             VALUES(?, ?, ?, 'https://example.invalid/sitemap.xml', '5.8', 'en-US',
                    3, '2026-01-01', '2026-01-01')
@@ -1017,6 +1036,908 @@ class UnrealKnowledgeTests(unittest.TestCase):
             ),
             set(),
         )
+
+
+class HeadingAnchorTests(unittest.TestCase):
+    """标题里的链接目标是给浏览器的，不是标题文字。
+
+    不剥掉它，锚点会把整条 URL 拼进 fragment，生成一个官方页面里根本不存在
+    的地址——正文照样能读，但引用点过去落不到那一节。
+    """
+
+    def test_link_target_never_leaks_into_the_anchor(self):
+        anchor = text.heading_anchor(
+            "[Constrained algorithms](https://en.cppreference.com/cpp/algorithm/ranges)"
+            " (since C++20)"
+        )
+        self.assertNotIn("http", anchor)
+        self.assertNotIn("cppreference", anchor)
+        self.assertEqual(anchor, "constrainedalgorithmssincec20")
+
+    def test_inline_code_and_plain_headings_still_work(self):
+        self.assertEqual(text.heading_anchor("`TArray` Members"), "tarraymembers")
+        self.assertEqual(text.heading_anchor("Inputs"), "inputs")
+
+    def test_a_heading_with_no_visible_text_falls_back(self):
+        self.assertEqual(text.heading_anchor("[](https://example.invalid/x)"), "content")
+
+    def test_repeated_headings_stay_distinguishable(self):
+        sections = chunking.split_sections(
+            title="Page",
+            description="",
+            markdown="## Inputs\n\na\n\n## Inputs\n\nb\n",
+            source_url="https://example.invalid/p",
+            category="guides",
+        )
+        anchors = [section["source_anchor"] for section in sections]
+        self.assertEqual(len(anchors), len(set(anchors)))
+
+
+class QualifierAndAliasTests(unittest.TestCase):
+    """用户抄官方写法时常连命名空间一起抄，页面地址却只有末尾那个名字。"""
+
+    def test_namespace_is_stripped_to_the_last_segment(self):
+        self.assertEqual(text.qualifier_tail("std::from_chars"), "from_chars")
+        self.assertEqual(text.qualifier_tail("math.floor"), "floor")
+
+    def test_unqualified_or_too_short_names_add_nothing(self):
+        self.assertEqual(text.qualifier_tail("Nanite"), "")
+        self.assertEqual(text.qualifier_tail("std::x"), "")
+
+    def test_query_names_start_with_the_query_itself(self):
+        names = search.query_names("std::from_chars")
+        self.assertEqual(names[0], chunking.normalize_name("std::from_chars"))
+        self.assertIn("fromchars", names)
+
+    def test_query_names_are_deduplicated(self):
+        names = search.query_names("Nanite")
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_accessor_prefix_leads_back_to_the_property(self):
+        # 官方不给 BlueprintReadWrite 属性的 Setter 单独出页面，
+        # 所以按 Setter 名字搜时得顺带按属性本名再找一次。
+        self.assertIn("TargetArmLength", unreal.query_aliases("SetTargetArmLength"))
+        self.assertIn("targetarmlength", search.query_names("Set Target Arm Length"))
+
+    def test_k2_prefix_is_tried_for_identifier_shaped_queries(self):
+        self.assertIn("K2_SetTimer", unreal.query_aliases("SetTimer"))
+        # 整句话前面加 K2_ 没有意义。
+        self.assertNotIn(
+            "K2_Set Timer by Function Name",
+            unreal.query_aliases("Set Timer by Function Name"),
+        )
+
+
+class PageSlugTests(unittest.TestCase):
+    """静态站点把实现细节写进地址（`fields.html`），用户说的是页面名。"""
+
+    def test_document_extension_is_not_part_of_the_name(self):
+        self.assertEqual(db.page_slug("/modeling/geometry_nodes/fields.html"), "fields")
+        self.assertEqual(db.page_slug("/a/b/index.php"), "index")
+
+    def test_dots_inside_real_names_are_kept(self):
+        # `UObject.Tick`、`v5.8` 里的点不是扩展名，切掉会把名字弄错。
+        self.assertEqual(db.page_slug("/API/UObject.Tick"), "uobjecttick")
+        self.assertEqual(db.page_slug("/notes/release-5.8"), "release58")
+
+    def test_slug_rules_are_versioned_so_old_rows_get_recomputed(self):
+        # 不重算的话，新规则只对以后发现的页面生效，同一个库里两套 slug 并存。
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        initialize_db(connection)
+        connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, route_depth) "
+            "VALUES('https://example.invalid/x/fields.html',"
+            " '/x/fields.html', 'guides', 'https://example.invalid/s.xml', 2)"
+        )
+        connection.execute("UPDATE pages SET normalized_slug='fieldshtml'")
+        connection.execute("DELETE FROM metadata WHERE key='slug_version'")
+        connection.commit()
+        db.backfill_page_slugs(connection)
+        self.assertEqual(
+            connection.execute("SELECT normalized_slug FROM pages").fetchone()[0],
+            "fields",
+        )
+        connection.close()
+
+
+class MetadataAndTagRenameTests(unittest.TestCase):
+    """列改名只改了 `pages` 表；`metadata`/`tags` 是键值表，改名不能靠
+    RENAME COLUMN，得单独迁移，否则老库里旧 key/tag_type 会一直残留。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        self.addCleanup(self.connection.close)
+        initialize_db(self.connection)
+
+    def _real_chunk_id(self):
+        # chunk_tags 对 chunk_id 有外键约束，得挂在一个真实存在的块上。
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        cursor = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+            " locale, route_depth, discovered_at, last_seen_at) VALUES("
+            "'https://example.invalid/x', '/x', 'guides',"
+            " 'https://example.invalid/s.xml', '5.8', 'en-US', 1,"
+            " '2026-01-01', '2026-01-01')"
+        )
+        row = FakeRow(
+            id=cursor.lastrowid,
+            path="/x",
+            url="https://example.invalid/x",
+            category="guides",
+        )
+        store.store_document_result(
+            self.connection,
+            transform_document(row, make_document("X", [text_block("body text")])),
+            "guides",
+        )
+        self.connection.commit()
+        return self.connection.execute("SELECT id FROM chunks").fetchone()[0]
+
+    def test_metadata_key_renamed_when_only_old_key_present(self):
+        self.connection.execute("DELETE FROM metadata WHERE key='doc_version'")
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('ue_version', '5.8')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='ue_version'"
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT value FROM metadata WHERE key='doc_version'"
+            ).fetchone()[0],
+            "5.8",
+        )
+
+    def test_stale_old_key_dropped_when_new_key_already_written(self):
+        # 老库先跑过一次旧代码写下 ue_version，再跑新代码又写了 doc_version：
+        # 两行同时存在，旧的那行就是死数据。
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('ue_version', '5.8')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='ue_version'"
+            ).fetchone()
+        )
+
+    def test_sitemap_index_key_is_migrated_to_the_generic_name(self):
+        # 只有站点地图型来源有"总入口"，键名不该把这个假设写死在数据里。
+        self.connection.execute("DELETE FROM metadata WHERE key='inventory_index'")
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('sitemap_index', 'https://x/s.xml')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "sitemap_index", "inventory_index")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='sitemap_index'"
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "https://x/s.xml",
+        )
+
+    def test_tag_type_renamed_when_only_old_type_present(self):
+        self.connection.execute("DELETE FROM tags WHERE tag_type='doc_version'")
+        self.connection.commit()
+        self.connection.execute(
+            "INSERT INTO tags(name, tag_type) VALUES('5.8', 'ue_version')"
+        )
+        self.connection.commit()
+        db.migrate_tag_type(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM tags WHERE tag_type='ue_version'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM tags WHERE tag_type='doc_version' AND name='5.8'"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_chunk_tags_repointed_when_both_tag_types_collide(self):
+        # 挂真实的块，storing 时已经自动打上 (VERSION, 'doc_version') 标签；
+        # 手造一个同名的 'ue_version' 旧标签，制造 UNIQUE(name, tag_type) 撞车。
+        chunk_id = self._real_chunk_id()
+        new_id = self.connection.execute(
+            "SELECT id FROM tags WHERE name=? AND tag_type='doc_version'",
+            (config.DATASET.version,),
+        ).fetchone()[0]
+        old_id = self.connection.execute(
+            "INSERT INTO tags(name, tag_type) VALUES(?, 'ue_version')",
+            (config.DATASET.version,),
+        ).lastrowid
+        self.connection.execute(
+            "INSERT INTO chunk_tags(chunk_id, tag_id) VALUES(?, ?)",
+            (chunk_id, old_id),
+        )
+        self.connection.commit()
+        db.migrate_tag_type(self.connection, "ue_version", "doc_version")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM tags WHERE id=?", (old_id,)
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM chunk_tags WHERE chunk_id=? AND tag_id=?",
+                (chunk_id, new_id),
+            ).fetchone()[0],
+            1,
+        )
+
+
+class InventoryCandidateTests(unittest.TestCase):
+    """清单里明明有那一页，却因为写法差一点就找不到——这条路必须走得通。"""
+
+    PAGES = [
+        ("/documentation/unreal-engine/BlueprintAPI/Camera/SetFieldOfView", "blueprint_api"),
+        ("/modeling/geometry_nodes/fields.html", "guides"),
+        ("/render/shader_nodes/textures/wave.html", "guides"),
+        ("/cpp/utility/from_chars", "cpp_api"),
+        ("/documentation/unreal-engine/nanite-virtualized-geometry", "guides"),
+    ]
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        initialize_db(self.connection)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        for path, category in self.PAGES:
+            self.connection.execute(
+                "INSERT INTO pages(url, path, category, sitemap_url, route_depth) "
+                "VALUES(?, ?, ?, 'https://example.invalid/s.xml', 3)",
+                (f"https://example.invalid{path}", path, category),
+            )
+        self.connection.commit()
+        initialize_db(self.connection)  # 触发 normalized_slug 回填
+
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
+
+    def find(self, query, **kwargs):
+        return ondemand.find_uncrawled_candidates(
+            self.connection, query, limit=5, **kwargs
+        )
+
+    def test_official_page_name_finds_the_html_page(self):
+        # 以前必须输入 "fieldshtml" 才找得到，用户不该知道站点用什么扩展名。
+        rows = self.find("Fields")
+        self.assertEqual([row["path"] for row in rows], ["/modeling/geometry_nodes/fields.html"])
+
+    def test_qualified_cpp_symbol_finds_the_unqualified_page(self):
+        rows = self.find("std::from_chars")
+        self.assertEqual([row["path"] for row in rows], ["/cpp/utility/from_chars"])
+
+    def test_full_official_title_is_covered_by_the_path(self):
+        rows = self.find("Wave Texture Node")
+        self.assertEqual(
+            [row["path"] for row in rows], ["/render/shader_nodes/textures/wave.html"]
+        )
+
+    def test_concept_questions_do_not_scoop_up_pages(self):
+        # 覆盖档要求每个实词都出现，所以泛泛的提问不会触发一堆补抓。
+        self.assertEqual(self.find("how do I make an object glow"), [])
+
+    def test_exact_only_still_means_exact(self):
+        self.assertEqual(self.find("Wave Texture Node", exact_only=True), [])
+        self.assertTrue(self.find("Fields", exact_only=True))
+
+    def test_lookup_separates_not_crawled_from_not_existing(self):
+        known = ondemand.inventory_lookup(self.connection, "Set Field Of View")
+        self.assertTrue(known["pending_pages"])
+        self.assertEqual(known["pending_pages"][0]["matched_by"], "exact_slug")
+        unknown = ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
+        self.assertEqual(unknown["pending_pages"], [])
+        self.assertEqual(unknown["crawled_pages"], [])
+
+    def test_lookup_reports_pages_that_are_already_local(self):
+        self.connection.execute(
+            "UPDATE pages SET status='success' WHERE normalized_slug='setfieldofview'"
+        )
+        lookup = ondemand.inventory_lookup(self.connection, "Set Field Of View")
+        self.assertEqual(lookup["pending_pages"], [])
+        self.assertTrue(lookup["crawled_pages"])
+
+    def test_describe_lookup_gives_a_different_answer_for_each_state(self):
+        # 三种"没有"必须给三种下一步，否则调用方只能瞎猜。
+        pending = context.describe_lookup(
+            ondemand.inventory_lookup(self.connection, "Set Field Of View")
+        )
+        missing = context.describe_lookup(
+            ondemand.inventory_lookup(self.connection, "zzzznotarealpage")
+        )
+        self.assertIn("get", "\n".join(pending))
+        self.assertNotEqual(pending, missing)
+        self.assertIn("没有对得上的页面", "\n".join(missing))
+
+
+class SampleQuotaTests(unittest.TestCase):
+    """`--sample-per-category N` 是每类的上限，不是全局配额。
+
+    某类不足 N 页时，缺额被转到别的类去补，就会让那些类超过 N——
+    抽样也就不成其为抽样了。
+    """
+
+    def _connection(self, sizes):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        initialize_db(connection)
+        connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        for category, count in sizes.items():
+            for index in range(count):
+                connection.execute(
+                    "INSERT INTO pages(url, path, category, sitemap_url, route_depth)"
+                    " VALUES(?, ?, ?, 'https://example.invalid/s.xml', 2)",
+                    (
+                        f"https://example.invalid/{category}/{index}",
+                        f"/{category}/{index}",
+                        category,
+                    ),
+                )
+        connection.commit()
+        self.addCleanup(connection.close)
+        return connection
+
+    def test_short_category_does_not_inflate_the_others(self):
+        connection = self._connection(
+            {"cpp_api": 9, "blueprint_api": 20, "guides": 100}
+        )
+        quota = crawl.sample_quota(connection, 20)
+        self.assertEqual(quota, {"guides": 20, "blueprint_api": 20, "cpp_api": 9})
+        rows = crawl.select_page_batch(
+            connection, batch_size=999, refresh=False, sample_per_category=20
+        )
+        counts = collections.Counter(row["category"] for row in rows)
+        self.assertEqual(dict(counts), {"guides": 20, "blueprint_api": 20, "cpp_api": 9})
+
+    def test_rerunning_does_not_keep_growing_a_finished_category(self):
+        connection = self._connection({"guides": 100})
+        connection.execute(
+            "UPDATE pages SET status='success' WHERE id IN"
+            " (SELECT id FROM pages ORDER BY id LIMIT 20)"
+        )
+        connection.commit()
+        self.assertEqual(crawl.sample_quota(connection, 20), {})
+        self.assertEqual(
+            crawl.select_page_batch(
+                connection, batch_size=999, refresh=False, sample_per_category=20
+            ),
+            [],
+        )
+
+    def test_a_single_category_run_ignores_the_others(self):
+        connection = self._connection({"guides": 100, "cpp_api": 100})
+        self.assertEqual(
+            crawl.sample_quota(connection, 5, category="cpp_api"), {"cpp_api": 5}
+        )
+
+
+class InventoryValidationTests(unittest.TestCase):
+    """空库返回 pass、退出码 0，是最危险的一种"绿"。"""
+
+    def _connection(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        initialize_db(connection)
+        self.addCleanup(connection.close)
+        return connection
+
+    def _check(self, report, name):
+        return next(c for c in report["checks"] if c["name"] == name)
+
+    def test_a_brand_new_empty_database_fails(self):
+        report = validate.validate_contract(self._connection(), "inventory")
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(self._check(report, "inventory_not_empty")["status"], "fail")
+
+    def test_an_empty_declared_category_fails(self):
+        connection = self._connection()
+        connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        for category in list(config.DATASET.categories)[:-1]:
+            connection.execute(
+                "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+                " locale, route_depth) VALUES(?, ?, ?,"
+                " 'https://example.invalid/s.xml', '5.8', 'en-US', 2)",
+                (f"https://example.invalid/{category}", f"/{category}", category),
+            )
+        connection.commit()
+        report = validate.validate_contract(connection, "inventory")
+        empty = self._check(report, "declared_categories_have_pages")
+        self.assertEqual(empty["status"], "fail")
+        self.assertIn(list(config.DATASET.categories)[-1], empty["requirement"])
+
+    def test_a_complete_inventory_passes(self):
+        connection = self._connection()
+        connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        for category in config.DATASET.categories:
+            connection.execute(
+                "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+                " locale, route_depth) VALUES(?, ?, ?,"
+                " 'https://example.invalid/s.xml', '5.8', 'en-US', 2)",
+                (f"https://example.invalid/{category}", f"/{category}", category),
+            )
+        connection.commit()
+        report = validate.validate_contract(connection, "inventory")
+        self.assertEqual(report["status"], "pass", report["checks"])
+
+    def test_optional_categories_are_allowed_to_be_empty(self):
+        from dataclasses import replace
+
+        original = validate.DATASET
+        validate.DATASET = replace(
+            original, optional_categories=tuple(original.categories)
+        )
+        try:
+            connection = self._connection()
+            connection.execute(
+                "INSERT INTO sitemaps(url, category, status) "
+                "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+            )
+            connection.execute(
+                "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+                " locale, route_depth) VALUES('https://example.invalid/a', '/a',"
+                " 'guides', 'https://example.invalid/s.xml', '5.8', 'en-US', 2)"
+            )
+            connection.commit()
+            report = validate.validate_contract(connection, "inventory")
+            self.assertEqual(
+                self._check(report, "declared_categories_have_pages")["status"], "pass"
+            )
+        finally:
+            validate.DATASET = original
+
+
+class InventoryFeedHookTests(unittest.TestCase):
+    """站点没有 sitemap 时，适配器换掉两个函数就能列页——核心一行不用改。"""
+
+    class FakeSource:
+        """一个只会分页的假站点：两页 API，各带自己的分类。"""
+
+        PAGES = {
+            "https://example.invalid/api?page=1": [
+                ("guides", "https://example.invalid/a"),
+                ("cpp_api", "https://example.invalid/b"),
+            ],
+            "https://example.invalid/api?page=2": [
+                ("guides", "https://example.invalid/c"),
+            ],
+        }
+
+        @staticmethod
+        def inventory_feeds(dataset):
+            return [(url, None) for url in InventoryFeedHookTests.FakeSource.PAGES]
+
+        @staticmethod
+        def read_feed(dataset, url):
+            return InventoryFeedHookTests.FakeSource.PAGES[url]
+
+        @staticmethod
+        def normalize_location(dataset, location):
+            path = "/" + location.rsplit("/", 1)[-1]
+            return (path, location)
+
+    def _connection(self, source=None):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        self.addCleanup(connection.close)
+        # 建库这一步也要跑在假来源上。先拿真来源初始化、之后才替换适配器，
+        # 等于永远测不到"这个来源根本没有站点地图"的那条路径。
+        with self.quiet_source(source or self.FakeSource):
+            initialize_db(connection)
+        return connection
+
+    def test_a_feed_only_source_can_initialize_the_database(self):
+        # 只实现 inventory_feeds / read_feed 的来源没有 sitemap_index_url，
+        # 开库时无条件去问它要总入口，第一步就 AttributeError。
+        self.assertFalse(hasattr(self.FakeSource, "sitemap_index_url"))
+        connection = self._connection()
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "",
+        )
+        # 溯源信息缺一条不影响别的：库该建的都建齐了。
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()[0],
+            "3",
+        )
+
+    def test_sitemap_sources_still_record_their_index(self):
+        class WithSitemap(self.FakeSource):
+            @staticmethod
+            def sitemap_index_url(dataset):
+                return "https://example.invalid/sitemap.xml"
+
+        connection = self._connection(WithSitemap)
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "https://example.invalid/sitemap.xml",
+        )
+
+    def test_adapter_supplied_inventory_lands_in_the_same_tables(self):
+        connection = self._connection()
+        with self.quiet_source(self.FakeSource):
+            total = discover.discover_inventory(connection, workers=2, refresh=False)
+        self.assertEqual(total, 3)
+        counts = {
+            row["category"]: row["count"]
+            for row in connection.execute(
+                "SELECT category, COUNT(*) AS count FROM pages GROUP BY category"
+            )
+        }
+        # 条目自己声明的分类要赢过入口的分类——一个入口列多类必须表达得出来。
+        self.assertEqual(counts, {"guides": 2, "cpp_api": 1})
+        # 元数据和 sitemap 路径完全一样，验收合同不因为换了来源就放松。
+        row = connection.execute(
+            "SELECT doc_version, locale, route_depth, sitemap_url FROM pages LIMIT 1"
+        ).fetchone()
+        self.assertTrue(all(value is not None for value in tuple(row)))
+
+    def test_a_failing_feed_is_recorded_not_swallowed(self):
+        class Broken(self.FakeSource):
+            @staticmethod
+            def read_feed(dataset, url):
+                raise TimeoutError("站点没响应")
+
+        connection = self._connection()
+        with self.quiet_source(Broken):
+            discover.discover_inventory(connection, workers=1, refresh=False)
+        failed = connection.execute(
+            "SELECT COUNT(*) FROM sitemaps WHERE status='failed'"
+        ).fetchone()[0]
+        self.assertEqual(failed, 2)
+        report = validate.validate_contract(connection, "inventory")
+        self.assertEqual(
+            self._check_status(report, "inventory_feeds_complete"), "fail"
+        )
+
+    @contextlib.contextmanager
+    def quiet_source(self, source):
+        """换掉适配器，顺便把进度日志收进黑洞——测试输出该只有测试结果。
+
+        `db` 那份也要换。以前只换 `discover` 的，于是建库始终跑在真来源上，
+        "开库时无条件问来源要站点地图总入口"这个 bug 就一直没被测到。
+        """
+        originals = {discover: discover.SOURCE, db: db.SOURCE}
+        for module in originals:
+            module.SOURCE = source
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                yield
+        finally:
+            for module, original in originals.items():
+                module.SOURCE = original
+
+    def _check_status(self, report, name):
+        return next(c for c in report["checks"] if c["name"] == name)["status"]
+
+
+class GenericRelationLayerTests(unittest.TestCase):
+    """没有领域知识包时，通用关系能力仍然要能用。
+
+    这是 ENH-003 想验证的那条边界：连接、存储、查询、解释关系是通用的，
+    "为什么有关"才是领域的。
+    """
+
+    def test_relation_labels_fall_back_to_the_generic_set(self):
+        self.assertIn("belongs_to", context.RELATION_LABELS)
+        self.assertIn("official_link", context.EVIDENCE_LABELS)
+
+    def test_official_link_is_expected_without_any_knowledge_pack(self):
+        original = validate.KNOWLEDGE
+        validate.KNOWLEDGE = None
+        try:
+            self.assertEqual(validate.expected_evidence_kinds(), ["official_link"])
+        finally:
+            validate.KNOWLEDGE = original
+
+    def test_query_names_work_without_a_knowledge_pack(self):
+        original = search.KNOWLEDGE
+        search.KNOWLEDGE = None
+        try:
+            self.assertEqual(search.query_names("Nanite"), ["nanite"])
+        finally:
+            search.KNOWLEDGE = original
+
+
+class RelatedContractTests(unittest.TestCase):
+    """`related` 以前用一个裸 `[]` 表示三种完全不同的状态。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        initialize_db(self.connection)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        self.connection.commit()
+
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
+
+    def _add(self, path, category, title, blocks):
+        cursor = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, doc_version, locale,"
+            " route_depth, discovered_at, last_seen_at) VALUES(?, ?, ?,"
+            " 'https://example.invalid/s.xml', '5.8', 'en-US', 3,"
+            " '2026-01-01', '2026-01-01')",
+            (f"https://example.invalid{path}", path, category),
+        )
+        row = FakeRow(
+            id=cursor.lastrowid,
+            path=path,
+            url=f"https://example.invalid{path}",
+            category=category,
+        )
+        store.store_document_result(
+            self.connection, transform_document(row, make_document(title, blocks)), category
+        )
+        self.connection.commit()
+
+    def test_unknown_name_says_so_and_points_at_the_inventory(self):
+        self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, route_depth) VALUES("
+            "'https://example.invalid/BlueprintAPI/Camera/SetFieldOfView',"
+            "'/BlueprintAPI/Camera/SetFieldOfView', 'blueprint_api',"
+            "'https://example.invalid/s.xml', 3)"
+        )
+        self.connection.commit()
+        initialize_db(self.connection)
+        result = context.related_payload(self.connection, "Set Field Of View")
+        self.assertEqual(result["status"], "entity_not_found")
+        self.assertTrue(result["lookup"]["pending_pages"])
+        self.assertTrue(result["next_steps"])
+
+    def test_known_entity_without_relations_is_not_the_same_as_missing(self):
+        self._add(
+            "/documentation/unreal-engine/nanite-overview",
+            "guides",
+            "Nanite Virtualized Geometry",
+            [text_block("Nanite is a virtualized micropolygon geometry system.")],
+        )
+        result = context.related_payload(
+            self.connection, "Nanite Virtualized Geometry"
+        )
+        self.assertEqual(result["status"], "entity_found_but_no_relations")
+        self.assertTrue(result["entities"])
+        self.assertTrue(result["next_steps"])
+
+    def test_nothing_anywhere_is_its_own_state(self):
+        result = context.related_payload(self.connection, "zzzznotarealthing")
+        self.assertEqual(result["status"], "entity_not_found")
+        self.assertEqual(result["lookup"]["pending_pages"], [])
+
+    def test_missing_knowledge_id_is_not_treated_as_a_missing_page(self):
+        # K 编号是知识块 ID，不是页面名字——查不到的话是"编号不存在"，
+        # 跟"官方没有这一页/清单里有还没抓"是完全不同的诊断，不能套用
+        # inventory_lookup（那是拿名字去比对页面标题/路径，对数字编号毫无意义）。
+        result = context.related_payload(self.connection, "K999999")
+        self.assertEqual(result["status"], "knowledge_id_not_found")
+        self.assertNotIn("lookup", result)
+        self.assertTrue(result["next_steps"])
+
+
+class McpRelatedEvidenceTests(unittest.TestCase):
+    """SKILL.md 明确承诺 `related` 每条关系都带 `note` 和出处；MCP 是
+    Skill 优先用的入口，文本渲染丢了这两个字段，承诺就是空的。"""
+
+    class _NoCloseConnection:
+        """`tool_related` 用完连接会自己 close；测试要在同一个连接上继续
+        断言，所以拿一层代理挡掉 close，真连接留给 tearDown 收尾。"""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def close(self):
+            pass
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.connection = connect_db(Path(self.directory.name) / "t.sqlite3")
+        self.addCleanup(self.connection.close)
+        initialize_db(self.connection)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        self.connection.commit()
+
+    def _add_page_entity(self, path, title):
+        cursor = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, doc_version,"
+            " locale, route_depth, discovered_at, last_seen_at) VALUES(?, ?,"
+            " 'guides', 'https://example.invalid/s.xml', '5.8', 'en-US', 3,"
+            " '2026-01-01', '2026-01-01')",
+            (f"https://example.invalid{path}", path),
+        )
+        row = FakeRow(
+            id=cursor.lastrowid,
+            path=path,
+            url=f"https://example.invalid{path}",
+            category="guides",
+        )
+        store.store_document_result(
+            self.connection,
+            transform_document(row, make_document(title, [text_block(title)])),
+            "guides",
+        )
+        self.connection.commit()
+        return self.connection.execute(
+            "SELECT id FROM entities WHERE canonical_name=?", (title,)
+        ).fetchone()[0]
+
+    def test_related_text_includes_evidence_url_and_note(self):
+        from_id = self._add_page_entity("/a", "Alpha Component")
+        self._add_page_entity("/b", "Beta Component")
+        self.connection.execute(
+            "INSERT INTO relations(from_entity_id, to_entity_id, relation_type,"
+            " evidence_kind, confidence, source_url, note, created_at, updated_at)"
+            " VALUES(?, (SELECT id FROM entities WHERE canonical_name='Beta"
+            " Component'), 'references', 'name_match', 0.6,"
+            " 'https://example.invalid/evidence-page', '同名但未核实',"
+            " '2026-01-01', '2026-01-01')",
+            (from_id,),
+        )
+        self.connection.commit()
+        original_open = mcpserver._open
+        mcpserver._open = lambda: self._NoCloseConnection(self.connection)
+        try:
+            output = mcpserver.tool_related({"subject": "Alpha Component"})
+        finally:
+            mcpserver._open = original_open
+        self.assertIn("https://example.invalid/evidence-page", output)
+        self.assertIn("同名但未核实", output)
+
+
+class NeutralNamingTests(unittest.TestCase):
+    """接了 cppreference / Blender 之后，输出里还写着 UE 就是在骗人。"""
+
+    def test_no_module_hardcodes_the_unreal_product_name(self):
+        offenders = []
+        for path in sorted(Path(config.REPO_ROOT / "docatlas").rglob("*.py")):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                # 老库改名那几行必须留着旧名字，否则升级不上来。
+                if any(
+                    marker in line
+                    for marker in (
+                        "rename_column_if_present",
+                        "migrate_metadata_key",
+                        "migrate_tag_type",
+                    )
+                ):
+                    continue
+                if re.search(r'f"UE \{|"ue_version"', line):
+                    offenders.append(f"{path.name}:{number} {line.strip()}")
+        self.assertEqual(offenders, [])
+
+    def test_context_pack_reports_product_and_version_separately(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        self.addCleanup(connection.close)
+        initialize_db(connection)
+        pack = context.build_context_pack(
+            connection, "anything", token_budget=100, category=None
+        )
+        self.assertEqual(pack["product"], config.DATASET.product)
+        self.assertEqual(pack["version"], config.DATASET.version)
+        self.assertNotIn("ue_version", pack)
+
+    def test_chunk_context_prefix_uses_the_dataset_product(self):
+        chunks = chunking.chunk_section(
+            make_section("Body", "some text", position=0),
+            page_title="Page",
+            category="guides",
+            document_type=None,
+        )
+        self.assertTrue(
+            chunks[0]["context_prefix"].startswith(
+                f"{config.DATASET.product} {config.DATASET.version}"
+            ),
+            chunks[0]["context_prefix"],
+        )
+
+
+class SkillMcpContractTests(unittest.TestCase):
+    """MCP 是 AI 真正调的入口，公开合同和实现不许对不上。"""
+
+    def test_every_argument_the_handlers_read_is_declared(self):
+        # `fetch_limit` 曾经被 tool_ask 读取却没写进 inputSchema，
+        # 于是没有任何客户端知道可以传它。
+        import inspect
+
+        from docatlas import mcpserver
+
+        for tool in mcpserver.TOOLS:
+            handler = mcpserver.HANDLERS[tool["name"]]
+            source = inspect.getsource(handler)
+            declared = set(tool["inputSchema"].get("properties", {}))
+            read = set(re.findall(r"arguments\.get\(\s*[\"'](\w+)[\"']", source))
+            self.assertLessEqual(
+                read, declared, f"{tool['name']} 读了没公开的参数：{read - declared}"
+            )
+
+    def test_skill_lists_the_tools_that_actually_exist(self):
+        from docatlas.cli import skill_substitutions
+        from docatlas import mcpserver
+
+        listed = skill_substitutions()["DOCATLAS_MCP_TOOLS"]
+        for tool in mcpserver.TOOLS:
+            self.assertIn(tool["name"], listed)
+
+    def test_skill_tells_the_ai_to_prefer_mcp(self):
+        skill = (
+            Path(config.REPO_ROOT) / "skills" / "docatlas" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("docatlas_ask", skill)
+        self.assertIn("{{DOCATLAS_MCP_TOOLS}}", skill)
+
+    def test_cli_and_mcp_answer_through_the_same_function(self):
+        # 两边各写一套"要不要补抓"的判断，迟早会给出不一样的答案。
+        import inspect
+
+        from docatlas import cli, mcpserver
+
+        self.assertIn("answer(", inspect.getsource(cli.command_ask))
+        self.assertIn("answer(", inspect.getsource(mcpserver.tool_ask))
 
 
 if __name__ == "__main__":
