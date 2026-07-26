@@ -2,15 +2,15 @@
 id: ENH-004
 title: "来源适配器支持非 sitemap 的页面清单"
 type: enhancement
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: sources
 labels: [sources, discovery, sitemap, extensibility]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [ENH-003, BUG-006]
 ---
 

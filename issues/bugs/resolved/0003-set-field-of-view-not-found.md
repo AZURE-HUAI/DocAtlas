@@ -2,15 +2,15 @@
 id: BUG-003
 title: "本地搜索没有命中已存在的 `Set Field Of View` 蓝图 API 页面"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: high
 area: inventory
 labels: [search, related, blueprint-api, on-demand-fetch]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [BUG-002, BUG-005]
 ---
 

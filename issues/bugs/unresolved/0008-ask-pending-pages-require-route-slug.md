@@ -94,6 +94,25 @@ python -m docatlas get "wavehtml" --limit 2
 - 主智能体使用 `get` 正向证明目标页已在 pending 清单，不是 inventory 真缺页。
 - 临时数据集和来源适配器已按测试要求删除。
 
+### 2026-07-26：多词符号和自然任务的残余边界
+
+在重新建立并通过小样验收的数据集上，精确单页名的候选补抓已经明显改善，但仍有
+可复现的残余边界：
+
+- cppreference 查询 `duration_cast milliseconds` 返回 0 块、退出码 1，并称
+  inventory 没有匹配页；固定官网
+  `https://en.cppreference.com/cpp/chrono/duration/duration_cast` 实测存在。
+  精确单词 `steady_clock` 可以冷抓，说明差异来自多词候选覆盖，而不是来源不可用。
+- Geometry 道路任务的自然问题首次只命中 Instance on Points，`requested=0`；
+  单独精确查询 `Curve to Mesh Node` 后冷抓 3 页约 2.013 秒，再执行原问题才在约
+  173 ms 的本地检索中首位命中。网络抓取和本地排序可以明确分开。
+- Shader 与 Geometry 的多个自然任务在原问、自然改写和关键词 `search` 中都不触发
+  pending 页；拆成单个官方页面名后可在约 1–3 秒冷抓。部分暖查询恢复，部分仍由
+  `BUG-002` 的排序问题压制。
+
+这批证据不要求把任意自然问题都变成宽泛抓取；它要求诊断能区分“候选不足以安全
+补抓”与“清单确实没有页面”，并继续改进包含精确符号加用途词的常见查询。
+
 ## 验证
 
 `InventoryCandidateTests` 用议题里的四种真实形状建了一份小清单，逐条验证：

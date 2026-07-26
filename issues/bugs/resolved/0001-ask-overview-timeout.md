@@ -2,15 +2,15 @@
 id: BUG-001
 title: "`ask` 查询宽泛版本概览时超时且没有进度输出"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: high
 area: query
 labels: [ask, performance, diagnostics]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [BUG-002]
 ---
 
