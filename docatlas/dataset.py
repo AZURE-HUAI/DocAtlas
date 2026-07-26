@@ -50,9 +50,16 @@ class Dataset:
     # 用户问题里出现哪些词，AI 就该想到查这个库。纯数据，没有逻辑——
     # 装技能时填进技能描述，Claude Code 靠它决定要不要唤起这个技能。
     skill_triggers: tuple[str, ...] = ()
+    # 清单范围策略。目前只有一项：范围内正文引用到、但整个目录都没被枚举过的
+    # 页面归哪一类。不配就不收——一个数据集要不要越出自己声明的目录，
+    # 是它自己的决定，核心不替它拿主意。
+    inventory: dict[str, Any] = field(default_factory=dict)
 
     def option(self, key: str, default: Any = None) -> Any:
         return self.options.get(key, default)
+
+    def inventory_option(self, key: str, default: Any = None) -> Any:
+        return self.inventory.get(key, default)
 
 
 def dataset_path(dataset_id: str, config_dir: Path) -> Path:
@@ -101,6 +108,7 @@ def load_dataset(dataset_id: str, config_dir: Path) -> Dataset:
         },
         optional_categories=tuple(raw.get("optional_categories") or ()),
         skill_triggers=tuple((raw.get("skill") or {}).get("triggers") or ()),
+        inventory=raw.get("inventory") or {},
     )
 
 

@@ -7,6 +7,10 @@ source = "blender_manual"
 
 api_categories = ["shader_nodes", "geometry_nodes"]
 
+# 引用闭包收进来的页面可以一页都没有（正文里恰好没有跨目录链接就是这样），
+# 不该因此把一个健康的库判成失败。
+optional_categories = ["referenced"]
+
 [source_options]
 base_url = "https://docs.blender.org"
 search_index = "https://docs.blender.org/manual/en/5.2/searchindex.js"
@@ -17,17 +21,29 @@ home_path = "/manual/en/5.2/"
 shader_nodes = "render/shader_nodes/"
 geometry_nodes = "modeling/geometry_nodes/"
 
+# 清单范围策略。节点页正文一直在链 Modifier、编辑器、节点组接口这些页面，
+# 而 searchindex.js 里它们不在上面两个目录下，于是一页都进不来。
+# 声明这一项之后，**被范围内正文引用到**的手册页会被收进清单归到这一类。
+# 判据是站点自己写的引用，不是一份手工维护的页面名单；范围也只走一跳。
+# 不写这一项就完全不收——越不越出自己声明的目录，由数据集自己决定。
+[inventory]
+referenced_category = "referenced"
+
 [category_labels]
 shader_nodes = "Shader / Texture Nodes"
 geometry_nodes = "Geometry Nodes"
+referenced = "节点页引用到的手册页"
 
 [entity_types]
 shader_nodes = "shader_node"
 geometry_nodes = "geometry_node"
+referenced = "manual_page"
 
+# 引用进来的是背景页，同名时优先给节点本身的页面。
 [category_priority]
 shader_nodes = 1
 geometry_nodes = 1
+referenced = 3
 
 [skill]
 triggers = [
@@ -41,3 +57,5 @@ verbose_categories = []
 [search.concept_category_bonus]
 shader_nodes = 2.0
 geometry_nodes = 2.0
+# 引用进来的是背景页，不是节点本身，问概念时不该盖过节点文档。
+referenced = 0.0
