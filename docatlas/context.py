@@ -301,10 +301,13 @@ def answer(
     return pack
 
 
+KNOWLEDGE_ID_RE = re.compile(r"[Kk]?\d+")
+
+
 def _subject_entities(
     connection: sqlite3.Connection, subject: str
 ) -> list[sqlite3.Row]:
-    if re.fullmatch(r"[Kk]?\d+", subject):
+    if KNOWLEDGE_ID_RE.fullmatch(subject):
         chunk_id = int(subject[1:] if subject[:1].casefold() == "k" else subject)
         return list(
             connection.execute(
@@ -396,7 +399,13 @@ def related_payload(
             }
         )
     if not entities:
-        status = "entity_not_found"
+        # K 编号是知识块 ID，不是页面名字——查不到时那是"编号不存在"，
+        # 跟清单里有没有这一页毫无关系，不能套用 inventory_lookup 的诊断。
+        status = (
+            "knowledge_id_not_found"
+            if KNOWLEDGE_ID_RE.fullmatch(subject)
+            else "entity_not_found"
+        )
     elif any(item["relations"] for item in entities):
         status = "ok"
     else:
@@ -410,6 +419,12 @@ def related_payload(
     if status == "entity_not_found":
         result["lookup"] = inventory_lookup(connection, subject)
         result["next_steps"] = describe_lookup(result["lookup"])
+    elif status == "knowledge_id_not_found":
+        result["next_steps"] = [
+            f"{subject} 不是本地存在的知识块编号。K 编号只能从 search / ask 的"
+            "结果里读到，不能凭空猜或复用旧结果——库重跑过一次编号就会变。"
+            '先用 python -m docatlas search "<关键词>" 拿到当前有效的 K 编号。',
+        ]
     elif status == "entity_found_but_no_relations":
         result["next_steps"] = [
             "这个实体在库里，但一条交叉关系都没有。多半是它指向的页面还没抓；"

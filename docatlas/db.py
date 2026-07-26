@@ -246,6 +246,8 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         """
     )
     rename_column_if_present(connection, "pages", "ue_version", "doc_version")
+    migrate_metadata_key(connection, "ue_version", "doc_version")
+    migrate_tag_type(connection, "ue_version", "doc_version")
     add_column_if_missing(connection, "pages", "doc_version", "TEXT")
     add_column_if_missing(connection, "pages", "locale", "TEXT")
     add_column_if_missing(connection, "pages", "route_depth", "INTEGER")
@@ -403,6 +405,55 @@ def rename_column_if_present(
         return False
     connection.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
     return True
+
+
+def migrate_metadata_key(connection: sqlite3.Connection, old: str, new: str) -> None:
+    """老库改名用；`metadata.key` 是主键，改名不能靠 UPDATE 就完事——如果两个
+    key 都在（旧库跑过一次 initialize 之后新 key 已经写入），旧的那行就是
+    死数据，删掉；如果只有旧 key，直接把它改名。"""
+    old_row = connection.execute(
+        "SELECT value FROM metadata WHERE key=?", (old,)
+    ).fetchone()
+    if old_row is None:
+        return
+    new_exists = (
+        connection.execute("SELECT 1 FROM metadata WHERE key=?", (new,)).fetchone()
+        is not None
+    )
+    if new_exists:
+        connection.execute("DELETE FROM metadata WHERE key=?", (old,))
+    else:
+        connection.execute(
+            "UPDATE metadata SET key=? WHERE key=?", (new, old)
+        )
+
+
+def migrate_tag_type(connection: sqlite3.Connection, old: str, new: str) -> None:
+    """老库改名用。`tags` 表 `UNIQUE(name, tag_type)`，同一个 name 在旧库里可能
+    已经同时有 old 和 new 两个 tag_type（新代码跑过一次之后）。逐个改名会撞
+    UNIQUE 约束，所以撞了就把引用旧 tag 的 chunk_tags 转投新 tag，再删旧
+    tag；没撞就直接改名。"""
+    old_tags = list(
+        connection.execute("SELECT id, name FROM tags WHERE tag_type=?", (old,))
+    )
+    for row in old_tags:
+        old_id, name = row["id"], row["name"]
+        new_row = connection.execute(
+            "SELECT id FROM tags WHERE name=? AND tag_type=?", (name, new)
+        ).fetchone()
+        if new_row is None:
+            connection.execute(
+                "UPDATE tags SET tag_type=? WHERE id=?", (new, old_id)
+            )
+            continue
+        new_id = new_row["id"]
+        connection.execute(
+            "INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_id) "
+            "SELECT chunk_id, ? FROM chunk_tags WHERE tag_id=?",
+            (new_id, old_id),
+        )
+        connection.execute("DELETE FROM chunk_tags WHERE tag_id=?", (old_id,))
+        connection.execute("DELETE FROM tags WHERE id=?", (old_id,))
 
 
 def route_metadata(path: str) -> tuple[int, str | None]:
