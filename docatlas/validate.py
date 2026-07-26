@@ -45,9 +45,14 @@ def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
 def expected_evidence_kinds() -> list[str]:
     """这个数据集本应产出哪几类关系证据。
 
-    官方链接是通用的，任何文档站都有；其余由领域知识包声明自己会推出哪几类。
+    官方链接是通用的，任何文档站都有；成员表只有认得它的来源适配器才会产出；
+    其余由领域知识包声明自己会推出哪几类。
     """
+    from .members import supported as members_supported
+
     kinds = ["official_link"]
+    if members_supported():
+        kinds.append("page_member_table")
     kinds.extend(active().hook("DERIVED_EVIDENCE_KINDS", ()))
     return kinds
 

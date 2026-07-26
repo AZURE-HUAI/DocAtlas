@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 
 from .constants import MARKDOWN_TARGET_RE
+from .members import collect as collect_members
 from .runtime import active
 from .net import fetch_bytes
 from .htmlmd import plain_text
@@ -200,6 +201,16 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         )
         if extra:
             entity["aliases"] = sorted(set(entity["aliases"]) | extra)
+    # 类型页的成员表里还藏着一批实体（属性、方法），它们大多没有自己的页面。
+    # 认表格是站点知识，所以由适配器出；这里只是把它们一起交出去。
+    members = collect_members(
+        category=category,
+        title=title,
+        path=path,
+        source_url=source_url,
+        sections=sections,
+        module=entity["module"],
+    )
     return {
         "ok": True,
         "id": page_id,
@@ -216,6 +227,7 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         "chunks": chunks,
         "page_links": extract_page_links(sections),
         "entity": entity,
+        "members": members,
         "assets": sorted(parsed["assets"]),
         "block_types": sorted(parsed["block_types"]),
     }

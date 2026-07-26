@@ -228,6 +228,103 @@ def parse_document(dataset, path: str, body: bytes) -> dict[str, Any]:
     }
 
 
+# ── 5. 类型页的成员表 ───────────────────────────────────────────
+#
+# Epic 的 C++ API 页把类的属性和方法排成 Markdown 表格，第一列固定叫 Name。
+# 这些成员**大多没有自己的页面**——`TargetArmLength` 只存在于
+# `USpringArmComponent` 这一页的 Variables 表里。认出这些表是站点知识，
+# 所以在适配器里；"BlueprintReadWrite 意味着什么"是领域知识，在知识包里。
+
+# 二级标题 → 这一节列的是哪种成员。故意不收 Constructors / Destructors：
+# 构造函数与类同名，提升成实体只会让同一个名字查出两条。
+_MEMBER_SECTIONS = {
+    "Variables": "cpp_property",
+    "Deprecated Variables": "cpp_property",
+    "Constants": "cpp_constant",
+    "Functions": "cpp_function",
+    "Overloads": "cpp_function",
+    "Operators": "cpp_function",
+}
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _table_cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return None
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _member_name(cell: str, entity_type: str) -> str:
+    """从 Name 单元格里取出成员本名。
+
+    属性那一列就是名字；函数那一列是整条签名（`void SetFoo ( float New )`），
+    名字是左括号之前的最后一个标识符——前面那些是返回类型和 `virtual`。
+    """
+    if entity_type != "cpp_function":
+        name = cell.strip("`")
+        return name if _IDENTIFIER_RE.fullmatch(name) else ""
+    tokens = _IDENTIFIER_RE.findall(cell.split("(")[0])
+    return tokens[-1] if tokens else ""
+
+
+def page_members(
+    dataset,
+    *,
+    category: str,
+    title: str,
+    path: str,
+    sections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """这一页的成员表里列了哪些成员。
+
+    带链接的那一行直接跳过：官方给它出了独立页面，那一页本身就是实体，
+    再提升一次就成了同一个东西的两份记录。这也正好把范围收敛到真正缺的
+    那一批——没有页面、因此在库里根本不存在的成员。
+    """
+    if category != "cpp_api":
+        return []
+    members: list[dict[str, Any]] = []
+    for section in sections:
+        levels = str(section.get("heading_path") or "").split(" > ")
+        entity_type = _MEMBER_SECTIONS.get(levels[1]) if len(levels) > 1 else None
+        if not entity_type:
+            continue
+        lines = str(section.get("body_md") or "").split("\n")
+        header = _table_cells(lines[0]) if lines else None
+        if not header or header[0] != "Name":
+            continue
+        # 说明符列的表头是一个指向官方说明的链接，各类成员指向的锚点不同，
+        # 所以认"最后一列的表头里提到 Unreal Specifiers"，不认具体地址。
+        specifier_column = len(header) - 1 if "Unreal Specifiers" in header[-1] else None
+        for line in lines[2:]:
+            cells = _table_cells(line)
+            if not cells or len(cells) != len(header):
+                continue
+            if "](" in cells[0]:
+                continue
+            name = _member_name(cells[0], entity_type)
+            if not name:
+                continue
+            specifiers = cells[specifier_column] if specifier_column is not None else ""
+            members.append(
+                {
+                    "name": name,
+                    "entity_type": entity_type,
+                    "signature": cells[0],
+                    "source_url": section.get("source_anchor") or "",
+                    "attributes": {
+                        "member_section": levels[1],
+                        "summary": cells[1] if len(cells) > 1 else "",
+                        # 原样存着，不在这里解释。怎么读它是领域知识包的事。
+                        "unreal_specifiers": specifiers,
+                    },
+                }
+            )
+    return members
+
+
 def entity_placement(
     dataset, category: str, segments: list[str]
 ) -> tuple[str | None, str | None]:
