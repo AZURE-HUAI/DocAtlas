@@ -11,7 +11,7 @@ import re
 
 # 切块规则的版本号。规则一改就要 +1，chunks.parser_version 记录每块由哪版产出，
 # 中途换规则时才分得清哪些块是旧的、需要重切。
-CHUNKER_VERSION = "v4"
+CHUNKER_VERSION = "v5"
 USER_AGENT = "DocAtlas/1.0 (+local educational archive)"
 
 RETRYABLE_HTTP_CODES = {403, 408, 425, 429, 500, 502, 503, 504}

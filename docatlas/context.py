@@ -38,6 +38,7 @@ from .ondemand import (
 from .relations import page_link_status
 from .runtime import active
 from .search import query_names, search_chunks
+from .text import SCRIPT_NAMES, script_mismatch, script_of_language
 
 MAX_CHUNKS_PER_PAGE = 2
 PRIMARY_BUDGET_RATIO = 0.8
@@ -448,6 +449,21 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
             f"有 {len(crawled)} 个同名页面已经抓过了，但没有知识块命中这次的查询词。",
             f'换个说法再试，或直接读那一页：python -m docatlas ask "{lookup["query"]}"',
         ]
+    if weak := lookup.get("weak_candidates"):
+        # "线索不够所以没敢抓"和"确实没有这一页"是两回事。把候选摆出来，
+        # 让人自己决定要不要取，而不是一句"官方没有"把路堵死。
+        lines = [
+            f"没有把握到底该取哪一页，所以这次没有自动补抓。清单里这几页沾边：",
+        ]
+        for page in weak:
+            label = workspace.category_labels.get(page["category"], page["category"])
+            lines.append(f"  [{label}] {page['path']}")
+        lines.append(
+            "看着对就直接取："
+            f'python -m docatlas get "{lookup["query"]}"；'
+            "或者换成页面的官方名字再查一次，那样就能自动补抓了。"
+        )
+        return lines
     if linked := lookup.get("linked_targets"):
         # 已抓页面链过去，清单里却没有——那不是"官方没有"，是我们没枚举到。
         # 说成"官方确实没有这一页"会让人一直去改查询词，白费力气。
@@ -461,6 +477,18 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
             "（见 WORKFLOWS.md 流程 B），重抓多少次都不会有。"
         )
         return lines
+    if foreign := script_mismatch(lookup["query"], workspace.language):
+        # 用另一套文字提问，在单语库里必然一无所获——这不是"官方没有这一页"，
+        # 而是"这个库里没有这种文字的正文"。两句话指向完全不同的下一步。
+        return [
+            f"这个库的正文是 {workspace.language}"
+            f"（{SCRIPT_NAMES.get(script_of_language(workspace.language), '')}），"
+            f"而这条查询是用{SCRIPT_NAMES.get(foreign, foreign)}写的，"
+            "所以必然一条都对不上——不是官方没有这一页。",
+            f"把关键词换成原文（{workspace.language}）里的官方写法再查一次，"
+            "比如页面标题、函数名、菜单项的原词。专有名词和代码符号一般不翻译，"
+            "原样写就行。",
+        ]
     return [
         "没有找到结果，全站清单里也没有对得上的页面。",
         f"原文语言是 {workspace.language}，换成原文里的官方写法往往能命中；"
@@ -492,12 +520,11 @@ def _render_empty(pack: dict[str, Any]) -> list[str]:
     lookup = pack.get("lookup") or {}
     pending = lookup.get("pending_pages") or []
     if not pending:
-        return [
-            f"本地库里没有命中，全站清单里也没有对得上的页面。",
-            "",
-            f"多半是名字和官方写法对不上：原文语言是 {workspace.language}，"
-            "换成官方的正式写法再试一次；还是没有，就说明官方文档确实没有这一页。",
-        ]
+        # 诊断已经统一在 describe_lookup 里：异语言、线索不够、来源没枚举到、
+        # 确实没有——四种"没有"各有各的下一步，这里不该再写一份会走岔的副本。
+        return ["本地库里没有命中。", "", *describe_lookup(lookup or {
+            "query": pack["query"], "pending_pages": [], "crawled_pages": [],
+        })]
     lines = [
         f"本地还没有这一页的正文，但全站清单里有 {len(pending)} 个页面对得上：",
         "",

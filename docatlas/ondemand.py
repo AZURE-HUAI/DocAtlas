@@ -31,6 +31,7 @@ from .documents import fetch_document
 from .relations import link_new_pages
 from .runtime import active, bind
 from .search import query_names, tokenize, STOPWORDS
+from .text import qualifier_tail
 from .store import store_document_result
 from .util import log
 
@@ -70,6 +71,40 @@ def coverage_tokens(query: str) -> list[str]:
     return tokens[:6]  # 再多就是整句话了，全部命中反而不可能
 
 
+# 地址里的分隔符。比对之前要先去掉：用户敲的 `duration_cast` 规范化成
+# `durationcast`，而路径里原样写着 `duration_cast`——不去掉下划线，
+# 这两个字符串永远对不上，于是"清单里明明有"的页面报成"没有"。
+_PATH_SEPARATORS = ("_", "-", ".", "~", "+", "%20", " ")
+
+
+def _flattened_path(column: str = "path") -> str:
+    """把路径拍平成和 `normalize_name` 一个口径，好跟规范化后的词直接比。"""
+    expression = f"lower({column})"
+    for separator in _PATH_SEPARATORS:
+        expression = f"replace({expression}, '{separator}', '')"
+    return expression
+
+
+def identifier_tokens(query: str) -> list[str]:
+    """查询里"一看就是个符号"的词：带 `::`、下划线或驼峰的那些。
+
+    普通英文词不算。`milliseconds` 单独拿去对 slug 会扫回一大片，
+    而 `duration_cast` 基本只可能是那一页——所以只有后者够格单独定位。
+    这也是概念提问不会误触发补抓的原因：`how do I make an object glow`
+    里一个符号形状的词都没有。
+    """
+    identifier_re = active().identifier_re
+    found: list[str] = []
+    for token in tokenize(query):
+        if not identifier_re.search(token):
+            continue
+        for candidate in (token, qualifier_tail(token)):
+            normalized = normalize_name(candidate)
+            if len(normalized) >= MIN_CONTAINS_CHARS and normalized not in found:
+                found.append(normalized)
+    return found
+
+
 def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
     """返回 [(档位, WHERE 片段, 参数)]，从最确定到最宽松。"""
     names = query_names(query)
@@ -78,15 +113,27 @@ def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
     stages: list[tuple[str, str, tuple[Any, ...]]] = []
     placeholders = ",".join("?" for _ in names)
     stages.append(("exact_slug", f"normalized_slug IN ({placeholders})", tuple(names)))
+    # 整条查询对不上，但里面某个符号正好就是一页的名字——`duration_cast
+    # milliseconds` 里的 `duration_cast` 就是这样。只认符号形状的词，
+    # 所以自然语言提问不会掉进来。
+    if tokens := [name for name in identifier_tokens(query) if name not in names]:
+        stages.append(
+            (
+                "token_exact_slug",
+                f"normalized_slug IN ({','.join('?' for _ in tokens)})",
+                tuple(tokens),
+            )
+        )
     for name in names:
         if len(name) >= MIN_CONTAINS_CHARS:
             stages.append(("slug_contains", "normalized_slug LIKE ?", (f"%{name}%",)))
     tokens = coverage_tokens(query)
     if len(tokens) >= MIN_COVERAGE_TOKENS:
+        flattened = _flattened_path()
         stages.append(
             (
                 "path_covers_query",
-                " AND ".join("path LIKE ?" for _ in tokens),
+                " AND ".join(f"{flattened} LIKE ?" for _ in tokens),
                 tuple(f"%{token}%" for token in tokens),
             )
         )
@@ -165,6 +212,42 @@ def missing_exact_pages(
     return connection.execute(sql, params).fetchone()[0]
 
 
+def weak_candidates(
+    connection: sqlite3.Connection,
+    query: str,
+    *,
+    category: str | None = None,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    """线索不够、不敢自动补抓，但清单里确实沾边的页面。
+
+    "线索不足以安全补抓"和"清单里确实没有这一页"是两回事，以前都表现成同一句
+    "官方文档确实没有这一页"。前者该把候选摆出来让人自己定，后者才是真没有。
+
+    这里用的条件比补抓宽得多（任意一个实词出现在路径里就算），所以**只报告、
+    不抓取**——照这个条件去抓，一个宽泛问题就能拖回一整片无关页面。
+    """
+    tokens = coverage_tokens(query)
+    if not tokens:
+        return []
+    flattened = _flattened_path()
+    sql = (
+        f"SELECT path, category FROM pages WHERE {_PENDING} AND ("
+        + " OR ".join(f"{flattened} LIKE ?" for _ in tokens)
+        + ")"
+    )
+    params: list[Any] = [f"%{token}%" for token in tokens]
+    if category:
+        sql += " AND category=?"
+        params.append(category)
+    sql += f" ORDER BY {_priority_case()}, route_depth, id LIMIT ?"
+    params.append(limit)
+    return [
+        {"path": row["path"], "category": row["category"]}
+        for row in connection.execute(sql, params)
+    ]
+
+
 def linked_but_unlisted(
     connection: sqlite3.Connection, query: str, *, limit: int = 3
 ) -> list[dict[str, str]]:
@@ -233,9 +316,14 @@ def inventory_lookup(
         "crawled_pages": [
             {"path": row["path"], "category": row["category"]} for row in crawled
         ],
-        # 前两样都空才值得查这个：它回答的是"是不是我们自己漏了"。
+        # 后两样只在什么都没找到时才算：它们回答的是"到底是哪一种没有"。
         "linked_targets": (
             linked_but_unlisted(connection, query) if not pending and not crawled else []
+        ),
+        "weak_candidates": (
+            weak_candidates(connection, query, category=category)
+            if not pending and not crawled
+            else []
         ),
     }
 
