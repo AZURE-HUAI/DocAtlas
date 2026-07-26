@@ -172,6 +172,44 @@ python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-bud
 拿弱相关小样当完整回答的代价更大。需要纯离线时用 `--no-fetch`，
 补抓页数仍受 `--fetch-limit`（默认 5）硬约束。
 
+### 2026-07-26：多词符号的残余边界已修
+
+`duration_cast milliseconds` 一页都定位不到，是**两个 bug 叠在一起**：
+
+1. **规范化后的词拿去比原始路径**。覆盖档把 `duration_cast` 规范化成
+   `durationcast`，而路径里原样写着 `duration_cast`——下划线一挡，
+   `path LIKE '%durationcast%'` 永远为假。任何名字里带分隔符的符号都中招。
+2. **要求每个实词都命中**。`milliseconds` 压根不在
+   `/cpp/chrono/duration/duration_cast` 里，这一档因此必然落空。
+
+**改动**：
+
+- 路径先拍平（去掉 `_ - . ~ +` 和空格）再比，和 `normalize_name` 一个口径。
+- 新增 `token_exact_slug` 档：查询里**符号形状**的词（带 `::`、下划线或
+  驼峰）单独去对页面 slug。普通英文词不够格——`milliseconds` 单独去对会扫回
+  一大片，`duration_cast` 基本只可能是那一页。
+- 诊断补上第四种"没有"：`weak_candidates`。"线索不够所以没敢抓"以前和
+  "确实没有这一页"说的是同一句话，现在把沾边的页面摆出来让人自己定，
+  且**只报告、不抓取**——照那个宽松条件去抓，一个宽泛问题能拖回一整片。
+
+档位现在是四档，覆盖议题给的全部形状：
+
+| 查询 | 命中档位 | 修复前 |
+|---|---|---|
+| `duration_cast milliseconds` | `token_exact_slug` | 一页都找不到 |
+| `render target guide`（路径带连字符） | `path_covers_query` | 分隔符挡住，不命中 |
+| `Fields` / `std::from_chars` / `Set Field Of View` | `exact_slug` | 已在上一轮修好 |
+| `Wave Texture Node` | `path_covers_query` | 已在上一轮修好 |
+| `how do I make an object glow` | 无候选 | 无候选（反向保证） |
+| `camera settings` | 无候选，但报告 `weak_candidates` | 说成"官方确实没有这一页" |
+
+`identifier_tokens()` 的反向保证有测试钉死：`milliseconds`、
+`how do I make an object glow` 都产出空列表，概念提问不可能误触发补抓。
+
+**未做**：把任意自然任务问题都变成候选补抓。议题本身也不要求
+（"这批证据不要求把任意自然问题都变成宽泛抓取"）。多词自然问句仍需拆成
+官方页面名，或依赖上层 Skill 先落成原文术语。
+
 ## 外部关联
 
 - GitHub Issue：

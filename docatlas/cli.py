@@ -476,11 +476,13 @@ def skill_substitutions() -> dict[str, str]:
     由数据集填，不能写死。写死了就等于假定所有人装的都是同一份文档。
     """
     from .mcpserver import TOOLS
+    from .runtime import available_dataset_ids
     from .validate import expected_evidence_kinds
 
     return {
         # 工具名从 MCP 服务器自己那里取：技能手册永远不会写出一个不存在的工具。
         "DOCATLAS_MCP_TOOLS": "、".join(f"`{tool['name']}`" for tool in TOOLS),
+        "DOCATLAS_DATASETS": "、".join(f"`{key}`" for key in available_dataset_ids()),
         "DOCATLAS_ROOT": str(REPO_ROOT),
         "DATASET_ID": DATASET_ID,
         "DATASET_NAME": DATASET.name,
