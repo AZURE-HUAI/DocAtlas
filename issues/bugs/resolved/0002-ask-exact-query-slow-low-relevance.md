@@ -1,22 +1,31 @@
 ---
 id: BUG-002
-title: "精确 `ask` 查询仍然偏慢，且结果相关性较低"
+title: "精确 `ask` 查询曾出现性能与排序问题"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: closed
+lifecycle: resolved
 priority: high
 area: search
 labels: [ask, performance, ranking, blueprint-api]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
 fix_pr: null
-related: [BUG-001, BUG-003]
+related: [BUG-001, BUG-003, ENH-005, ENH-007, ENH-008]
 ---
 
 # 问题
 
-较小预算、限定 `blueprint_api` 分类的精确查询仍有明显延迟和排序噪声。
+本议题最初把核心检索性能、精确页面排序、自然问句理解和版本意图混在一起记录。
+复核后的责任边界是：
+
+- 页面已经本地化，输入精确官方标题或符号仍异常缓慢、排错或返回损坏内容，属于
+  DocAtlas 核心。
+- 理解自然问句、提炼官方术语、识别迁移意图、按版本组织多个结果和自动改写重试，
+  属于 AI/Skill 中间层。
+
+原始核心性能和面包屑噪音已有实现与验证记录。本轮没有复现出独立的“精确官方标题
+已本地化但仍排错”故障，因此不能再用自然问句首位命中率维持该 Bug 为未解决。
 
 ## 复现
 
@@ -56,6 +65,9 @@ python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-bud
 
 ### 2026-07-26：cppreference 与 Blender 小样
 
+> 责任归属修正：本节大量使用普通学习问法，适合作为 AI/Skill 查询规划证据，
+> 不能整体当作 DocAtlas 精确排序缺陷。
+
 在两个临时非 Unreal 数据集上又完成 36 轮真实学习测试。性能大多已不是主要矛盾：
 全部 CLI 命令中位约 0.2–0.24 秒，但首位相关性仍低。
 
@@ -72,6 +84,9 @@ Principled Hair 与公共导航块仍能排在更精确正文之前，因此保�
 证据。在线目标页均按对应版本核对可访问。
 
 ### 2026-07-26：固定版本重建后的版本语义复现
+
+> 责任归属修正：判断“限定当前版本”与“从旧版本迁移”的不同意图，需要 AI 综合
+> 问句和多页内容；本节转交 ENH-007，不再作为核心排序 Bug 的未解决条件。
 
 重新建立 `cppreference-2026-07-26` 与 `blender-manual-5.2` 小样并完成 36 轮后，
 主智能体确认普通本地调用约 0.2 秒，主要残余问题仍是相关性和版本语义：
@@ -94,6 +109,31 @@ Principled Hair 与公共导航块仍能排在更精确正文之前，因此保�
 
 这些结果证明当前缺口不是冷抓网络耗时，而是目标已本地化之后，查询里的版本/标准
 限定没有可靠进入排序和上下文组织。
+
+### 2026-07-26：重建数据集后的纯排序对照
+
+> 责任归属修正：该查询是自然问句；精确对照 `Reference initialization` 能正确
+> 首位命中。因此它证明 AI 应先落成官方术语并重试，不证明精确核心检索仍坏。
+
+三位学习者在 C++20、Blender 着色器节点、Blender 几何节点各完成 12 轮，共
+36 轮。正确主题首位命中 13/36（C++ 3/12、着色器 5/12、几何节点 5/12）。
+全部 MCP 调用成功，常见延迟只有几十毫秒，在线目标页也都有效，因此这批错排不能
+归因于超时或官网失效。
+
+主智能体用一个已经本地化、完全不触发补抓的样例把排序问题单独复现出来：
+
+```powershell
+$env:DOCATLAS_DATASET='cppreference-2026-07-26'
+python -m docatlas ask 'How does reference initialization work in C++20?' --category language --token-budget 1500 --json
+```
+
+- 查询约 219 ms，`fetch.requested = 0`。
+- 首条错误地落到 `Aggregate initialization`。
+- 正确的 `Reference initialization` 只排在第 4、5 条。
+- 对照查询 `Reference initialization` 能把正确页面排到第一。
+
+这说明自然句式与多个初始化主题共享词语时，泛化页面仍可能压过已经在库中的目标
+主题；它不再属于 BUG-008 已处理的 pending 候选定位范围。
 
 ## 验证
 
@@ -212,6 +252,18 @@ View、Set Use Field Of View for LOD——查询里明确写出的那一个排�
 
 重新开工的前提：重建那两个小样数据集，并先固定一组回归查询（至少覆盖
 "限定当前版本"和"从旧版本迁移"两类问法），再谈改排序。
+
+## 2026-07-26 责任边界修正与封存
+
+- 原性能问题已有 39.2 秒 → 0.49 秒的验证结果。
+- 原面包屑污染已清除，并通过全量内容与关系验收。
+- 本轮精确官方标题控制查询能够正确首位命中。
+- 剩余失败集中在自然问法、同义表达、跨语言和版本意图，应由 AI/Skill 负责查询
+  翻译、拆解、重试与答案组织，分别由 ENH-005、ENH-007 跟踪。
+
+因此本议题按范围混杂、剩余部分已被上层议题接替而封存为 `closed`。若以后出现
+“目标页已本地化，输入精确官方标题仍稳定排错或异常缓慢”的新证据，应另行建立范围
+单一的核心检索 Bug，而不是把自然语言失败重新塞回本档案。
 
 ## 外部关联
 

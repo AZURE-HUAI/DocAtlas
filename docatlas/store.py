@@ -10,6 +10,7 @@ import zlib
 from .constants import CHUNKER_VERSION
 from .runtime import active
 from .util import utc_now
+from .versions import store_marks
 from .chunking import normalize_name
 
 
@@ -260,6 +261,14 @@ def store_document_result(
         )
         chunk_id = chunk_cursor.lastrowid
         page_chunk_ids.append(chunk_id)
+        # 标题和正文分开传：`Annotations (since C++26)` 这种写在标题上的限定
+        # 管整段，正文里某一行的标记只管那一行，两者不能混为一谈。
+        store_marks(
+            connection,
+            chunk_id,
+            f"{result['title']}\n{chunk['heading_path']}",
+            chunk["content_text"],
+        )
         connection.execute(
             """
             INSERT INTO chunks_fts(

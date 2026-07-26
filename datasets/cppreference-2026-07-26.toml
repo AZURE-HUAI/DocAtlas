@@ -1,0 +1,48 @@
+id = "cppreference-2026-07-26"
+name = "cppreference C++ Reference（2026-07-26 快照）"
+product = "cppreference-cpp"
+version = "2026-07-26"
+language = "en"
+source = "cppreference"
+
+api_categories = ["language", "standard_library", "compiler_support"]
+
+[source_options]
+base_url = "https://cppreference.com"
+inventory_api = "https://cppreference.com/api.php"
+doc_prefix = "/cpp/"
+home_path = "/cpp"
+
+[categories]
+language = "cpp/language"
+standard_library = "cpp"
+compiler_support = "cpp/compiler_support"
+
+[category_labels]
+language = "C++ Language"
+standard_library = "C++ Standard Library"
+compiler_support = "Compiler Support"
+
+[entity_types]
+language = "cpp_language"
+standard_library = "cpp_symbol"
+compiler_support = "compatibility_reference"
+
+[category_priority]
+language = 1
+standard_library = 2
+compiler_support = 3
+
+[skill]
+triggers = [
+    "C++", "C++20", "cppreference", "std::", "RAII", "concepts",
+    "ranges", "vector", "optional", "variant", "compiler support",
+]
+
+[search]
+verbose_categories = ["compiler_support"]
+
+[search.concept_category_bonus]
+language = 3.0
+standard_library = 2.0
+compiler_support = -1.0

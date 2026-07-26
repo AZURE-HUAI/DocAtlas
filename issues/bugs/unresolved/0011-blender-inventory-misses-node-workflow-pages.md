@@ -97,6 +97,25 @@ Geometry 学习测试的 `GEOMETRY-R01` 也稳定复现：自然问题、关键�
 - 已有的完整索引与按需增量关系在目标页属于清单时均能产出
   `official_link`、`confidence=1.0`，因此没有把本问题归因于通用关系构建核心。
 
+### 2026-07-26：重建 Blender 5.2 数据集后的复测
+
+着色器学习流第 1、10 轮和几何节点学习流第 1 轮再次遇到跨目录基础页缺失。主流程
+复现结果：
+
+```powershell
+$env:DOCATLAS_DATASET='blender-manual-5.2'
+python -m docatlas related 'Geometry Nodes Modifier' --json
+python -m docatlas search 'Geometry Nodes Modifier' --json
+```
+
+- `related` 约 178 ms 返回 `entity_not_found`，`pending/crawled/linked` 都为空。
+- `search` 约 177 ms，首条是只提到修改器的 `Attributes`。
+- 固定版本官方页
+  `https://docs.blender.org/manual/en/5.2/modeling/modifiers/geometry_nodes.html`
+  可正常访问，标题为 `Geometry Nodes Modifier`。
+
+因此当前通用诊断方向仍正确，而 Blender 适配器本身的跨目录枚举范围仍未完成。
+
 ## 验证
 
 修复后应重新运行：
