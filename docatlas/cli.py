@@ -50,6 +50,7 @@ from .ondemand import (
     inventory_lookup,
 )
 from .validate import validate_contract
+from .versions import MODES as VERSION_MODES, parse_intent as parse_version_intent
 
 
 def require_inventory(connection: sqlite3.Connection) -> None:
@@ -332,6 +333,14 @@ def command_ask(args: argparse.Namespace) -> int:
     initialize_db(connection)
     require_inventory(connection)
     REQUEST_LIMITER.configure(0)
+    try:
+        version_intent = parse_version_intent(
+            args.version_mode, args.version_target
+        )
+    except ValueError as exc:
+        print(exc)
+        connection.close()
+        return 2
     payload = answer(
         connection,
         args.query,
@@ -340,6 +349,7 @@ def command_ask(args: argparse.Namespace) -> int:
         allow_fetch=not args.no_fetch,
         fetch_limit=args.fetch_limit,
         quiet=args.json,
+        version_intent=version_intent,
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -647,6 +657,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_FETCH_LIMIT,
         help=f"自动补抓时最多抓几页，默认 {DEFAULT_FETCH_LIMIT}",
+    )
+    # 版本意图由提问的人（或上层 AI）判断后传进来，DocAtlas 自己不猜。
+    ask.add_argument(
+        "--version-target",
+        metavar="版本",
+        help="限定到哪个版本，用该库自己的写法，例如 C++20、3.4",
+    )
+    ask.add_argument(
+        "--version-mode",
+        choices=list(VERSION_MODES),
+        help=(
+            "strict=只要该版本里已经存在的内容；migration=追溯版本之间的变化，"
+            "把写明差异的内容提前；compare=全部保留并标出各自适用版本；"
+            "any=不限定。只给 --version-target 时按 strict 处理。"
+        ),
     )
     ask.set_defaults(func=command_ask)
 

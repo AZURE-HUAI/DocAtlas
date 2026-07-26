@@ -132,6 +132,20 @@ class Workspace:
         """按名字取领域知识包提供的能力；没挂包就用默认值。"""
         return knowledge_hook(self.knowledge, name, default)
 
+    def extension(self, name: str, default: Any = None) -> Any:
+        """按名字取领域能力，知识包优先，其次来源适配器。
+
+        有些能力天然属于来源适配器而不是知识包：`(since C++20)` 是
+        cppreference 的排版约定，"这个站怎么写版本"和"怎么解析这个站的页面"
+        是同一类知识，没有理由为它单独挂一个知识包。而蓝图↔C++ 的对应属于
+        领域语义，归知识包。两处都允许，知识包优先——它是给单个数据集挂的，
+        比适配器更具体。
+        """
+        found = knowledge_hook(self.knowledge, name, None)
+        if found is None:
+            found = getattr(self.source, name, None)
+        return default if found is None else found
+
     # ---- 派生配置（按数据集算一次，之后走缓存）------------------------
 
     @cached_property

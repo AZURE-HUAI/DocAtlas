@@ -2,16 +2,16 @@
 id: BUG-008
 title: "`ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: closed
+lifecycle: resolved
 priority: high
 area: on-demand
 labels: [ask, on-demand-fetch, inventory, ranking, multi-dataset]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
 fix_pr: null
-related: [BUG-002, BUG-003]
+related: [BUG-002, BUG-003, ENH-007]
 ---
 
 # 问题
@@ -214,3 +214,9 @@ python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-bud
 
 - GitHub Issue：
 - 修复 PR：
+
+## 封存原因
+
+本议题限定的 route slug、限定符和文档扩展名候选已留下实现与验证记录；余下的
+“自然语言问句如何安全生成补抓候选”不再由 BUG-008 继续扩大范围，已由
+`ENH-007` 单独接替。按 superseded / 不再适用封存为 `closed`，不伪造修复 PR。

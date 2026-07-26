@@ -1,0 +1,43 @@
+id = "blender-manual-5.2"
+name = "Blender 5.2 LTS Manual（Shader / Geometry Nodes）"
+product = "blender"
+version = "5.2"
+language = "en"
+source = "blender_manual"
+
+api_categories = ["shader_nodes", "geometry_nodes"]
+
+[source_options]
+base_url = "https://docs.blender.org"
+search_index = "https://docs.blender.org/manual/en/5.2/searchindex.js"
+doc_prefix = "/"
+home_path = "/manual/en/5.2/"
+
+[categories]
+shader_nodes = "render/shader_nodes/"
+geometry_nodes = "modeling/geometry_nodes/"
+
+[category_labels]
+shader_nodes = "Shader / Texture Nodes"
+geometry_nodes = "Geometry Nodes"
+
+[entity_types]
+shader_nodes = "shader_node"
+geometry_nodes = "geometry_node"
+
+[category_priority]
+shader_nodes = 1
+geometry_nodes = 1
+
+[skill]
+triggers = [
+    "Blender", "Blender 5.2", "Shader Editor", "Shader Nodes",
+    "Texture Nodes", "Geometry Nodes", "Principled BSDF",
+]
+
+[search]
+verbose_categories = []
+
+[search.concept_category_bonus]
+shader_nodes = 2.0
+geometry_nodes = 2.0

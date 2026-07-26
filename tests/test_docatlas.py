@@ -33,11 +33,11 @@ os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
     chunking, config, context, crawl, dataset, db, discover, net, ondemand,
-    constants, relations, runtime, search, store, text, validate,
+    constants, relations, runtime, search, store, text, validate, versions,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
-from docatlas.sources import epic_ue  # noqa: E402
+from docatlas.sources import blender_manual, cppreference, epic_ue  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
 from docatlas.documents import transform_document  # noqa: E402
 
@@ -2704,6 +2704,261 @@ class SkillMcpContractTests(unittest.TestCase):
 
         self.assertIn("answer(", inspect.getsource(cli.command_ask))
         self.assertIn("answer(", inspect.getsource(mcpserver.tool_ask))
+
+
+def seed_chunk(
+    connection: sqlite3.Connection,
+    *,
+    title: str,
+    heading_path: str,
+    body: str,
+) -> int:
+    """放一个知识块（连同它必须依附的页面和小节），返回 chunk id。
+
+    走真实表结构而不是伪造对象：`chunk_versions` 有外键指向 `chunks`，
+    绕过去建出来的库和真库不是一回事。
+    """
+    now = "2026-07-26T00:00:00Z"
+    slug = text.normalize_name(title) or "page"
+    page_id = connection.execute(
+        "INSERT INTO pages(url, path, category, status, title, route_depth)"
+        " VALUES(?, ?, 'guides', 'success', ?, 2)",
+        (f"https://example.invalid/{slug}", f"/{slug}", title),
+    ).lastrowid
+    section_id = connection.execute(
+        "INSERT INTO sections(page_id, position, heading_level, heading_path,"
+        " title, content_md, content_text, source_url, token_estimate)"
+        " VALUES(?, 0, 2, ?, ?, ?, ?, '', 10)",
+        (page_id, heading_path, title, body, body),
+    ).lastrowid
+    return connection.execute(
+        "INSERT INTO chunks(section_id, page_id, chunk_index, chunk_count,"
+        " knowledge_type, title, heading_path, context_prefix, content_md,"
+        " content_text, source_url, source_anchor, token_estimate,"
+        " content_hash, quality_score, created_at, updated_at)"
+        " VALUES(?, ?, 0, 1, 'summary', ?, ?, '', ?, ?, '', '', 10, ?, 1.0, ?, ?)",
+        (section_id, page_id, title, heading_path, body, body,
+         text.normalize_name(body)[:32] or "h", now, now),
+    ).lastrowid
+
+
+class VersionVocabularyTests(unittest.TestCase):
+    """版本写法归领域层：核心不知道 C++20 比 C++17 新。"""
+
+    def test_cpp_standards_sort_by_year_not_by_number(self):
+        # 这是整件事的关键陷阱：C++98 比 C++11 早，可数字上 98 > 11。
+        # 任何"通用版本号比大小"的规则都会把它排反。
+        key = cppreference.version_sort_key
+        self.assertLess(key("C++98"), key("C++11"))
+        self.assertLess(key("C++11"), key("C++20"))
+        self.assertLess(key("C++20"), key("C++23"))
+        self.assertLess(key("C++23"), key("C++26"))
+        self.assertEqual(key("不是版本"), "")
+
+    def test_cppreference_reads_its_own_bracket_convention(self):
+        marks = dict(
+            (label, kind)
+            for kind, label in cppreference.version_marks(
+                "Annotations (since C++26) header (until C++11)"
+                " carries dependency (removed in C++26) optional (C++17)"
+            )
+        )
+        self.assertEqual(marks["C++26"], "until")  # removed in 也是 until
+        self.assertEqual(marks["C++11"], "until")
+        self.assertEqual(marks["C++17"], "since")  # 裸括号 = 这一版引入
+
+    def test_deprecated_is_not_removed(self):
+        # 弃用不等于不存在：那一版里照样能用，不能拿它排除内容。
+        self.assertEqual(
+            cppreference.version_marks("swap (deprecated in C++20)"), []
+        )
+
+    def test_blender_only_reports_soft_mentions(self):
+        # Blender 手册没有机器可读的版本标注，版本只在句子里出现。
+        # 拿散文当硬适用范围会误删正常页面，所以只产出 mentions。
+        marks = blender_manual.version_marks(
+            "This recreates the behavior of the Transfer Attribute node"
+            " from Blender versions before 3.4."
+        )
+        self.assertEqual(marks, [("mentions", "3.4")])
+        self.assertLess(
+            blender_manual.version_sort_key("3.4"),
+            blender_manual.version_sort_key("5.2"),
+        )
+
+    def test_plain_numbers_are_not_mistaken_for_versions(self):
+        # 手册里 0.5、2.0 这样的参数取值遍地都是。
+        self.assertEqual(
+            blender_manual.version_marks("Set Roughness to 0.5 and Scale to 2.0"),
+            [],
+        )
+
+
+class VersionIntentTests(unittest.TestCase):
+    """版本意图：AI 判断，核心执行——核心自己不猜用户要哪个版本。"""
+
+    def setUp(self):
+        self.connection = temp_db(self)
+
+    @contextlib.contextmanager
+    def _cpp(self):
+        with using(source=cppreference):
+            yield
+
+    def test_unknown_mode_is_refused_instead_of_silently_ignored(self):
+        # 默默不筛比明确拒绝危险：调用方会以为限定已经生效了。
+        with self.assertRaises(ValueError):
+            versions.parse_intent("newest-first", "C++20")
+
+    def test_target_alone_means_strict(self):
+        with self._cpp():
+            intent = versions.parse_intent(None, "C++20")
+        self.assertEqual(intent.mode, versions.STRICT)
+        self.assertTrue(intent.excludes)
+
+    def test_no_intent_at_all_changes_nothing(self):
+        self.assertIsNone(versions.parse_intent(None, None))
+        self.assertIsNone(versions.parse_intent("any", "C++20"))
+
+    def _rows(self, *chunk_ids):
+        return [
+            {"id": cid, "page_title": f"P{cid}", "score": 10.0} for cid in chunk_ids
+        ]
+
+    def test_heading_marker_excludes_but_body_marker_does_not(self):
+        """整件事最要紧的一条规则，实测定下来的。
+
+        `(since C++26)` 写在标题上，限定的是整个小节；写在成员表某一行里，
+        限定的只是那一行。按后者排除会把 `std::optional` 的成员函数表整块
+        藏起来——而那张表 C++17 就有了。
+        """
+        with self._cpp():
+            heading_limited = seed_chunk(
+                self.connection,
+                title="Annotations (since C++26)",
+                heading_path="Annotations (since C++26)",
+                body="Annotations attach compile-time metadata.",
+            )
+            body_only = seed_chunk(
+                self.connection,
+                title="std::optional",
+                heading_path="std::optional > Member functions",
+                body="operator= assigns contents. begin (since C++26) returns an"
+                " iterator to the beginning.",
+            )
+            for chunk_id in (heading_limited, body_only):
+                row = self.connection.execute(
+                    "SELECT p.title, c.heading_path, c.content_text FROM chunks c"
+                    " JOIN pages p ON p.id=c.page_id WHERE c.id=?",
+                    (chunk_id,),
+                ).fetchone()
+                versions.store_marks(
+                    self.connection,
+                    chunk_id,
+                    f"{row['title']}\n{row['heading_path']}",
+                    row["content_text"],
+                )
+            intent = versions.parse_intent("strict", "C++20")
+            kept, report = versions.apply(
+                self.connection, self._rows(heading_limited, body_only), intent
+            )
+        self.assertEqual([row["id"] for row in kept], [body_only])
+        self.assertEqual(report["excluded"], 1)
+
+    def test_migration_lifts_content_that_names_another_version(self):
+        """严格限定和迁移追溯对同一份证据的处理正好相反。
+
+        这正是不能写死"优先新版本"的原因：迁移问题里，提到旧版本的那一段
+        才是答案。
+        """
+        with using(source=blender_manual):
+            plain = seed_chunk(
+                self.connection,
+                title="Transfer Attributes Node",
+                heading_path="Transfer Attributes Node",
+                body="Transfers attributes between geometries.",
+            )
+            migration_evidence = seed_chunk(
+                self.connection,
+                title="Sample Index Node",
+                heading_path="Sample Index Node > Examples",
+                body="This recreates the behavior of the Transfer Attribute node"
+                " from Blender versions before 3.4.",
+            )
+            row = self.connection.execute(
+                "SELECT content_text FROM chunks WHERE id=?", (migration_evidence,)
+            ).fetchone()
+            versions.store_marks(
+                self.connection, migration_evidence, "Sample Index Node", row[0]
+            )
+            rows = self._rows(plain, migration_evidence)
+            rows[0]["score"] = 20.0  # 不限定时它排在前面
+            kept, _ = versions.apply(
+                self.connection,
+                rows,
+                versions.parse_intent("migration", "5.2"),
+            )
+            self.assertEqual(kept[0]["id"], migration_evidence)
+
+            # 同一份数据，严格限定时一条都不该被删——散文提及不是适用范围。
+            kept, report = versions.apply(
+                self.connection,
+                self._rows(plain, migration_evidence),
+                versions.parse_intent("strict", "5.2"),
+            )
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(report["excluded"], 0)
+
+    def test_compare_keeps_everything_and_labels_it(self):
+        with self._cpp():
+            chunk_id = seed_chunk(
+                self.connection,
+                title="Annotations (since C++26)",
+                heading_path="Annotations (since C++26)",
+                body="Annotations attach compile-time metadata.",
+            )
+            versions.store_marks(
+                self.connection,
+                chunk_id,
+                "Annotations (since C++26)",
+                "Annotations attach compile-time metadata.",
+            )
+            kept, report = versions.apply(
+                self.connection,
+                self._rows(chunk_id),
+                versions.parse_intent("compare", "C++20"),
+            )
+        self.assertEqual(report["excluded"], 0)
+        self.assertEqual(kept[0]["applies_to"][0]["version"], "C++26")
+
+    def test_dataset_without_version_vocabulary_never_filters(self):
+        """不知道就不筛。少给内容的错误在结果里完全看不出来。"""
+        chunk_id = seed_chunk(
+            self.connection, title="Nanite", heading_path="Nanite", body="虚拟几何体"
+        )
+        # 默认数据集（Unreal）没有声明版本词汇。
+        self.assertFalse(versions.supported())
+        kept, report = versions.apply(
+            self.connection,
+            self._rows(chunk_id),
+            versions.Intent(mode="strict", target="5.8", target_key="5.8"),
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertFalse(report["dataset_supports_versions"])
+        self.assertIn("没有声明版本词汇", report["note"])
+
+    def test_unrecognised_target_version_says_so_instead_of_filtering(self):
+        with self._cpp():
+            chunk_id = seed_chunk(
+                self.connection, title="Lifetime", heading_path="Lifetime", body="x"
+            )
+            kept, report = versions.apply(
+                self.connection,
+                self._rows(chunk_id),
+                versions.parse_intent("strict", "Blender 5.2"),
+            )
+        self.assertEqual(len(kept), 1)
+        self.assertIn("不认识版本", report["note"])
 
 
 if __name__ == "__main__":

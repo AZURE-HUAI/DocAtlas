@@ -39,6 +39,7 @@ from .relations import page_link_status
 from .runtime import active
 from .search import query_names, search_chunks
 from .text import SCRIPT_NAMES, script_mismatch, script_of_language
+from . import versions
 
 MAX_CHUNKS_PER_PAGE = 2
 PRIMARY_BUDGET_RATIO = 0.8
@@ -165,8 +166,14 @@ def build_context_pack(
     *,
     token_budget: int,
     category: str | None,
+    version_intent: versions.Intent | None = None,
 ) -> dict[str, Any]:
     candidates = search_chunks(connection, query, limit=60, category=category)
+    # 版本意图在裁剪预算之前生效：先决定"哪些内容对这个版本算数"，再决定
+    # "预算内放得下哪几条"。反过来的话，被排除的内容已经占掉了名额。
+    candidates, version_report = versions.apply(
+        connection, candidates, version_intent
+    )
 
     normalized = normalize_name(query)
     exact_page_ids = {
@@ -195,7 +202,7 @@ def build_context_pack(
     )
 
     dataset = active().dataset
-    return {
+    pack = {
         "query": query,
         "dataset": dataset.id,
         "product": dataset.product,
@@ -214,6 +221,9 @@ def build_context_pack(
             "exact_entity_scope": bool(scoped),
         },
     }
+    if version_report:
+        pack["version_intent"] = version_report
+    return pack
 
 
 def _has_exact_local_hit(pack: dict[str, Any], query: str) -> bool:
@@ -238,12 +248,17 @@ def answer(
     allow_fetch: bool = True,
     fetch_limit: int = DEFAULT_FETCH_LIMIT,
     quiet: bool = False,
+    version_intent: versions.Intent | None = None,
 ) -> dict[str, Any]:
     """`ask` 的唯一实现：命令行和 MCP 都走这里，两边结果不可能不一致。"""
 
     def build() -> dict[str, Any]:
         return build_context_pack(
-            connection, query, token_budget=token_budget, category=category
+            connection,
+            query,
+            token_budget=token_budget,
+            category=category,
+            version_intent=version_intent,
         )
 
     pack = build()
@@ -558,6 +573,9 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
         f"共 {len(pack['primary_knowledge'])} 条知识块。",
         "",
     ]
+    # 按版本筛过就必须说出来。悄悄少几条，比排错更难被发现。
+    if lines_about_version := versions.describe(pack.get("version_intent") or {}):
+        lines.extend([*lines_about_version, ""])
     if not pack["primary_knowledge"]:
         lines.extend(_render_empty(pack))
         return "\n".join(lines)

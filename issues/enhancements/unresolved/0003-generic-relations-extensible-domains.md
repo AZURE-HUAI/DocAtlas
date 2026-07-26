@@ -2,7 +2,7 @@
 id: ENH-003
 title: "关系能力通用化并允许领域独立扩展"
 type: enhancement
-status: in_progress
+status: discussion
 lifecycle: unresolved
 priority: low
 area: architecture

@@ -40,6 +40,7 @@ from .net import REQUEST_LIMITER
 from .ondemand import DEFAULT_FETCH_LIMIT, inventory_lookup
 from .search import search_docs
 from .text import script_mismatch
+from . import versions
 
 
 SERVER_NAME = "docatlas"
@@ -126,6 +127,26 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "需要补抓时最多取几页。默认 5，够用；调大只会更慢。",
                     "default": DEFAULT_FETCH_LIMIT,
+                },
+                "version_target": {
+                    "type": "string",
+                    "description": (
+                        "用户认定的目标版本，用该库自己的写法（C++20、3.4）。"
+                        "版本意图由你判断后填进来，DocAtlas 不会从问句里猜。"
+                        "该库支持哪种版本写法见 docatlas_list_datasets 的 "
+                        "version_vocabulary。"
+                    ),
+                },
+                "version_mode": {
+                    "type": "string",
+                    "enum": list(versions.MODES),
+                    "description": (
+                        "strict=用户明确限定该版本，排除那一版里还不存在的内容；"
+                        "migration=用户在追问「以前是什么、后来换成了谁」，"
+                        "写明版本差异的内容会被提前，旧版本内容是答案而不是噪音；"
+                        "compare=要对照多个版本，一条都不删并标出各自适用范围；"
+                        "any=不限定。只给 version_target 时按 strict 处理。"
+                    ),
                 },
                 "format": _FORMAT_PROPERTY,
             },
@@ -265,6 +286,13 @@ def tool_ask(arguments: dict[str, Any]) -> Any:
     category = arguments.get("category")
     _check_category(workspace, category)
     with runtime.use(workspace):
+        # 版本意图要在这个库的上下文里解析：什么算合法版本写法由数据集说了算。
+        try:
+            version_intent = versions.parse_intent(
+                arguments.get("version_mode"), arguments.get("version_target")
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         connection = _open(workspace)
         REQUEST_LIMITER.configure(0)
         try:
@@ -278,6 +306,7 @@ def tool_ask(arguments: dict[str, Any]) -> Any:
                 allow_fetch=not arguments.get("no_fetch"),
                 fetch_limit=int(arguments.get("fetch_limit") or DEFAULT_FETCH_LIMIT),
                 quiet=True,
+                version_intent=version_intent,
             )
             if arguments.get("format") != "json":
                 return render_context_markdown(pack)
@@ -320,6 +349,13 @@ def _structured_ask(
                 "tokens": item["token_estimate"],
                 "source_url": item["source_url"],
                 "content_md": item["content_md"],
+                # 只在文档真的写了适用版本时才有这个字段。没有 ≠ 适用于所有
+                # 版本，只是这一段没写——不要替它下结论。
+                **(
+                    {"applies_to": item["applies_to"]}
+                    if item.get("applies_to")
+                    else {}
+                ),
             }
             for item in pack["primary_knowledge"]
         ],
@@ -344,6 +380,13 @@ def _structured_ask(
             "requested": fetch["requested"],
             "succeeded": fetch["succeeded"],
             "failed": fetch["failed"],
+        }
+    # 把版本条件原样回给调用方：它据此才能判断"没看到某条内容"是被版本挡了、
+    # 还是本来就没有。悄悄筛过而不说，是最难排查的一种错。
+    if applied := pack.get("version_intent"):
+        result["version_intent"] = {
+            **applied,
+            "explanation": versions.describe(applied),
         }
     if status != "ok":
         result["next_steps"] = describe_lookup(lookup) if lookup else []
@@ -514,6 +557,12 @@ def _dataset_report(workspace: runtime.Workspace) -> dict[str, Any]:
         ),
         "triggers": list(workspace.dataset.skill_triggers),
     }
+    # 能不能按版本限定、该用什么写法，必须能被发现，否则调用方只能瞎猜一个
+    # version_target 然后得到"这个库不认识这个版本"。
+    with runtime.use(workspace):
+        if versions.supported():
+            report["version_vocabulary"] = versions.vocabulary() or workspace.version
+            report["version_modes"] = list(versions.MODES)
     if not workspace.db_path.exists():
         report["state"] = "not_built"
         return report

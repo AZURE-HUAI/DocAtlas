@@ -243,6 +243,24 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_entity_id);
         CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_entity_id);
 
+        -- 一个知识块适用于哪些版本。内容来自领域层从正文里认出的标记
+        -- （`(since C++20)`、"versions before 3.4"），是文档自己写的事实，
+        -- 不是推断。核心只存和比，不认识任何具体版本体系——排序键由领域层给。
+        -- `scope` 记标记写在哪：heading 限定整段，body 只限定那一行。
+        -- 只有 heading 够硬到能排除内容，理由见 versions.py 的模块说明。
+        CREATE TABLE IF NOT EXISTS chunk_versions (
+            chunk_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            sort_key TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'body',
+            PRIMARY KEY(chunk_id, kind, label),
+            FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chunk_versions_chunk
+            ON chunk_versions(chunk_id);
+
         CREATE TABLE IF NOT EXISTS tags (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -283,6 +301,13 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin)"
     )
+    # 加 scope 列的库，已有的标记全是"不分范围"时算出来的，必须整批重算：
+    # 旧行会一律落成 body，而只有 heading 能排除内容，不重算就等于版本限定
+    # 悄悄失效。清掉版本戳，下面的 backfill 会自己重来一遍。
+    if add_column_if_missing(
+        connection, "chunk_versions", "scope", "TEXT NOT NULL DEFAULT 'body'"
+    ):
+        connection.execute("DELETE FROM metadata WHERE key='version_marks'")
     add_column_if_missing(connection, "pages", "normalized_slug", "TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(normalized_slug)"
@@ -403,6 +428,11 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     )
     backfill_page_metadata(connection)
     backfill_page_slugs(connection)
+    # 版本适用信息是纯本地计算（对已有正文跑一遍领域层的识别规则），不联网。
+    # 数据集没声明版本词汇时直接跳过，不会去扫 UE 那种二十多万页的库。
+    from .versions import backfill as backfill_chunk_versions
+
+    backfill_chunk_versions(connection)
     connection.commit()
 
 
