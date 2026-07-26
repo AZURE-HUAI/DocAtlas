@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import sqlite3
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterator
 
 from .runtime import active
 from .util import utc_now

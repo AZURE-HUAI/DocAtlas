@@ -227,20 +227,31 @@ def weak_candidates(
     这里用的条件比补抓宽得多（任意一个实词出现在路径里就算），所以**只报告、
     不抓取**——照这个条件去抓，一个宽泛问题就能拖回一整片无关页面。
     """
+    raw = tokenize(query)
     tokens = coverage_tokens(query)
-    if not tokens:
+    # 至少三个实词，才谈得上"差一个"。两个词里差一个就只剩一个词，
+    # 那跟随便找个词去撞没有区别。
+    if len(tokens) < MIN_COVERAGE_TOKENS + 1:
         return []
+    # 虚词占了一半以上，这就是一句话，不是一个页面名。
+    # "how do I make an object glow" 里 how/do/I/an 全是虚词，剩下的
+    # make + object 能撞上一堆 MakeXxxObject 页面——那是噪音，不是候选。
+    # 摆出来只会把人带偏，还不如老实说没找到。
+    if len(tokens) * 2 < len(raw):
+        return []
+    # 补抓那一档要求**每个**实词都出现在路径里。这里放宽整整一个词：
+    # 差一个词的页面往往就是用户要的（"camera field of view settings" 差的是
+    # settings），但"差一个"还不足以替用户决定去抓，所以只报告不抓取。
     flattened = _flattened_path()
-    sql = (
-        f"SELECT path, category FROM pages WHERE {_PENDING} AND ("
-        + " OR ".join(f"{flattened} LIKE ?" for _ in tokens)
-        + ")"
-    )
+    matched = " + ".join(f"(CASE WHEN {flattened} LIKE ? THEN 1 ELSE 0 END)" for _ in tokens)
+    sql = f"SELECT path, category FROM pages WHERE {_PENDING} AND ({matched}) >= ?"
     params: list[Any] = [f"%{token}%" for token in tokens]
+    params.append(len(tokens) - 1)
     if category:
         sql += " AND category=?"
         params.append(category)
-    sql += f" ORDER BY {_priority_case()}, route_depth, id LIMIT ?"
+    # 不排序：这只是"要不要人工看一眼"的提示，而 ORDER BY 会逼着扫完全表再排。
+    sql += " LIMIT ?"
     params.append(limit)
     return [
         {"path": row["path"], "category": row["category"]}
