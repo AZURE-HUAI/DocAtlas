@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import sqlite3
 from typing import Any
+import urllib.parse
 
 from .chunking import normalize_name
 from .constants import URL_RE
@@ -130,6 +131,24 @@ def target_paths(query: str) -> list[str]:
             remember(resolve(dataset, token))
         remember(token.rstrip("/") or None)
     return found
+
+
+def target_fragment(query: str) -> str:
+    """地址指向的**小节**：`…/on-screen-containers#screen-insets` → `screeninsets`。
+
+    页面之下还有一层。用户在官方页面里点开某一节再复制地址，`#…` 就是他指的
+    那一节；丢掉它，回答只能退回页面概览，而目标小节的正文明明已经在库里
+    （BUG-014）。
+
+    官方 href 和我们存的锚点写法未必一样（`screen-insets` / `screeninsets`）：
+    我们的锚点是标题拍平来的（见 `text.heading_anchor`），所以两边都按同一条
+    规则拍平就能对上。这是纯字符串规则，不需要任何站点知识。
+    """
+    for candidate in URL_RE.findall(query):
+        fragment = urllib.parse.urlsplit(candidate).fragment
+        if key := normalize_name(urllib.parse.unquote(fragment)):
+            return key
+    return ""
 
 
 def query_qualifiers(query: str) -> list[str]:

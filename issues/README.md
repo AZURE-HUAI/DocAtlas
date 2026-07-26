@@ -34,6 +34,7 @@
 | <a id="bug-011"></a>[BUG-011](bugs/resolved/0011-blender-inventory-misses-node-workflow-pages.md) | Blender 数据集清单遗漏节点工作流所需的跨目录基础页 | resolved | high |
 | <a id="bug-012"></a>[BUG-012](bugs/resolved/0012-class-members-are-not-entities.md) | 类页面成员表里的属性和方法没有成为实体 | resolved | high |
 | <a id="bug-013"></a>[BUG-013](bugs/resolved/0013-linked-pages-never-enter-the-inventory.md) | 范围内正文引用到的页面永远进不了清单 | resolved | high |
+| <a id="bug-014"></a>[BUG-014](bugs/resolved/0014-exact-url-fragment-does-not-select-section.md) | 精确 URL 的 fragment 没有限定到对应小节 | resolved | high |
 
 ## 未解决增强建议
 

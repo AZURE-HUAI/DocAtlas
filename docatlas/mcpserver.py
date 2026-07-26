@@ -30,6 +30,7 @@ from typing import Any
 from . import runtime
 from .context import (
     answer,
+    describe_fragment,
     describe_lookup,
     exact_page_hint,
     related_payload,
@@ -387,6 +388,13 @@ def _structured_ask(
         result["version_intent"] = {
             **applied,
             "explanation": versions.describe(applied),
+        }
+    # 同理：地址里的 `#小节` 用上没有，必须原样回给调用方。认不出那一节却
+    # 静默给整页，调用方会以为看到的就是用户指的那一节。
+    if fragment := pack.get("fragment_intent"):
+        result["fragment_intent"] = {
+            **fragment,
+            "explanation": describe_fragment(fragment),
         }
     if status != "ok":
         result["next_steps"] = describe_lookup(lookup) if lookup else []
