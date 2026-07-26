@@ -522,6 +522,45 @@ def link_target_gaps(
     }
 
 
+def page_link_status(
+    connection: sqlite3.Connection, page_ids: list[int], *, limit: int = 5
+) -> dict[str, list[dict[str, str]]]:
+    """这几页链向的目标现在各是什么状态。
+
+    "这个实体一条关系都没有"太笼统了。它指向的页面还没抓、还是那些页面
+    压根不在清单里，决定了下一步是补抓还是改来源——所以要分开说。
+    """
+    if not page_ids:
+        return {"pending": [], "missing": []}
+    placeholders = ",".join("?" for _ in page_ids)
+    pending = [
+        {"path": row["path"], "url": row["url"]}
+        for row in connection.execute(
+            f"""
+            SELECT DISTINCT p.path, p.url FROM page_links l
+            JOIN pages p ON p.id=l.target_page_id
+            WHERE l.from_page_id IN ({placeholders})
+              AND p.status NOT IN ('success', 'redirect')
+            LIMIT ?
+            """,
+            (*page_ids, limit),
+        )
+    ]
+    missing = [
+        {"path": row["target_path"], "url": row["target_url"]}
+        for row in connection.execute(
+            f"""
+            SELECT DISTINCT target_path, target_url FROM page_links
+            WHERE from_page_id IN ({placeholders})
+              AND target_path IS NOT NULL AND target_page_id IS NULL
+            LIMIT ?
+            """,
+            (*page_ids, limit),
+        )
+    ]
+    return {"pending": pending, "missing": missing}
+
+
 def counts(connection: sqlite3.Connection) -> dict[str, int]:
     return {
         "entities": connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0],
