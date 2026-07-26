@@ -2,7 +2,7 @@
 id: ENH-006
 title: "为 MCP 提供中立的多数据集路由与结构化交换合同"
 type: enhancement
-status: discussion
+status: in_progress
 lifecycle: unresolved
 priority: high
 area: integrations
@@ -182,7 +182,107 @@ Getter/Setter 节点尚未成为可查询的关系实体。该能力缺口归入
 
 ## 验证
 
+按议题"验证思路"六条逐条对照：
+
+| # | 要求 | 结果 |
+|---|---|---|
+| 1 | 一个连接里发现并选择多个数据集 | **部分**：路由已实现并有测试证明一个进程内两个库各答各的；但本机只装了 `epic-ue-5.8` 一个真实数据集，没有第二个真实库可发现 |
+| 2 | MCP 与 CLI 的结构化核心字段语义一致 | 通过。两边调的是同一个 `answer()` / `related_payload()`，MCP 只是换了渲染 |
+| 3 | 完整索引与按需增量各验证一次通用 `official_link` | 通过（`RelationContractTests`，且两条路现在跑同一套规则） |
+| 4 | 领域关系通过扩展返回且不污染通用合同 | 通过。真实库 `related "Set Timer by Function Name"` 同时返回通用 `belongs_to` 和领域 `blueprint_cpp_api` / `targets_type`，字段完全同构 |
+| 5 | 明确验证四种失败 | 通过，实际是六种（见下） |
+| 6 | 新数据集只实现接口即可建图与查询 | 通过（`ToyDomain`，只实现 `relation_rules`，不改 MCP 与关系核心） |
+
+**真实库协议往返实测**（`python -m docatlas mcp`，真的走 JSON-RPC）：
+
+```text
+initialize            -> {"name":"docatlas","version":"2.0.0"}
+list_datasets         -> epic-ue-5.8 | 可以查 | 清单 199,883 页，已抓 10,766 页，
+                         知识块 25,565，关系 17,830
+                         分类 6 个；关系类型 10 种
+related "Set Timer by Function Name" (format=json)
+                      -> status ok, contract_version 1
+                         belongs_to        -> Unreal Engine Blueprint API Reference
+                                              official_link              conf 1.00
+                         blueprint_cpp_api -> UKismetSystemLibrary::K2_SetTimer
+                                              unreal_display_name_metadata conf 1.00
+                                              note: C++ 文档的 Unreal 元数据声明
+                                                    DisplayName="Set Timer by Function Name"
+                         targets_type      -> UKismetSystemLibrary
+                                              document_statement         conf 0.92
+ask "Set Field Of View" (format=json)
+                      -> status ok, K154230, dataset 身份齐全
+dataset_id="typo-library"
+                      -> isError，列出现有数据集（**服务器没有退出**）
+related "K999999"     -> knowledge_id_not_found
+```
+
+**六种失败状态**（议题只要求四种）：
+
+| 状态 | 含义 |
+|---|---|
+| 数据集不存在 | `isError` + 列出现有数据集 |
+| 数据集还没建过 | `isError` + 给出建库命令，不再默默造一个空库 |
+| `entity_not_found` | 名字在库里找不到实体 |
+| `knowledge_id_not_found` | K 编号不存在（编号不是页面名，不能套用清单诊断） |
+| `entity_found_but_no_relations` | 实体在，但没有关系；直接列出它链向的目标各是什么状态 |
+| `target_outside_inventory` | 关系目标不在清单里——官方有，是来源没枚举到 |
+
+`ask` 另有 `pages_not_fetched` / `candidates_too_weak` / `language_mismatch` /
+`no_match` 四种，对应四种完全不同的下一步。
+
+回归测试 180 用例全过。
+
 ## 解决记录
+
+**两处阻塞点，一处是进程模型，一处是接口形态。**
+
+**1. 进程锁死一个数据集。** `config.py` 在导入时算好 `DATASET` / `SOURCE` /
+`KNOWLEDGE` / `DB_PATH`，十几个模块 `from .config import` 把值绑进自己的
+命名空间，从此改不动。所谓"协议表面中立、实际绑定单库"就是这么来的。
+
+`runtime.Workspace` 把配置、来源适配器、领域知识包、数据目录捆成一个不可变
+对象，`active()` 取当前那个，`use()` 临时切换（`contextvars`，并发不串味）。
+派生配置（分类优先级、概念加分、标识符形状、关系标签）挂在 Workspace 上，
+不再是模块级常量——模块级常量是"导入时算一次"，换了数据集还是上一个库的值，
+这正是多数据集下最容易错的地方。
+
+**这里踩到一个会静默写坏数据的坑，值得记下来**：`contextvars` 不跨线程。
+抓页面全在线程池里干，worker 拿到的是空上下文，`active()` 于是退回进程默认
+数据集——后果是拿 A 站的适配器解析 B 站的页面再写进 B 的库，全程不报错。
+这个 bug 是被测试跑了 134 秒（正常 1 秒）抓出来的，不是想出来的。修法是
+`runtime.bind()`，五处 `executor.submit/map` 全部绑上，并加一条测试扫描
+源码，防止以后新写的线程池再犯。
+
+**2. 领域包拿到的是裸连接，不是接口。** 详见 `ENH-003`：现在领域包只实现
+`relation_rules(graph)`，产出 `RelationCandidate`，不写 SQL、不认识表结构。
+议题定的验收标准——"新增一个符合接口的数据集后，不修改 MCP server 和通用
+关系核心，便能通过同一个 `related` 工具建立并查询该数据集的关系"——由
+`ToyDomain` 测试证明成立。
+
+**MCP 层的改动**：
+
+- 每个工具收可选 `dataset_id`，一个服务器服务本机所有库。
+- `category` 从 `enum` 改成字符串。`enum` 是 `tools/list` 的一部分、会被
+  客户端缓存，里面列着另一个库的分类比不列更糟；写错时返回该库的合法取值。
+  这正面回答了议题"动态分类 enum 如何安全更新"——**不放进协议**。
+- 工具描述不再嵌入产品名，能力发现移到 `docatlas_list_datasets`：分类来自
+  配置，关系类型和证据类型来自领域知识包，没挂知识包也有通用 `official_link`。
+- `format="json"` 给 `structuredContent`（带 `contract_version`），同时按协议
+  要求把同样内容放进文本块。**默认仍是 Markdown**——同样内容 JSON 要多花
+  三四成 token，不该让每次查询都为一份没人读的 JSON 买单。这是议题
+  "保留可选的人类可读 Markdown"的落法，只是默认方向反过来了。
+- 拼错 `dataset_id` 以前会让整个服务器退出：`load_dataset` 用 `SystemExit`
+  报配置错，而 `SystemExit` 继承 `BaseException`，`tools/call` 里的
+  `except Exception` 抓不到。现在归为 `ToolError`，和程序 bug 分开——
+  前者说清下一步，后者才给堆栈。
+
+**没做的**：把建库、全站抓取、重加工搬进 MCP。议题非目标已排除，
+这些操作要跑几分钟到几小时，不适合放进一次工具调用。
+
+**仍未验证的**：验证思路第 1 条要求"在一个连接中发现至少 UE 与一个非
+Unreal 数据集"。路由能力已由测试证明（一个进程内两个库各答各的、切库不
+串味），但本机只有一个真实数据集。要真正跑完这一条，得先建一个非 UE 的库。
 
 ## 外部关联
 

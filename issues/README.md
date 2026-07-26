@@ -48,7 +48,7 @@
 |---|---|---|---|
 | <a id="bug-002"></a>[BUG-002](bugs/unresolved/0002-ask-exact-query-slow-low-relevance.md) | 精确 `ask` 查询仍然偏慢，且结果相关性较低 | in_progress | high |
 | <a id="bug-008"></a>[BUG-008](bugs/unresolved/0008-ask-pending-pages-require-route-slug.md) | `ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面 | in_progress | high |
-| <a id="bug-011"></a>[BUG-011](bugs/unresolved/0011-blender-inventory-misses-node-workflow-pages.md) | Blender 数据集清单遗漏节点工作流所需的跨目录基础页 | open | high |
+| <a id="bug-011"></a>[BUG-011](bugs/unresolved/0011-blender-inventory-misses-node-workflow-pages.md) | Blender 数据集清单遗漏节点工作流所需的跨目录基础页 | in_progress | high |
 
 ## 已解决问题
 
@@ -69,9 +69,9 @@
 
 | 编号 | 标题 | 状态 | 优先级 |
 |---|---|---|---|
-| <a id="enh-003"></a>[ENH-003](enhancements/unresolved/0003-generic-relations-extensible-domains.md) | 关系能力通用化并允许领域独立扩展 | discussion | low |
-| <a id="enh-005"></a>[ENH-005](enhancements/unresolved/0005-cross-language-query-guidance.md) | 为异语言查询提供召回适配或可执行诊断 | discussion | medium |
-| <a id="enh-006"></a>[ENH-006](enhancements/unresolved/0006-neutral-mcp-multi-dataset-contract.md) | 为 MCP 提供中立的多数据集路由与结构化交换合同 | discussion | high |
+| <a id="enh-003"></a>[ENH-003](enhancements/unresolved/0003-generic-relations-extensible-domains.md) | 关系能力通用化并允许领域独立扩展 | in_progress | low |
+| <a id="enh-005"></a>[ENH-005](enhancements/unresolved/0005-cross-language-query-guidance.md) | 为异语言查询提供召回适配或可执行诊断 | in_progress | medium |
+| <a id="enh-006"></a>[ENH-006](enhancements/unresolved/0006-neutral-mcp-multi-dataset-contract.md) | 为 MCP 提供中立的多数据集路由与结构化交换合同 | in_progress | high |
 
 ## 已解决增强建议
 

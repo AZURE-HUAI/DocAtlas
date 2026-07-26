@@ -96,6 +96,50 @@
 并发、写库、失败诊断、`inventory` 验收一律复用核心，不用动。分类优先取条目
 自己给的，其次才是入口所属的。
 
+**正文里的站内链接一定要规范化成绝对的固定版本地址**（`normalize_link_target`）。
+不做这一步，内容能检索但关系数为 0，`relation_evidence_coverage` 会失败——
+关系就是靠这些链接建起来的。
+
+### B2b. 关系：要不要写领域包
+
+**先不写。** 没有领域知识包，核心照样从正文的官方链接建出关系（`official_link`，
+置信度 1.0）、页面归属、参数/返回值类型。绝大多数站点这就够了。
+
+只有当"为什么这两个东西有关"依赖该产品的行话时才写一个
+`docatlas/knowledge/<名字>.py`，在配置里挂 `knowledge = "<名字>"`。合同只有
+一个函数：
+
+```python
+def relation_rules(graph):
+    for source, target, name in graph.name_matches("ui_node", "api_symbol"):
+        yield RelationCandidate(
+            source=source, target=target,
+            relation_type="node_api",          # 关系类型自己起名
+            evidence_kind="exact_name",        # 凭什么这么说
+            confidence=0.9,                    # 官方明写用 1.0，推断要压低
+            note="名称完全一致；需要核对签名",
+        )
+```
+
+`graph` 给四个只读原语，实体只能从它们拿：
+
+| 原语 | 干什么 |
+|---|---|
+| `entities(*类型)` | 遍历实体 |
+| `find(名字, entity_type=…, alias_type=…)` | 按名字/别名找实体；找不到会记进诊断 |
+| `name_matches(起点类型, 终点类型, source_alias=…, target_alias=…)` | 成批把两类实体按名字或别名对起来 |
+| `texts(*类型, containing="…")` | 遍历实体所在页面的正文，用于"文档自己写着有关" |
+
+**不写 SQL，不碰表结构，不需要知道 entity id。** 解析实体、验证目标存在、
+挡撞名（一个名字对上太多就整组丢弃）、夹置信度、去重、存储、全量/增量、
+失败诊断全归核心。同一个函数同时服务全量重建和按需增量——`graph` 自己带
+范围，领域包不用关心这次是哪一种。
+
+另外可以声明（都可选）：`RELATION_LABELS` / `EVIDENCE_LABELS`（给人看的说法）、
+`RELATION_PRIORITY`（相关项排序）、`DERIVED_EVIDENCE_KINDS`（`validate` 据此
+检查某类关系有没有被整类做没）、`query_aliases` / `extra_entity_aliases` /
+`document_aliases`（检索别名）、`IDENTIFIER_PATTERN`（这个领域的符号长什么样）。
+
 ### B3. 写配置
 
 新建 `datasets/<id>.toml`（照 `datasets/{{DATASET_ID}}.toml` 结构）。必填
@@ -134,7 +178,7 @@ python -m docatlas ask "<那个站里一定有的东西>"
 - 改了**切分**（`chunking.py`）：`docatlas/constants.py` 里
   `CHUNKER_VERSION` 加一，然后 `python -m docatlas reprocess`——只处理还没
   升级到当前版本的页，断了重跑接着做，跑完自动重建交叉关系。
-- 只改了**关系推导**（`crossindex.py` 或知识包的 `build_relations`），切分没
+- 只改了**关系推导**（`relations.py` 或知识包的 `relation_rules`），切分没
   动：单跑 `python -m docatlas cross-index` 就够。
 - 两种情况都要 `python -m docatlas validate --phase content`，**重点看
   `relation_evidence_coverage`**——它专抓"某类关系被整类做没"，这种错不会报
@@ -150,6 +194,12 @@ python -m docatlas validate --phase content    # 逐项过数据合同
 ```
 
 任何一项 `fail`，把那一项的 `requirement` 原文念给用户听——写的就是哪里不对。
+
+报告里还有一段 `observations`，**不参与 pass/fail**，但值得看：
+`inventory_link_coverage` 会告诉你有多少链接指向"清单里有、正文还没抓"的页面
+（补抓就行），以及多少指向"清单里根本没有"的页面。后者集中在某几个目录时，
+说明来源适配器的枚举范围划漏了——那类页面官方有，抓多少次都不会进库，
+要回流程 B 改适配器。
 
 ---
 

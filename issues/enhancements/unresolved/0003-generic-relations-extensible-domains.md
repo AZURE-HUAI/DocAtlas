@@ -2,7 +2,7 @@
 id: ENH-003
 title: "关系能力通用化并允许领域独立扩展"
 type: enhancement
-status: discussion
+status: in_progress
 lifecycle: unresolved
 priority: low
 area: architecture
@@ -211,6 +211,64 @@ DocAtlas 的关系能力用于把散落在不同页面中的相关知识连接�
 后续实现这一关系时，UE 领域包负责识别 `BlueprintReadWrite` 及自动访问器命名规则；
 通用核心仍只负责存储和查询实体、方向、证据与置信度，MCP 按 `ENH-006` 的中立合同
 原样公开。
+
+### 2026-07-26：触发条件满足，正式合同已落地
+
+上一轮给自己留的三条重开条件，这一轮中了第三条——**领域包需要在
+`cross-index` 之外的时机参与增量更新**，而且是以 bug 的形式暴露的：
+`build_relations`（全量）和 `link_pages`（增量）是两个各写一遍的函数，
+后者只补了三种领域关系里的一种。于是"全都跑过一遍"的库和"边用边补"的库
+内容不一样，而且没有任何报错。
+
+同时 `ENH-006` 提出了硬性验收：**新增一个符合接口的数据集，不修改 MCP
+server 和通用关系核心，就能建出并查到该数据集的关系**。旧写法满足不了——
+领域包拿到的是裸 `sqlite3.Connection`，自己写 SQL 往 `relations` 表插。
+"接一个新数据集"实际等于"先学会我们的表结构"，那不叫接口。
+
+**落地的合同**（`docatlas/relations.py`）：
+
+```python
+def relation_rules(graph):
+    for source, target, name in graph.name_matches("ui_node", "api_symbol"):
+        yield RelationCandidate(source, target, "node_api", "exact_name", 0.9)
+```
+
+`graph` 提供四个只读原语，实体只能从它们拿到：`entities()` 遍历、`find()`
+按名字/别名解析、`name_matches()` 成批按名字或别名对起来、`texts()` 遍历
+正文。**领域包不写 SQL、不认识表结构、不需要知道 entity id、也不知道
+origin。**
+
+通用核心负责：解析实体、验证目标存在、挡撞名（一个名字对上超过 8 个就整组
+丢弃）、拒自环、夹置信度到 [0,1]、去重、存储、全量/增量、失败诊断。
+`relations.origin` 记录关系是谁建的，全量重建按 origin 清理——领域包因此
+不必再维护一张"我会产出哪些 evidence_kind"的清单，漏写一项就会留下一条
+永远删不掉的死关系。
+
+同一个 `relation_rules` 现在同时服务全量和增量（`graph` 自带范围），
+上面那个全量/增量不一致的 bug 从结构上消失了。
+
+**接入成本的实测**（这正是议题定的判断标准）：
+
+| 问题 | 旧写法 | 新合同 |
+|---|---|---|
+| `knowledge/unreal.py` 关系部分行数 | 249 行，含 6 段手写 SQL | 116 行，0 段 SQL |
+| 新领域包要写什么 | 学表结构 + 写 INSERT + 自己维护清理清单 | 一个生成器函数 |
+| 核心要改吗 | 增量路径要单独再写一遍 | 不改 |
+
+**等价性验证**：在真实库上只读跑新规则，与旧 SQL 产出的关系逐条对照——
+**57 条，0 漏 0 多，置信度逐条一致**，耗时 0.27 秒。行为完全没变，
+变的只是谁来写。
+
+**新领域包接入验证**：测试里有一个假产品的领域包 `ToyDomain`，只实现
+`relation_rules`，不碰核心也不碰 MCP，建出的关系带正确的
+`relation_type` / `evidence_kind` / `confidence` / `note` / `origin`。
+这就是议题问的"如果第二个领域只需实现少量函数就能接入，当前分层可能已经
+足够"——现在是**一个函数**。
+
+**仍未做**：`BlueprintReadWrite 属性 ↔ 自动生成的 Getter/Setter` 关系。
+这需要把类页面表格里的属性提升为独立实体（实体抽取层的事，不是关系层），
+与本轮的合同工作正交。新合同不阻碍它：等属性变成实体之后，UE 包加一条
+`relation_rules` 分支即可，核心不用动。
 
 ## 外部关联
 
