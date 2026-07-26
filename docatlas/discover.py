@@ -23,7 +23,7 @@ import sqlite3
 from typing import Any, Iterable
 import xml.etree.ElementTree as ET
 
-from .config import DATASET, LANGUAGE, SOURCE, VERSION
+from .runtime import active, bind
 from .util import log, utc_now
 from .net import fetch_bytes
 from .db import route_metadata
@@ -39,11 +39,12 @@ def xml_locations(xml_bytes: bytes) -> list[str]:
 
 
 def _sitemap_feeds(dataset) -> list[tuple[str, str | None]]:
-    index_body, _, _ = fetch_bytes(SOURCE.sitemap_index_url(dataset))
+    source = active().source
+    index_body, _, _ = fetch_bytes(source.sitemap_index_url(dataset))
     return [
         (url, category)
         for url in xml_locations(index_body)
-        if (category := SOURCE.categorize_sitemap(dataset, url)) is not None
+        if (category := source.categorize_sitemap(dataset, url)) is not None
     ]
 
 
@@ -53,11 +54,15 @@ def _read_sitemap(dataset, url: str) -> Iterable[tuple[str | None, str]]:
 
 
 def inventory_feeds() -> list[tuple[str, str | None]]:
-    return list((getattr(SOURCE, "inventory_feeds", None) or _sitemap_feeds)(DATASET))
+    workspace = active()
+    hook = getattr(workspace.source, "inventory_feeds", None) or _sitemap_feeds
+    return list(hook(workspace.dataset))
 
 
 def read_feed(url: str) -> Iterable[tuple[str | None, str]]:
-    return (getattr(SOURCE, "read_feed", None) or _read_sitemap)(DATASET, url)
+    workspace = active()
+    hook = getattr(workspace.source, "read_feed", None) or _read_sitemap
+    return hook(workspace.dataset, url)
 
 
 def discover_inventory(
@@ -66,7 +71,8 @@ def discover_inventory(
     workers: int,
     refresh: bool,
 ) -> int:
-    log(f"读取 {DATASET.name} 的页面清单入口…")
+    workspace = active()
+    log(f"读取 {workspace.name} 的页面清单入口…")
     selected = inventory_feeds()
     connection.executemany(
         """
@@ -109,7 +115,7 @@ def discover_inventory(
     discovered_pages = 0
     completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        for result in executor.map(download, pending):
+        for result in executor.map(bind(download), pending):
             completed += 1
             if result["ok"]:
                 page_rows: list[tuple[Any, ...]] = []
@@ -117,7 +123,9 @@ def discover_inventory(
                     # 分类优先看条目自己说的，其次才是入口所属的：一个入口列出
                     # 多个分类（分页 API 常见）和一个入口一类（sitemap）都能表达。
                     category = entry_category or result["category"]
-                    normalized = SOURCE.normalize_location(DATASET, location)
+                    normalized = workspace.source.normalize_location(
+                        workspace.dataset, location
+                    )
                     if not category or not normalized:
                         continue
                     path, source_url = normalized
@@ -129,8 +137,8 @@ def discover_inventory(
                             path,
                             category,
                             result["url"],
-                            VERSION,
-                            LANGUAGE,
+                            workspace.version,
+                            workspace.language,
                             route_depth,
                             parent_path,
                             observed_at,

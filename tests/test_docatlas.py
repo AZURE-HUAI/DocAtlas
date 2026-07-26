@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -32,13 +33,78 @@ os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
     chunking, config, context, crawl, dataset, db, discover, net, ondemand,
-    search, store, text, validate,
+    relations, runtime, search, store, text, validate,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
 from docatlas.sources import epic_ue  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
 from docatlas.documents import transform_document  # noqa: E402
+
+
+@contextlib.contextmanager
+def using(**overrides):
+    """临时换掉当前数据集的某几样东西（来源适配器、知识包、配置）。
+
+    以前这件事要挨个改模块级全局变量（`discover.SOURCE`、`db.SOURCE`、
+    `search.KNOWLEDGE`…），漏掉一个，测试就悄悄跑在真适配器上——
+    ENH-004 的开库 bug 正是这么漏过去的。现在整套一起换，漏不掉。
+    """
+    base = runtime.active()
+    if "dataset" in overrides:
+        overrides["dataset"] = dataclasses.replace(
+            base.dataset, **overrides.pop("dataset")
+        )
+    with runtime.use(dataclasses.replace(base, **overrides)) as workspace:
+        yield workspace
+
+
+def temp_db(case: unittest.TestCase) -> sqlite3.Connection:
+    """一个建好表的临时库，用例结束时自动关闭并删除。"""
+    directory = tempfile.TemporaryDirectory()
+    case.addCleanup(directory.cleanup)
+    connection = connect_db(Path(directory.name) / "t.sqlite3")
+    case.addCleanup(connection.close)
+    initialize_db(connection)
+    return connection
+
+
+def seed_entity(
+    connection: sqlite3.Connection,
+    *,
+    entity_type: str,
+    name: str,
+    path: str | None = None,
+    owner_type: str | None = None,
+    aliases: list[tuple[str, str]] | None = None,
+) -> int:
+    """在库里放一个实体（连同它必须依附的页面），返回 entity id。
+
+    实体挂在页面上是 schema 的硬要求（外键），所以测试也得照做——
+    绕过它建出来的库和真实的库不是一回事，测出来的结论也就不算数。
+    """
+    path = path or f"/{text.normalize_name(name)}"
+    url = f"https://example.invalid{path}"
+    page_id = connection.execute(
+        "INSERT INTO pages(url, path, category, status, title, route_depth)"
+        " VALUES(?, ?, 'guides', 'success', ?, 2)",
+        (url, path, name),
+    ).lastrowid
+    now = "2026-07-26T00:00:00Z"
+    entity_id = connection.execute(
+        "INSERT INTO entities(page_id, entity_type, canonical_name, normalized_name,"
+        " owner_type, source_url, version, created_at, updated_at)"
+        " VALUES(?, ?, ?, ?, ?, ?, '1', ?, ?)",
+        (page_id, entity_type, name, text.normalize_name(name), owner_type, url,
+         now, now),
+    ).lastrowid
+    for alias, alias_type in aliases or []:
+        connection.execute(
+            "INSERT OR IGNORE INTO entity_aliases(entity_id, alias, normalized_alias,"
+            " alias_type, source) VALUES(?, ?, ?, ?, 'test')",
+            (entity_id, alias, text.normalize_name(alias), alias_type),
+        )
+    return entity_id
 
 
 def make_document(title: str, blocks: list[dict]) -> bytes:
@@ -179,8 +245,21 @@ class SearchQueryTests(unittest.TestCase):
             "page_title": "USpringArmComponent",
             "heading_path": "USpringArmComponent > Variables",
         }
-        api = search._score(row, "all_terms", 0, set(), "api", "targetarmlength")
-        concept = search._score(row, "all_terms", 0, set(), "concept", "targetarmlength")
+        def score(profile):
+            return search._score(
+                row,
+                "all_terms",
+                0,
+                search._Scoring(
+                    workspace=runtime.active(),
+                    terms=set(),
+                    normalized_query="targetarmlength",
+                    profile=profile,
+                ),
+            )
+
+        api = score("api")
+        concept = score("concept")
         self.assertGreater(api - concept, 5.0)
 
     def test_concept_profile_prefers_overview_over_return_tables(self):
@@ -711,11 +790,15 @@ class EvidenceCoverageTests(unittest.TestCase):
         for kind in unreal.DERIVED_EVIDENCE_KINDS:
             self.assertIn(kind, kinds, "领域知识包声明会推出的证据必须被验收覆盖")
 
-    def test_domain_kinds_are_actually_produced_by_the_pack(self):
-        # 声明了却没人生产，等于验收永远失败；反过来生产了却没声明，等于漏检。
-        source = (Path(unreal.__file__)).read_text(encoding="utf-8")
-        for kind in unreal.DERIVED_EVIDENCE_KINDS:
-            self.assertIn(f"'{kind}'", source, f"{kind} 没有任何地方写入")
+    def test_domain_kinds_match_what_the_rules_actually_emit(self):
+        # 声明了却没人生产，等于验收永远失败；生产了却没声明，等于漏检。
+        source = Path(unreal.__file__).read_text(encoding="utf-8")
+        emitted = set(re.findall(r"""evidence_kind=["']([^"']+)["']""", source))
+        self.assertEqual(
+            emitted,
+            set(unreal.DERIVED_EVIDENCE_KINDS),
+            "DERIVED_EVIDENCE_KINDS 必须和规则实际产出的证据类型完全一致",
+        )
 
 
 class FetchedLanguageTests(unittest.TestCase):
@@ -823,52 +906,41 @@ class TargetTypeResolutionTests(unittest.TestCase):
     原先靠"这句正好是小节结尾"收边的写法，一夜之间从 1,336 命中掉到 4。
     """
 
-    def _connection(self):
-        connection = sqlite3.connect(":memory:")
-        connection.row_factory = sqlite3.Row
-        connection.executescript(
-            "CREATE TABLE entities(id INTEGER PRIMARY KEY, entity_type TEXT);"
-            "CREATE TABLE entity_aliases(entity_id INTEGER, normalized_alias TEXT);"
-        )
-        connection.execute("INSERT INTO entities VALUES(1, 'cpp_symbol')")
-        connection.execute("INSERT INTO entities VALUES(2, 'cpp_symbol')")
-        connection.executemany(
-            "INSERT INTO entity_aliases VALUES(?, ?)",
-            [(1, "actor"), (2, "actorcomponent")],
-        )
-        return connection
+    def _graph(self):
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="cpp_symbol", name="AActor")
+        seed_entity(connection, entity_type="cpp_symbol", name="UActorComponent",
+                    aliases=[("Actor Component", "cpp_humanized_name")])
+        connection.commit()
+        return relations.RelationGraph(connection)
 
-    def test_name_ends_where_the_alias_table_says_it_does(self):
-        connection = self._connection()
+    def test_name_ends_where_the_known_entities_say_it_does(self):
         # 真实形状：名字后面直接接下一段正文，没有任何标点。
-        name, targets = unreal._resolve_target_entity(
-            connection, "Actor Component Inputs Type Name Description"
+        name, targets = unreal._resolve_target(
+            self._graph(), "Actor Component Inputs Type Name Description"
         )
         self.assertEqual(name, "Actor Component")
-        self.assertEqual([row["id"] for row in targets], [2])
+        self.assertEqual([t.name for t in targets], ["UActorComponent"])
 
     def test_longer_name_wins_over_its_own_prefix(self):
-        # "Actor" 也在表里。从短往长试的话会停在它，指错实体。
-        connection = self._connection()
-        name, _ = unreal._resolve_target_entity(connection, "Actor Component Inputs")
+        # "Actor" 也认得出来。从短往长试的话会停在它，指错实体。
+        name, _ = unreal._resolve_target(self._graph(), "Actor Component Inputs")
         self.assertEqual(name, "Actor Component")
 
     def test_unknown_target_links_to_nothing(self):
         # 绝大多数 Target 指向还没抓的 C++ 页；认不出来就该老实不连。
-        connection = self._connection()
-        name, targets = unreal._resolve_target_entity(
-            connection, "Gameplay Ability Blueprint Library Inputs"
+        name, targets = unreal._resolve_target(
+            self._graph(), "Gameplay Ability Blueprint Library Inputs"
         )
         self.assertEqual((name, targets), ("", []))
 
     def test_prose_containing_the_words_is_not_a_declaration(self):
         # "When Flatten Target is enabled..." 不是声明，别硬连。
-        connection = self._connection()
         match = unreal.TARGET_IS_PATTERN.search(
             "When Flatten Target is enabled you can show a preview grid"
         )
         self.assertIsNotNone(match)
-        self.assertEqual(unreal._resolve_target_entity(connection, match.group(1))[1], [])
+        self.assertEqual(unreal._resolve_target(self._graph(), match.group(1))[1], [])
 
 
 class McpProtocolTests(unittest.TestCase):
@@ -997,6 +1069,65 @@ class DatasetLayeringTests(unittest.TestCase):
             loaded, "https://dev.epicgames.com/documentation/zh-cn/unreal-engine/x"
         )
         self.assertEqual(path, "/documentation/unreal-engine/x")
+
+
+class RuntimeWorkspaceTests(unittest.TestCase):
+    """一个进程能同时握住多个数据集——MCP 靠这个在一个连接里服务多个库。"""
+
+    def test_switching_workspace_switches_database_and_adapter(self):
+        other = dataclasses.replace(
+            runtime.active(),
+            dataset=dataclasses.replace(
+                runtime.active().dataset, id="other-lib", name="另一个库"
+            ),
+            data_dir=Path(tempfile.mkdtemp(prefix="docatlas_ws_")),
+        )
+        default_db = runtime.active().db_path
+        with runtime.use(other) as switched:
+            self.assertEqual(switched.id, "other-lib")
+            self.assertNotEqual(switched.db_path, default_db)
+            # 派生配置也得跟着换，否则换了库还在用上一个库的分类和标签。
+            self.assertEqual(db.connect_db.__module__, "docatlas.db")
+            self.assertEqual(runtime.active().name, "另一个库")
+        self.assertEqual(runtime.active().db_path, default_db)
+
+    def test_workspace_is_restored_even_when_the_body_raises(self):
+        before = runtime.active().id
+        with self.assertRaises(ZeroDivisionError):
+            with runtime.use(dataclasses.replace(runtime.active())):
+                raise ZeroDivisionError
+        self.assertEqual(runtime.active().id, before)
+
+    def test_worker_threads_inherit_the_active_dataset(self):
+        """抓页面全在线程池里干，不显式传下去就会用错适配器。
+
+        `contextvars` 不跨线程：worker 拿到的是空上下文，`active()` 会退回
+        进程默认数据集。真实后果是拿 A 站的适配器解析 B 站的页面、写进 B 的
+        库，全程不报错。所以线程池必须提交 `bind(fn)`。
+        """
+        import concurrent.futures
+
+        with using(dataset={"id": "in-thread"}):
+            bound = runtime.bind(lambda: runtime.active().id)
+            naked = lambda: runtime.active().id  # noqa: E731
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                self.assertEqual(executor.submit(bound).result(), "in-thread")
+                # 反向证明这个测试真的能抓到问题：不 bind 就退回默认数据集。
+                self.assertEqual(
+                    executor.submit(naked).result(), runtime.DEFAULT_DATASET_ID
+                )
+
+    def test_every_thread_pool_submits_a_bound_callable(self):
+        """新写的线程池不 bind 就会重蹈覆辙，所以这条界线由测试守着。"""
+        offenders = []
+        for path in Path("docatlas").glob("*.py"):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if "executor.submit(" in line or "executor.map(" in line:
+                    if "bind(" not in line:
+                        offenders.append(f"{path.name}:{number}")
+        self.assertEqual(offenders, [], "线程池任务必须用 runtime.bind() 包一层")
 
 
 class UnrealKnowledgeTests(unittest.TestCase):
@@ -1505,13 +1636,7 @@ class InventoryValidationTests(unittest.TestCase):
         self.assertEqual(report["status"], "pass", report["checks"])
 
     def test_optional_categories_are_allowed_to_be_empty(self):
-        from dataclasses import replace
-
-        original = validate.DATASET
-        validate.DATASET = replace(
-            original, optional_categories=tuple(original.categories)
-        )
-        try:
+        with using(dataset={"optional_categories": tuple(config.DATASET.categories)}):
             connection = self._connection()
             connection.execute(
                 "INSERT INTO sitemaps(url, category, status) "
@@ -1527,8 +1652,6 @@ class InventoryValidationTests(unittest.TestCase):
             self.assertEqual(
                 self._check(report, "declared_categories_have_pages")["status"], "pass"
             )
-        finally:
-            validate.DATASET = original
 
 
 class InventoryFeedHookTests(unittest.TestCase):
@@ -1645,18 +1768,12 @@ class InventoryFeedHookTests(unittest.TestCase):
     def quiet_source(self, source):
         """换掉适配器，顺便把进度日志收进黑洞——测试输出该只有测试结果。
 
-        `db` 那份也要换。以前只换 `discover` 的，于是建库始终跑在真来源上，
-        "开库时无条件问来源要站点地图总入口"这个 bug 就一直没被测到。
+        整个 workspace 一起换，所以 `discover` 和 `db` 看到的是同一个假来源。
+        以前是逐个模块改全局变量，只改了 `discover` 那份，于是建库始终跑在
+        真来源上，"开库时无条件问来源要站点地图总入口"这个 bug 一直没被测到。
         """
-        originals = {discover: discover.SOURCE, db: db.SOURCE}
-        for module in originals:
-            module.SOURCE = source
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                yield
-        finally:
-            for module, original in originals.items():
-                module.SOURCE = original
+        with using(source=source), contextlib.redirect_stdout(io.StringIO()):
+            yield
 
     def _check_status(self, report, name):
         return next(c for c in report["checks"] if c["name"] == name)["status"]
@@ -1670,24 +1787,271 @@ class GenericRelationLayerTests(unittest.TestCase):
     """
 
     def test_relation_labels_fall_back_to_the_generic_set(self):
-        self.assertIn("belongs_to", context.RELATION_LABELS)
-        self.assertIn("official_link", context.EVIDENCE_LABELS)
+        with using(knowledge=None) as workspace:
+            self.assertIn("belongs_to", workspace.relation_labels)
+            self.assertIn("official_link", workspace.evidence_labels)
 
     def test_official_link_is_expected_without_any_knowledge_pack(self):
-        original = validate.KNOWLEDGE
-        validate.KNOWLEDGE = None
-        try:
+        with using(knowledge=None):
             self.assertEqual(validate.expected_evidence_kinds(), ["official_link"])
-        finally:
-            validate.KNOWLEDGE = original
 
     def test_query_names_work_without_a_knowledge_pack(self):
-        original = search.KNOWLEDGE
-        search.KNOWLEDGE = None
-        try:
+        with using(knowledge=None):
             self.assertEqual(search.query_names("Nanite"), ["nanite"])
-        finally:
-            search.KNOWLEDGE = original
+
+
+class InventoryCoverageTests(unittest.TestCase):
+    """BUG-011：正文链过去、清单里却没有，不能说成"官方确实没有这一页"。
+
+    两件事的下一步完全相反——一个是改查询词，一个是改来源适配器的枚举范围。
+    说错方向，用户会在错误的地方反复试。
+    """
+
+    def _linked_to_a_missing_page(self):
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="guide", name="Shader Group",
+                    path="/render/shader_nodes/groups")
+        # 已抓页面链向 Interface Node Groups，但清单里没有这一页。
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+            " VALUES(1, 'https://example.invalid/interface/controls/nodes/groups',"
+            " '/interface/controls/nodes/groups', 'Node Groups',"
+            " 'official_reference', 'official_link',"
+            " 'https://example.invalid/render/shader_nodes/groups', 'now')"
+        )
+        connection.commit()
+        return connection
+
+    def test_a_linked_but_unlisted_page_is_found_by_name(self):
+        connection = self._linked_to_a_missing_page()
+        found = ondemand.linked_but_unlisted(connection, "Groups")
+        self.assertEqual(
+            [item["path"] for item in found], ["/interface/controls/nodes/groups"]
+        )
+
+    def test_related_says_out_of_inventory_not_entity_not_found(self):
+        connection = self._linked_to_a_missing_page()
+        result = context.related_payload(connection, "Groups")
+        self.assertEqual(result["status"], "target_outside_inventory")
+        joined = chr(10).join(result["next_steps"])
+        self.assertIn("来源没有枚举到", joined)
+        self.assertNotIn("官方文档确实没有这一页", joined)
+
+    def test_a_genuinely_absent_name_still_says_so(self):
+        """反向保证：真没有的东西不能都赖到来源范围上。"""
+        connection = self._linked_to_a_missing_page()
+        result = context.related_payload(connection, "Absolutely Nothing")
+        self.assertEqual(result["status"], "entity_not_found")
+        self.assertIn(
+            "官方文档确实没有这一页", chr(10).join(result["next_steps"])
+        )
+
+    def test_gaps_separate_not_fetched_from_not_enumerated(self):
+        connection = self._linked_to_a_missing_page()
+        # 再加一条：目标在清单里，只是还没抓正文。
+        connection.execute(
+            "INSERT INTO pages(url, path, category, status, route_depth)"
+            " VALUES('https://example.invalid/modeling/fields',"
+            " '/modeling/fields', 'guides', 'pending', 2)"
+        )
+        target_id = connection.execute(
+            "SELECT id FROM pages WHERE path='/modeling/fields'"
+        ).fetchone()["id"]
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " target_page_id, anchor_text, link_kind, evidence_kind, source_url,"
+            " created_at) VALUES(1, 'https://example.invalid/modeling/fields',"
+            " '/modeling/fields', ?, 'Fields', 'official_reference',"
+            " 'official_link', 'https://example.invalid/x', 'now')",
+            (target_id,),
+        )
+        connection.commit()
+        gaps = relations.link_target_gaps(connection)
+        self.assertEqual(gaps["pending_targets"], 1, "清单里有、没抓——可以补抓")
+        self.assertEqual(gaps["missing_targets"], 1, "清单里没有——要改枚举范围")
+        self.assertEqual(
+            gaps["top_uncovered_areas"],
+            [{"area": "/interface/controls/nodes", "links": 1}],
+        )
+
+    def test_scattered_misses_are_not_reported_as_a_scope_gap(self):
+        """零星对不上是正常噪音；只有整个目录一页都没枚举到才算范围划漏。"""
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="guide", name="Fields",
+                    path="/modeling/geometry_nodes/fields")
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+            " VALUES(1, 'https://example.invalid/modeling/geometry_nodes/typo',"
+            " '/modeling/geometry_nodes/typo', 'Typo', 'official_reference',"
+            " 'official_link', 'https://example.invalid/x', 'now')"
+        )
+        connection.commit()
+        gaps = relations.link_target_gaps(connection)
+        self.assertEqual(gaps["missing_targets"], 1)
+        # 同目录下清单里有页面，所以不算"整个目录没枚举到"。
+        self.assertEqual(gaps["uncovered_areas"], 0)
+
+
+class RelationContractTests(unittest.TestCase):
+    """ENH-006 的验收线：新数据集只实现一个函数就能建出真关系。
+
+    "不修改 MCP server 和通用关系核心" 是这些用例真正要钉死的东西——
+    下面的假领域包既没写 SQL、也不认识表结构和 entity id。
+    """
+
+    class ToyDomain:
+        """一个假产品的领域包：组件名和类名对得上就算一条关系。"""
+
+        DERIVED_EVIDENCE_KINDS = ("toy_name_match",)
+        RELATION_LABELS = {"implements": "实现自"}
+
+        @staticmethod
+        def relation_rules(graph):
+            for source, target, name in graph.name_matches("widget", "toy_class"):
+                yield relations.RelationCandidate(
+                    source=source,
+                    target=target,
+                    relation_type="implements",
+                    evidence_kind="toy_name_match",
+                    confidence=0.95,
+                    note=f"名字都叫 {name}",
+                )
+
+    def _seeded(self):
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="widget", name="Particle Emitter",
+                    path="/ui/particle-emitter")
+        seed_entity(connection, entity_type="toy_class", name="ParticleEmitter",
+                    path="/api/particle-emitter")
+        connection.commit()
+        return connection
+
+    def test_a_new_domain_builds_relations_without_touching_the_core(self):
+        connection = self._seeded()
+        with using(knowledge=self.ToyDomain, dataset={"knowledge": "toy"}):
+            outcome = relations.rebuild(connection)
+        self.assertEqual(outcome["domain_relations"], 1)
+        row = connection.execute(
+            "SELECT relation_type, evidence_kind, confidence, note, origin"
+            " FROM relations"
+        ).fetchone()
+        self.assertEqual(row["relation_type"], "implements")
+        self.assertEqual(row["evidence_kind"], "toy_name_match")
+        self.assertEqual(row["confidence"], 0.95)
+        self.assertEqual(row["note"], "名字都叫 Particle Emitter")
+        # 归属必须记成领域包，否则全量重建时清不掉、也分不清谁建的。
+        self.assertEqual(row["origin"], "toy")
+
+    def test_official_links_still_build_without_any_knowledge_pack(self):
+        """没有领域包时，"正文链到另一篇文档"这条通用关系必须照样成立。"""
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="guide", name="Fields",
+                    path="/modeling/fields")
+        seed_entity(connection, entity_type="guide", name="Capture Attribute",
+                    path="/modeling/capture")
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+            " VALUES(1, 'https://example.invalid/modeling/capture',"
+            " '/modeling/capture', 'Capture', 'official_reference',"
+            " 'official_link', 'https://example.invalid/modeling/fields', 'now')"
+        )
+        connection.commit()
+        with using(knowledge=None, dataset={"knowledge": None}):
+            outcome = relations.rebuild(connection)
+        self.assertEqual(outcome["official_links"], 1)
+        row = connection.execute(
+            "SELECT relation_type, evidence_kind, confidence, origin FROM relations"
+        ).fetchone()
+        self.assertEqual(row["relation_type"], "official_reference")
+        self.assertEqual(row["evidence_kind"], "official_link")
+        self.assertEqual(row["confidence"], 1.0)
+        self.assertEqual(row["origin"], "core")
+
+    def test_full_rebuild_drops_only_the_packs_own_relations(self):
+        connection = self._seeded()
+        connection.execute(
+            "INSERT INTO relations(from_entity_id, to_entity_id, relation_type,"
+            " evidence_kind, confidence, source_url, origin, created_at, updated_at)"
+            " VALUES(1, 2, 'belongs_to', 'official_link', 1.0, 'u', 'core', 'n', 'n')"
+        )
+        connection.execute(
+            "INSERT INTO relations(from_entity_id, to_entity_id, relation_type,"
+            " evidence_kind, confidence, source_url, origin, created_at, updated_at)"
+            " VALUES(2, 1, 'stale', 'toy_name_match', 0.5, 'u', 'toy', 'n', 'n')"
+        )
+        connection.commit()
+        with using(knowledge=self.ToyDomain, dataset={"knowledge": "toy"}):
+            relations.rebuild(connection)
+        kinds = {
+            r["relation_type"]
+            for r in connection.execute("SELECT relation_type FROM relations")
+        }
+        self.assertIn("belongs_to", kinds, "抓来的事实不该被领域包的重建清掉")
+        self.assertNotIn("stale", kinds, "领域包上一轮的推导必须清干净")
+
+    def test_incremental_runs_the_same_rules_as_the_full_build(self):
+        """按需抓取补页后，领域关系必须和全量重建建出来的一样。
+
+        以前增量是另一个函数，三种领域关系里只补了一种，另外两种在增量路径上
+        永远是空的——"全都跑过了"的库和"边用边补"的库内容不一样。
+        """
+        connection = self._seeded()
+        new_page = connection.execute(
+            "SELECT page_id FROM entities WHERE entity_type='widget'"
+        ).fetchone()["page_id"]
+        with using(knowledge=self.ToyDomain, dataset={"knowledge": "toy"}):
+            created = relations.link_new_pages(connection, [new_page])
+        self.assertEqual(created, 1)
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM relations WHERE relation_type='implements'"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_a_target_that_is_not_in_the_library_is_reported_not_invented(self):
+        """连不上的目标要变成诊断，不能悄悄消失，更不能硬连一个。"""
+        connection = self._seeded()
+        graph = relations.RelationGraph(connection)
+        self.assertEqual(graph.find("Nothing Like This"), [])
+        self.assertIn("Nothing Like This", graph.unresolved)
+
+    def test_an_over_ambiguous_name_stops_being_evidence(self):
+        connection = temp_db(self)
+        seed_entity(connection, entity_type="widget", name="Get Value")
+        for index in range(relations.DEFAULT_MAX_AMBIGUITY + 1):
+            seed_entity(connection, entity_type="toy_class", name="Get Value",
+                        path=f"/api/get-value-{index}")
+        connection.commit()
+        graph = relations.RelationGraph(connection)
+        self.assertEqual(list(graph.name_matches("widget", "toy_class")), [])
+
+    def test_self_loops_and_out_of_range_confidence_are_rejected(self):
+        connection = self._seeded()
+        rows = list(connection.execute("SELECT * FROM entities ORDER BY id"))
+        me = relations.Entity.of(rows[0])
+        other = relations.Entity.of(rows[1])
+
+        class Bad:
+            DERIVED_EVIDENCE_KINDS = ()
+
+            @staticmethod
+            def relation_rules(graph):
+                yield relations.RelationCandidate(me, me, "self", "toy", 1.0)
+                yield relations.RelationCandidate(me, other, "", "toy", 1.0)
+                yield relations.RelationCandidate(me, other, "ok", "toy", 7.5)
+
+        with using(knowledge=Bad, dataset={"knowledge": "bad"}):
+            outcome = relations.rebuild(connection)
+        self.assertEqual(outcome["rejected"], 2)
+        self.assertEqual(outcome["domain_relations"], 1)
+        # 置信度被夹回合法区间，而不是原样写进去。
+        self.assertEqual(
+            connection.execute("SELECT confidence FROM relations").fetchone()[0], 1.0
+        )
 
 
 class RelatedContractTests(unittest.TestCase):

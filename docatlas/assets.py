@@ -11,7 +11,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .config import ASSET_DIR, DATA_DIR, IMAGE_EXTENSIONS
+from .constants import IMAGE_EXTENSIONS
+from .runtime import active, bind
 from .util import log, utc_now
 from .net import fetch_bytes
 
@@ -30,7 +31,7 @@ def asset_local_path(url: str, content_type: str | None = None) -> Path:
         }
         suffix = content_suffixes.get((content_type or "").split(";")[0], ".bin")
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    return ASSET_DIR / digest[:2] / f"{digest}{suffix}"
+    return active().asset_dir / digest[:2] / f"{digest}{suffix}"
 
 
 def fetch_asset(row: sqlite3.Row) -> dict[str, Any]:
@@ -46,7 +47,7 @@ def fetch_asset(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "ok": True,
             "id": row["id"],
-            "local_path": path.relative_to(DATA_DIR).as_posix(),
+            "local_path": path.relative_to(active().data_dir).as_posix(),
             "content_type": content_type,
             "bytes": len(body),
         }
@@ -84,7 +85,7 @@ def download_assets(
             )
             if not rows:
                 break
-            for result in executor.map(fetch_asset, rows):
+            for result in executor.map(bind(fetch_asset), rows):
                 processed += 1
                 if result["ok"]:
                     connection.execute(

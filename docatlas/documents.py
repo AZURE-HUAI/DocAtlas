@@ -18,8 +18,8 @@ from typing import Any
 import urllib.error
 import urllib.parse
 
-from .config import DATASET, ENTITY_TYPES, KNOWLEDGE, MARKDOWN_TARGET_RE, SOURCE, VERSION
-from .dataset import knowledge_hook
+from .constants import MARKDOWN_TARGET_RE
+from .runtime import active
 from .net import fetch_bytes
 from .htmlmd import plain_text
 from .chunking import chunk_sections, normalize_name, split_sections
@@ -38,11 +38,13 @@ LINK_KIND_BY_KNOWLEDGE_TYPE = {
 
 
 def document_api_url(path: str) -> str:
-    return SOURCE.document_request_url(DATASET, path)
+    workspace = active()
+    return workspace.source.document_request_url(workspace.dataset, path)
 
 
 def normalize_target_path(target_url: str) -> str | None:
-    return SOURCE.normalize_link_target(DATASET, target_url)
+    workspace = active()
+    return workspace.source.normalize_link_target(workspace.dataset, target_url)
 
 
 def extract_page_links(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -89,7 +91,8 @@ def entity_descriptor(
     通用别名（标题、路径末段、限定名）在这里生成；
     领域特有的别名（Unreal 的 K2_ 脱前缀之类）由知识包补。
     """
-    prefix = DATASET.option("doc_prefix", "/")
+    workspace = active()
+    prefix = workspace.doc_prefix
     relative = (
         path[len(prefix):]
         if path.lower().startswith(prefix.lower())
@@ -98,8 +101,10 @@ def entity_descriptor(
     segments = [
         urllib.parse.unquote(segment) for segment in relative.split("/") if segment
     ]
-    entity_type = ENTITY_TYPES.get(category, "document")
-    module, owner_type = SOURCE.entity_placement(DATASET, category, segments)
+    entity_type = workspace.dataset.entity_types.get(category, "document")
+    module, owner_type = workspace.source.entity_placement(
+        workspace.dataset, category, segments
+    )
     slug = segments[-1] if segments else title
     qualified_name = "::".join(segments[1:]) if len(segments) > 1 else title
     aliases = {
@@ -107,7 +112,7 @@ def entity_descriptor(
         (slug, "route_slug"),
         (qualified_name, "qualified_name"),
     }
-    extra_aliases = knowledge_hook(KNOWLEDGE, "extra_entity_aliases")
+    extra_aliases = workspace.hook("extra_entity_aliases")
     if extra_aliases:
         aliases |= extra_aliases(title=title, category=category, segments=segments)
     compact_title = re.sub(r"[^A-Za-z0-9_]+", "", title)
@@ -128,7 +133,7 @@ def entity_descriptor(
         "owner_type": owner_type,
         "signature": None,
         "source_url": source_url,
-        "version": VERSION,
+        "version": workspace.version,
         "attributes_json": json.dumps(attributes, ensure_ascii=False),
         "aliases": sorted(aliases),
     }
@@ -140,7 +145,8 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
     source_url = row["url"]
     category = row["category"]
 
-    parsed = SOURCE.parse_document(DATASET, path, body)
+    workspace = active()
+    parsed = workspace.source.parse_document(workspace.dataset, path, body)
     if parsed["kind"] == "redirect":
         return {
             "ok": True,
@@ -182,7 +188,7 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         source_type=source_type,
         document_type=document_type,
     )
-    document_aliases = knowledge_hook(KNOWLEDGE, "document_aliases")
+    document_aliases = active().hook("document_aliases")
     if document_aliases:
         extra = document_aliases(
             category=category,

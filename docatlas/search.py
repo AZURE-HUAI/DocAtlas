@@ -16,14 +16,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import DATASET, KNOWLEDGE
-from .dataset import knowledge_hook
 from .db import chunk_fts_mode, fts_mode
+from .runtime import active
 from .text import qualifier_tail
 
 # 只在"任含"档剔除，避免 how/what 这类词淹没真正的关键词。
@@ -65,26 +65,16 @@ CONCEPT_TYPE_BONUS = {
     "navigation": -4.0,
 }
 
-# 概念性提问时各分类的加减分，由数据集配置。没配就全是 0——
-# 检索照常工作，只是没有针对这个站点调过优。
-CONCEPT_CATEGORY_BONUS = DATASET.concept_category_bonus
-
 # 旧名称，保留给外部调用方。
 KNOWLEDGE_TYPE_BONUS = API_TYPE_BONUS
-
-# 什么样的词算"标识符"。通用规则认得 `::`、下划线和驼峰；
-# 领域知识包可以补充自己的形状（比如 Unreal 的 AActor、FVector）。
-_DEFAULT_IDENTIFIER_PATTERN = r"::|_[A-Za-z]|[a-z][A-Z]"
-_IDENTIFIER_RE = re.compile(
-    knowledge_hook(KNOWLEDGE, "IDENTIFIER_PATTERN", _DEFAULT_IDENTIFIER_PATTERN)
-)
 
 
 def query_profile(query: str, *, entity_hit: bool) -> str:
     """`api`（找具体符号）还是 `concept`（问这是什么、怎么做）。"""
     if entity_hit:
         return "api"
-    return "api" if any(_IDENTIFIER_RE.search(t) for t in tokenize(query)) else "concept"
+    identifier_re = active().identifier_re
+    return "api" if any(identifier_re.search(t) for t in tokenize(query)) else "concept"
 
 STAGE_BASE = {
     "entity": 100.0,
@@ -145,7 +135,7 @@ def query_names(query: str) -> list[str]:
     属性访问器脱 Get/Set 之类）。核心不知道这些规则，只负责按顺序试。
     """
     names = [query, qualifier_tail(query)]
-    expand = knowledge_hook(KNOWLEDGE, "query_aliases")
+    expand = active().hook("query_aliases")
     if expand:
         names.extend(alias for alias in expand(query) if alias)
     seen: set[str] = set()
@@ -241,33 +231,40 @@ def _like_hits(
     return list(connection.execute(sql, params))
 
 
-def _score(
-    row: sqlite3.Row,
-    stage: str,
-    rank: int,
-    terms: set[str],
-    profile: str,
-    normalized_query: str,
-) -> float:
+@dataclasses.dataclass
+class _Scoring:
+    """一次查询里所有档位共用的打分上下文。
+
+    这些值按查询算一次就够了，但打分要对每一行调用；分开存着，省得把六七个
+    参数在函数之间传来传去，也方便后面往里加新的排序信号。
+    """
+
+    workspace: Any
+    terms: set[str]
+    normalized_query: str
+    profile: str = "api"
+
+
+def _score(row: sqlite3.Row, stage: str, rank: int, ctx: _Scoring) -> float:
     score = STAGE_BASE[stage] - min(rank, 40) * 0.4
-    if profile == "concept":
+    if ctx.profile == "concept":
         score += CONCEPT_TYPE_BONUS.get(row["knowledge_type"], 0.0)
-        score += CONCEPT_CATEGORY_BONUS.get(row["category"], 0.0)
+        score += ctx.workspace.concept_category_bonus.get(row["category"], 0.0)
     else:
         score += API_TYPE_BONUS.get(row["knowledge_type"], 0.0)
     score += (row["quality_score"] or 0.0) * 2.0
 
     title = (row["page_title"] or "").casefold()
-    if terms:
+    if ctx.terms:
         heading = (row["heading_path"] or "").casefold()
-        score += sum(1 for t in terms if t in title) / len(terms) * 6.0
-        score += sum(1 for t in terms if t in heading) / len(terms) * 3.0
+        score += sum(1 for t in ctx.terms if t in title) / len(ctx.terms) * 6.0
+        score += sum(1 for t in ctx.terms if t in heading) / len(ctx.terms) * 3.0
     # 标题本身就是（或以之开头）用户问的东西，几乎一定是对的那一页。
     normalized_title = normalize_name(row["page_title"] or "")
-    if normalized_query and normalized_title:
-        if normalized_title == normalized_query:
+    if ctx.normalized_query and normalized_title:
+        if normalized_title == ctx.normalized_query:
             score += 12.0
-        elif normalized_title.startswith(normalized_query):
+        elif normalized_title.startswith(ctx.normalized_query):
             score += 6.0
 
     # 大段的成员罗列回答不了"这是什么、怎么做"，但很占 token，所以压后。
@@ -276,8 +273,8 @@ def _score(
     # 官方不给属性单独出页面，`TargetArmLength` 这类名字只记在所属类的成员
     # 表中，一律压后就等于把唯一的官方定义压掉。
     if (
-        profile == "concept"
-        and row["category"] in DATASET.verbose_categories
+        ctx.profile == "concept"
+        and row["category"] in ctx.workspace.dataset.verbose_categories
         and row["knowledge_type"] in {"details", "navigation"}
         and (row["token_estimate"] or 0) > 300
     ):
@@ -313,25 +310,28 @@ def search_chunks(
         return _legacy_section_search(connection, query, limit=limit, category=category)
 
     terms = {t.casefold() for t in tokenize(query) if t.casefold() not in STOPWORDS}
-    normalized_query = normalize_name(query)
     pool = max(limit * 4, 40)
     scored: dict[int, dict[str, Any]] = {}
-    profile = "api"
+    ctx = _Scoring(
+        workspace=active(),
+        terms=terms,
+        normalized_query=normalize_name(query),
+    )
 
     def absorb(rows: list[sqlite3.Row], stage: str) -> None:
         for rank, row in enumerate(rows):
-            score = _score(row, stage, rank, terms, profile, normalized_query)
+            score = _score(row, stage, rank, ctx)
             existing = scored.get(row["id"])
             if existing and existing["score"] >= score:
                 continue
             item = dict(row)
             item["score"] = round(score, 2)
             item["match_stage"] = stage
-            item["query_profile"] = profile
+            item["query_profile"] = ctx.profile
             scored[row["id"]] = item
 
     entity_rows = _entity_hits(connection, query, category, pool)
-    profile = query_profile(query, entity_hit=bool(entity_rows))
+    ctx.profile = query_profile(query, entity_hit=bool(entity_rows))
     absorb(entity_rows, "entity")
     if chunk_fts_mode(connection) == "fts5":
         for stage, expression in fts_expressions(query):
