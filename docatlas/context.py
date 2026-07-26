@@ -1,24 +1,43 @@
-"""受 token 预算约束的 AI 上下文包。
+"""回答层：`ask` 和 `related` 的唯一实现。
 
-这一层存在的唯一理由是**保护上下文**。检索能找到几十条相关内容，但把它们
-全塞给 AI 只会让真正的答案被淹没。所以这里做四件事：
+命令行和 MCP 都调这里，所以两个入口不可能给出不一样的答案——以前它们各写
+一套"要不要补抓"的判断，然后慢慢分了岔。
+
+这一层的核心职责是**保护上下文**。检索能找到几十条相关内容，但把它们全塞给
+AI 只会让真正的答案被淹没。所以上下文包做四件事：
 
 1. **硬预算**：累计 token 超过预算就停，绝不"最后一条超一点没关系"。
 2. **同页限额**：一个页面最多贡献 2 块，避免一篇长文吃掉整个预算。
-3. **去重**：内容哈希相同的块只保留一份（Epic 文档大量复制粘贴）。
-4. **一跳关系只给指针**：相关的蓝图/C++ 对应项只给名称、依据、置信度和
-   一条可展开的命令，不直接把正文塞进来——需要时再展开。
+3. **去重**：内容哈希相同的块只保留一份（文档站大量复制粘贴）。
+4. **一跳关系只给指针**：相关项只给名称、依据、置信度和一条可展开的命令，
+   不直接把正文塞进来——需要时再展开。
+
+另外两件事同样属于"回答"，所以也在这里：
+
+- `answer()` 决定要不要去清单里补抓。判断依据不是"本地有没有结果"，而是
+  **"有没有一条结果的页面标题就是用户问的名字"**——否则几条沾边的本地块
+  会一直把真正的目标页挡在门外。
+- 查不到时的**诊断**（`describe_lookup` / `exact_page_hint`）。空结果本身
+  不含信息量：官方没有这一页、清单里有但没抓、名字写得对不上，三件事的
+  下一步完全不同，必须说清楚是哪一种。
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any
 
 from .chunking import normalize_name
-from .config import CATEGORY_LABELS, KNOWLEDGE, LANGUAGE, VERSION
+from .config import CATEGORY_LABELS, DATASET, KNOWLEDGE, LANGUAGE, VERSION
 from .dataset import knowledge_hook
-from .search import search_chunks
+from .ondemand import (
+    DEFAULT_FETCH_LIMIT,
+    ensure_available,
+    inventory_lookup,
+    missing_exact_pages,
+)
+from .search import query_names, search_chunks
 
 MAX_CHUNKS_PER_PAGE = 2
 PRIMARY_BUDGET_RATIO = 0.8
@@ -209,7 +228,9 @@ def build_context_pack(
 
     return {
         "query": query,
-        "ue_version": VERSION,
+        "dataset": DATASET.id,
+        "product": DATASET.product,
+        "version": VERSION,
         "token_budget": token_budget,
         "estimated_tokens": used,
         "primary_knowledge": primary,
@@ -226,6 +247,268 @@ def build_context_pack(
     }
 
 
+def _has_exact_local_hit(pack: dict[str, Any], query: str) -> bool:
+    """本地结果里有没有一条"页面标题就是用户问的那个名字"。
+
+    有，才说明真的找到了；只是若干页面顺带提到过这个词，不算。这条判断决定
+    要不要去清单里补抓——否则一堆弱相关的本地块会把真正的目标页挡在门外。
+    """
+    wanted = set(query_names(query))
+    return any(
+        normalize_name(item["page_title"] or "") in wanted
+        for item in pack["primary_knowledge"]
+    )
+
+
+def answer(
+    connection: sqlite3.Connection,
+    query: str,
+    *,
+    token_budget: int,
+    category: str | None,
+    allow_fetch: bool = True,
+    fetch_limit: int = DEFAULT_FETCH_LIMIT,
+    quiet: bool = False,
+) -> dict[str, Any]:
+    """`ask` 的唯一实现：命令行和 MCP 都走这里，两边结果不可能不一致。"""
+
+    def build() -> dict[str, Any]:
+        return build_context_pack(
+            connection, query, token_budget=token_budget, category=category
+        )
+
+    pack = build()
+    if allow_fetch:
+        exact_local = _has_exact_local_hit(pack, query)
+        needs_fetch = not exact_local or missing_exact_pages(
+            connection, query, category
+        )
+        if needs_fetch:
+            # 已经有确切命中时只补同名的那一页，不顺带把名字相近的一起拉进来。
+            fetched = ensure_available(
+                connection,
+                query,
+                limit=fetch_limit,
+                category=category,
+                quiet=quiet,
+                exact_only=exact_local,
+            )
+            if fetched["succeeded"]:
+                pack = build()
+            pack["on_demand_fetch"] = fetched
+    if not pack["primary_knowledge"]:
+        pack["lookup"] = inventory_lookup(connection, query, category=category)
+    return pack
+
+
+KNOWLEDGE_ID_RE = re.compile(r"[Kk]?\d+")
+
+
+def _subject_entities(
+    connection: sqlite3.Connection, subject: str
+) -> list[sqlite3.Row]:
+    if KNOWLEDGE_ID_RE.fullmatch(subject):
+        chunk_id = int(subject[1:] if subject[:1].casefold() == "k" else subject)
+        return list(
+            connection.execute(
+                """
+                SELECT e.* FROM knowledge_entities ke
+                JOIN entities e ON e.id=ke.entity_id
+                WHERE ke.chunk_id=?
+                ORDER BY ke.confidence DESC
+                """,
+                (chunk_id,),
+            )
+        )
+    # 跨两张表的 OR 会让 SQLite 弃用索引；拆成 UNION，两边各走各的索引。
+    rows: list[sqlite3.Row] = []
+    seen: set[int] = set()
+    for normalized in query_names(subject):
+        for row in connection.execute(
+            """
+            SELECT * FROM entities WHERE id IN (
+                SELECT id FROM entities WHERE normalized_name=?
+                UNION
+                SELECT entity_id FROM entity_aliases WHERE normalized_alias=?
+            )
+            ORDER BY entity_type, canonical_name
+            LIMIT 20
+            """,
+            (normalized, normalized),
+        ):
+            if row["id"] not in seen:
+                seen.add(row["id"])
+                rows.append(row)
+        if rows:
+            break
+    return rows
+
+
+def related_payload(
+    connection: sqlite3.Connection, subject: str
+) -> dict[str, Any]:
+    """一跳交叉关系，带明确状态。
+
+    以前这里返回裸数组：没匹配到实体、实体存在但没关系、页面在清单里还没抓，
+    三件事都是一个 `[]`，调用方根本没法判断下一步该改写查询、补抓、还是
+    重建关系。所以状态必须写出来。
+    """
+    entities = []
+    for entity in _subject_entities(connection, subject):
+        relations = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT
+                    r.relation_type,
+                    r.evidence_kind,
+                    r.confidence,
+                    r.source_url AS evidence_url,
+                    r.note,
+                    CASE WHEN r.from_entity_id=? THEN 'outgoing' ELSE 'incoming' END
+                        AS direction,
+                    related.id AS related_entity_id,
+                    related.canonical_name AS related_name,
+                    related.entity_type AS related_type,
+                    related.qualified_name AS related_qualified_name,
+                    related.source_url AS related_source_url
+                FROM relations r
+                JOIN entities related ON related.id=CASE
+                    WHEN r.from_entity_id=? THEN r.to_entity_id
+                    ELSE r.from_entity_id
+                END
+                WHERE r.from_entity_id=? OR r.to_entity_id=?
+                ORDER BY r.confidence DESC, r.relation_type, related.canonical_name
+                """,
+                (entity["id"], entity["id"], entity["id"], entity["id"]),
+            )
+        ]
+        entities.append(
+            {
+                "entity": {
+                    "id": entity["id"],
+                    "name": entity["canonical_name"],
+                    "type": entity["entity_type"],
+                    "qualified_name": entity["qualified_name"],
+                    "module": entity["module"],
+                    "owner_type": entity["owner_type"],
+                    "source_url": entity["source_url"],
+                    "version": entity["version"],
+                },
+                "relations": relations,
+            }
+        )
+    if not entities:
+        # K 编号是知识块 ID，不是页面名字——查不到时那是"编号不存在"，
+        # 跟清单里有没有这一页毫无关系，不能套用 inventory_lookup 的诊断。
+        status = (
+            "knowledge_id_not_found"
+            if KNOWLEDGE_ID_RE.fullmatch(subject)
+            else "entity_not_found"
+        )
+    elif any(item["relations"] for item in entities):
+        status = "ok"
+    else:
+        status = "entity_found_but_no_relations"
+    result: dict[str, Any] = {
+        "subject": subject,
+        "status": status,
+        "entities": entities,
+        "next_steps": [],
+    }
+    if status == "entity_not_found":
+        result["lookup"] = inventory_lookup(connection, subject)
+        result["next_steps"] = describe_lookup(result["lookup"])
+    elif status == "knowledge_id_not_found":
+        result["next_steps"] = [
+            f"{subject} 不是本地存在的知识块编号。K 编号只能从 search / ask 的"
+            "结果里读到，不能凭空猜或复用旧结果——库重跑过一次编号就会变。"
+            '先用 python -m docatlas search "<关键词>" 拿到当前有效的 K 编号。',
+        ]
+    elif status == "entity_found_but_no_relations":
+        result["next_steps"] = [
+            "这个实体在库里，但一条交叉关系都没有。多半是它指向的页面还没抓；"
+            "也可能这一页确实不指向别处。",
+            "先按名字补抓相关页面，再重建关系："
+            'python -m docatlas get "<相关页面名>" 然后 python -m docatlas cross-index。',
+        ]
+    return result
+
+
+def describe_lookup(lookup: dict[str, Any]) -> list[str]:
+    """把"清单知道什么"翻译成人和 AI 都能照着做的下一步。
+
+    空结果本身不含信息量：官方没有这一页、清单里有但没抓、名字写得对不上，
+    三件事的下一步完全不同，必须说清楚是哪一种。
+    """
+    pending = lookup["pending_pages"]
+    crawled = lookup["crawled_pages"]
+    if pending:
+        lines = [f"本地没有正文，但全站清单里有 {len(pending)} 个页面对得上："]
+        for page in pending:
+            label = CATEGORY_LABELS.get(page["category"], page["category"])
+            lines.append(f"  [{label}] {page['path']}")
+        lines.append(f'取回来再查：python -m docatlas get "{lookup["query"]}"')
+        return lines
+    if crawled:
+        return [
+            f"有 {len(crawled)} 个同名页面已经抓过了，但没有知识块命中这次的查询词。",
+            f'换个说法再试，或直接读那一页：python -m docatlas ask "{lookup["query"]}"',
+        ]
+    return [
+        "没有找到结果，全站清单里也没有对得上的页面。",
+        f"原文语言是 {LANGUAGE}，换成原文里的官方写法往往能命中；"
+        "还是没有，就说明官方文档确实没有这一页。",
+    ]
+
+
+def exact_page_hint(
+    connection: sqlite3.Connection, query: str, category: str | None = None
+) -> list[str]:
+    """有结果，但清单里还躺着一页正好叫这个名字——必须说出来。
+
+    否则用户看到的是一串沾边的页面，完全不知道真正对得上的那一页就在清单里、
+    只差一条命令。"找不到"和"还没取回来"是两回事。
+    """
+    missing = missing_exact_pages(connection, query, category)
+    if not missing:
+        return []
+    return [
+        f"提示：全站清单里还有 {missing} 个页面的名字与「{query}」完全一致，"
+        "但正文尚未抓取，所以不在上面的结果里。",
+        f'取回来：python -m docatlas get "{query}"（或直接用 ask，它会自动补抓）',
+    ]
+
+
+def _render_empty(pack: dict[str, Any]) -> list[str]:
+    """没命中时，把"清单知道什么"说清楚，而不是丢一句"没找到"。"""
+    lookup = pack.get("lookup") or {}
+    pending = lookup.get("pending_pages") or []
+    if not pending:
+        return [
+            f"本地库里没有命中，全站清单里也没有对得上的页面。",
+            "",
+            f"多半是名字和官方写法对不上：原文语言是 {LANGUAGE}，"
+            "换成官方的正式写法再试一次；还是没有，就说明官方文档确实没有这一页。",
+        ]
+    lines = [
+        f"本地还没有这一页的正文，但全站清单里有 {len(pending)} 个页面对得上：",
+        "",
+    ]
+    for page in pending:
+        label = CATEGORY_LABELS.get(page["category"], page["category"])
+        lines.append(f"- [{label}] {page['path']}")
+    lines.extend(
+        [
+            "",
+            "本次没有补抓（可能用了 --no-fetch，或抓取失败）。取回来再问一次即可：",
+            "",
+            f'    python -m docatlas get "{pack["query"]}"',
+        ]
+    )
+    return lines
+
+
 def render_context_markdown(pack: dict[str, Any]) -> str:
     """把上下文包渲染成给 AI 读的 Markdown。
 
@@ -233,17 +516,15 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
     全都要花钱，而且 AI 读起来还更费劲。
     """
     lines: list[str] = [
-        f"# UE {pack['ue_version']} 文档检索：{pack['query']}",
+        f"# 文档检索：{pack['query']}",
         "",
-        f"预算 {pack['token_budget']:,} tokens，本次约用 {pack['estimated_tokens']:,}。"
+        f"来源：《{DATASET.name}》（{pack['product']} {pack['version']}）。"
+        f"预算 {pack['token_budget']:,} tokens，本次约用 {pack['estimated_tokens']:,}，"
         f"共 {len(pack['primary_knowledge'])} 条知识块。",
         "",
     ]
     if not pack["primary_knowledge"]:
-        lines.append(
-            f"本地库中没有命中。可以换成原文语言（{LANGUAGE}）的写法再试，"
-            "或确认该页面是否已抓取。"
-        )
+        lines.extend(_render_empty(pack))
         return "\n".join(lines)
 
     for index, item in enumerate(pack["primary_knowledge"], 1):

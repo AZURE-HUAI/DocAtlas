@@ -20,10 +20,16 @@ import traceback
 from typing import Any
 
 from .config import DATASET, DATASET_CONFIG_DIR, DATASET_ID, DB_PATH
-from .context import build_context_pack, render_context_markdown
+from .context import (
+    answer,
+    describe_lookup,
+    exact_page_hint,
+    related_payload,
+    render_context_markdown,
+)
 from .db import connect_db, initialize_db
 from .net import REQUEST_LIMITER
-from .ondemand import ensure_available, missing_exact_pages
+from .ondemand import DEFAULT_FETCH_LIMIT, inventory_lookup
 from .search import search_docs
 
 
@@ -66,6 +72,11 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "禁止联网补抓，只用本地已有内容。",
                     "default": False,
+                },
+                "fetch_limit": {
+                    "type": "integer",
+                    "description": "需要补抓时最多取几页。默认 5，够用；调大只会更慢。",
+                    "default": DEFAULT_FETCH_LIMIT,
                 },
             },
             "required": ["query"],
@@ -112,6 +123,25 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "docatlas_related",
+        "description": (
+            "查一个名称或知识 ID 的交叉关系：它属于什么、对应哪个接口、"
+            "作用在什么类型上，每条都带证据类型和置信度。"
+            "先用 docatlas_ask 拿正文，再用这个把相关的东西串起来。"
+            "查不到时会说明是没有这个实体、实体没有关系、还是页面尚未抓取。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": {
+                    "type": "string",
+                    "description": "实体名称，或 docatlas_ask 结果里的 K<数字>",
+                }
+            },
+            "required": ["subject"],
+        },
+    },
+    {
         "name": "docatlas_list_datasets",
         "description": (
             "列出本机有哪些数据集、当前这个服务器在用哪一个、数据是否已经抓过。"
@@ -132,33 +162,20 @@ def tool_ask(arguments: dict[str, Any]) -> str:
     query = (arguments.get("query") or "").strip()
     if not query:
         return "需要一个查询内容。"
-    budget = int(arguments.get("token_budget") or 3000)
-    category = arguments.get("category")
     connection = _open()
     REQUEST_LIMITER.configure(0)
     try:
-        def build() -> dict[str, Any]:
-            return build_context_pack(
-                connection, query, token_budget=budget, category=category
-            )
-
-        payload = build()
-        if not arguments.get("no_fetch"):
-            has_local = bool(payload["primary_knowledge"])
-            # 和命令行同一套判断：本地什么都没有，或者清单里有一页正好同名
-            # 而本地只是顺带提到过它。quiet=True 是因为 stdout 被协议占着。
-            if not has_local or missing_exact_pages(connection, query, category):
-                fetched = ensure_available(
-                    connection,
-                    query,
-                    limit=int(arguments.get("fetch_limit") or 5),
-                    category=category,
-                    quiet=True,
-                    exact_only=has_local,
-                )
-                if fetched["succeeded"]:
-                    payload = build()
-                    payload["on_demand_fetch"] = fetched
+        # 和命令行调的是同一个 answer()，两边不可能给出不一样的答案。
+        # quiet=True 是因为 stdout 被协议占着，一个字都不能往那儿打。
+        payload = answer(
+            connection,
+            query,
+            token_budget=int(arguments.get("token_budget") or 3000),
+            category=arguments.get("category"),
+            allow_fetch=not arguments.get("no_fetch"),
+            fetch_limit=int(arguments.get("fetch_limit") or DEFAULT_FETCH_LIMIT),
+            quiet=True,
+        )
         return render_context_markdown(payload)
     finally:
         connection.close()
@@ -170,16 +187,16 @@ def tool_search(arguments: dict[str, Any]) -> str:
         return "需要一个查询内容。"
     connection = _open()
     try:
+        category = arguments.get("category")
         rows = search_docs(
             connection,
             query,
             limit=int(arguments.get("limit") or 10),
-            category=arguments.get("category"),
+            category=category,
         )
         if not rows:
-            return (
-                f"没有找到结果。原文语言是 {DATASET.language}，"
-                "换成原文里的写法往往能命中。"
+            return "\n".join(
+                describe_lookup(inventory_lookup(connection, query, category=category))
             )
         lines = []
         for index, row in enumerate(rows, 1):
@@ -191,6 +208,7 @@ def tool_search(arguments: dict[str, Any]) -> str:
                 f"    {row['snippet']}\n"
                 f"    DOC 原出处：{row['source_url']}"
             )
+        lines.extend(exact_page_hint(connection, query, category))
         return "\n".join(lines)
     finally:
         connection.close()
@@ -215,6 +233,38 @@ def tool_show(arguments: dict[str, Any]) -> str:
         connection.close()
 
 
+def tool_related(arguments: dict[str, Any]) -> str:
+    subject = str(arguments.get("subject") or "").strip()
+    if not subject:
+        return "需要一个实体名称或知识 ID。"
+    connection = _open()
+    try:
+        result = related_payload(connection, subject)
+        lines = [f"状态：{result['status']}"]
+        # 即使没有关系也要把找到的实体列出来——"没找到这个东西"和
+        # "找到了但它没连着别的东西"对调用方是两件事。
+        for item in result["entities"]:
+            entity = item["entity"]
+            lines.append("")
+            lines.append(f"## {entity['name']}（{entity['type']}）")
+            lines.append(f"   {entity['source_url']}")
+            for relation in item["relations"]:
+                lines.append(
+                    f"   - {relation['relation_type']} → {relation['related_name']}"
+                    f"（{relation['related_type']}，{relation['direction']}）"
+                    f"　依据：{relation['evidence_kind']}"
+                    f"　置信度 {relation['confidence']:.2f}"
+                )
+                lines.append(f"     出处：{relation['evidence_url']}")
+                if relation["note"]:
+                    lines.append(f"     备注：{relation['note']}")
+        if result["next_steps"]:
+            lines.extend(["", *result["next_steps"]])
+        return "\n".join(lines)
+    finally:
+        connection.close()
+
+
 def tool_list_datasets(_arguments: dict[str, Any]) -> str:
     available = sorted(path.stem for path in DATASET_CONFIG_DIR.glob("*.toml"))
     lines = [
@@ -233,6 +283,7 @@ HANDLERS = {
     "docatlas_ask": tool_ask,
     "docatlas_search": tool_search,
     "docatlas_show": tool_show,
+    "docatlas_related": tool_related,
     "docatlas_list_datasets": tool_list_datasets,
 }
 

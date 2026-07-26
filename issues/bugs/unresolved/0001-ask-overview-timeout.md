@@ -2,7 +2,7 @@
 id: BUG-001
 title: "`ask` 查询宽泛版本概览时超时且没有进度输出"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: high
 area: query
@@ -70,3 +70,58 @@ python -m docatlas ask "Summarize the most important new features and workflow c
 ## 调查记录
 
 目前只确认上述现象，尚未定位具体代码原因。
+
+## 验证
+
+在真实的 `epic-ue-5.8` 库（199,883 页清单、25,552 知识块）上重跑议题里的两条命令：
+
+```powershell
+python -m docatlas ask "Summarize the most important new features and workflow changes in Unreal Engine 5.8 Release Notes across Rendering, Animation, MetaHuman, Worldbuilding, PCG, Gameplay, UI, Audio, Developer and Platform" --token-budget 6000 --category community_docs --no-fetch
+```
+
+- 修复前：两次都超过 60 秒被外部超时终止。
+- 修复后：**0.58 秒**，退出码 0，返回 26,899 字的正文。
+
+分阶段计时（`_fts_hits` 单档）：修复前 `phrase` 74.5 秒、`all_terms` 81.8 秒、
+`any_term` 72.3 秒、`prefix` 58.8 秒；修复后同样四档合计 0.1 秒以内。
+
+`EXPLAIN QUERY PLAN` 对照（同一条 `MATCH`，只差一个 `--category`）：
+
+```text
+不带分类  SCAN chunks_fts VIRTUAL TABLE INDEX 0:M7      → 0.01 秒
+带分类    SEARCH p USING INDEX idx_pages_category        → 44.00 秒
+          SEARCH c USING INDEX idx_chunks_page
+          SCAN chunks_fts VIRTUAL TABLE INDEX 0:=M7
+加 CROSS JOIN 后  SCAN chunks_fts VIRTUAL TABLE INDEX 0:M7 → 0.05 秒
+```
+
+回归测试：`python -m unittest discover -s tests` → 128 用例全过。
+
+## 解决记录
+
+**根因**：不是网络，也不是候选量，是 SQLite 的连接顺序被优化器改了。
+
+`_fts_hits` 原来写成 `FROM chunks_fts JOIN chunks JOIN pages WHERE MATCH ? AND
+p.category=?`。不带 `--category` 时优化器从全文索引出发（`INDEX 0:M7`），一次
+索引查询就出结果；一带上 `--category`，它改从 `idx_pages_category` 出发，于是
+`chunks_fts MATCH` 退化成 `INDEX 0:=M7`——**对每一个候选块单独跑一次全文匹配**。
+`community_docs` 有 754 页、`blueprint_api` 有 7,055 页，几千次全文查询就是那
+60 秒。全程没有任何异常，所以 `--no-fetch` 当然也去不掉。
+
+**改动**：`docatlas/search.py` 的两处全文查询（`_fts_hits`、
+`_legacy_section_search`）改用 `CROSS JOIN`——在 SQLite 里它的语义就是"不许重排
+这两张表的顺序"，强制全文索引当外层循环。同时把 `_entity_hits` 里
+`名称=? OR 别名=?` 这种跨两张表的 OR 拆成 `UNION` 两条分支（同样是会让优化器
+整个放弃索引的写法）。
+
+**没有做的事**：没有加超时、没有加进度输出、没有加取消机制。议题的"可能方向"
+提过这些，但延迟的来源是一条本该是毫秒级的查询，加超时只会把一个 bug 变成一个
+"功能"。查询恢复到亚秒之后，这些机制都没有存在的理由。
+
+**留下的护栏**：`docs/ARCHITECTURE.md` 新增一节写明"检索的连接顺序不能交给
+优化器"，把 0.05 秒 vs 44 秒的实测写进去——这类退化不报错，只能靠知道它存在。
+
+## 外部关联
+
+- GitHub Issue：
+- 修复 PR：
