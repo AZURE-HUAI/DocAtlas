@@ -165,6 +165,53 @@ DocAtlas 的关系能力用于把散落在不同页面中的相关知识连接�
 在那之前，判断原则不变：**连接、存储、查询、解释关系尽量通用；
 "为什么两个实体有关"允许领域独立扩展。**
 
+### 2026-07-26：cppreference 与 Blender 的真实关系合同验证
+
+本轮满足了议题原先提出的“第二个非 Unreal 数据集”触发条件，而且同时覆盖两个
+领域。两者均未配置领域 `knowledge` 包，只使用通用官方链接关系：
+
+- cppreference 的 `std::integral ↔ std::is_integral` 与
+  `std::make_unique ↔ std::unique_ptr` 完成按需增量关系验证。
+- Blender Geometry 的 Named / Capture Attribute 完成完整索引验证，Sample Index
+  完成按需增量验证。
+- Blender Shader 的 Bump / Normal Map / Displacement 完成完整索引验证。
+
+至少 42 条返回记录使用同一组字段：
+`relation_type`、`direction`、`evidence_kind`、`confidence`、`note`、
+`evidence_url`。所有通用关系均为 `official_link`、置信度 1.0，方向和证据 URL
+在线核对正确，没有出现实体、方向、证据或置信度表达错误。
+
+适配器准备阶段也暴露了标准合同的价值：cppreference 与 Blender 原文使用相对链接；
+在来源层规范化成绝对固定版本 URL 前，内容能检索但关系数为 0，
+`relation_evidence_coverage` 会失败。规范化后，两库无需修改关系核心即可产出关系。
+
+另一个边界是 inventory 覆盖：Shader Group 页链接到 Interface Node Groups，但
+目标页不在 Blender 数据集清单，所以实体存在却无关系。这应归因于来源清单范围
+（`BUG-011`），不能误判为通用关系或领域扩展失败。
+
+结论更新：现有通用关系模型已经跨领域复用成功；下一步更值得讨论的是如何通过 MCP
+以类型化、中立合同公开这些字段，以及如何标准化适配器与 inventory 的能力声明，
+详见 `ENH-006`。
+
+### 2026-07-26：UE 关系工具的实体粒度缺口
+
+通过已开启的 UE 5.8 MCP 直接调用 `docatlas_related`：
+
+- `Set Timer by Function Name` 能返回蓝图节点 ↔
+  `UKismetSystemLibrary::K2_SetTimer` 的 `blueprint_cpp_api` 关系，以及节点 →
+  `UKismetSystemLibrary` 的 `targets_type` 关系；关系方向、证据、置信度和出处完整。
+- `TargetArmLength` 已存在于 `USpringArmComponent` 的 C++ 属性表，普通搜索可命中；
+  但 `Set Target Arm Length` 和 `TargetArmLength` 都返回 `entity_not_found`。
+
+这说明现有关系系统已经能连接“有独立页面的蓝图节点和 C++ 符号”，但尚未把类页面
+表格中的属性提升为独立实体，也没有显式建立
+`BlueprintReadWrite property ↔ generated Getter/Setter node` 关系。查询别名解决的
+只是“搜得到属性所在页面”，不能替代关系图中的实体和边。
+
+后续实现这一关系时，UE 领域包负责识别 `BlueprintReadWrite` 及自动访问器命名规则；
+通用核心仍只负责存储和查询实体、方向、证据与置信度，MCP 按 `ENH-006` 的中立合同
+原样公开。
+
 ## 外部关联
 
 - GitHub Issue：

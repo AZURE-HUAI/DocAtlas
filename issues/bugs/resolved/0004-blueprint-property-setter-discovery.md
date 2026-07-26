@@ -2,15 +2,15 @@
 id: BUG-004
 title: "蓝图属性 Setter 难以按节点显示名检索和关联"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: unreal-knowledge
 labels: [search, related, unreal, blueprint, aliases]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [BUG-005, ENH-003]
 ---
 

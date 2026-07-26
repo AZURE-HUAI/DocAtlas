@@ -2,15 +2,15 @@
 id: ENH-001
 title: "Skill 安装器支持多个客户端"
 type: enhancement
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: installer
 labels: [skill, installer, codex, claude-code, windows]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: []
 ---
 

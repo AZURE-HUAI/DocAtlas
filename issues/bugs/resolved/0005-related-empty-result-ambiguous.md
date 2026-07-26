@@ -2,15 +2,15 @@
 id: BUG-005
 title: "`related` 用空数组同时表示多种失败状态"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: medium
 area: related
 labels: [related, diagnostics, cli, mcp, api-contract]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
-fix_pr: null
+fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
 related: [BUG-003, BUG-004, ENH-002]
 ---
 
