@@ -13,7 +13,10 @@
 
 ## 未解决问题
 
-（暂无。）
+| 编号 | 标题 | 状态 | 优先级 |
+|---|---|---|---|
+| <a id="bug-008"></a>[BUG-008](bugs/unresolved/0008-ask-pending-pages-require-route-slug.md) | `ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面 | open | high |
+| <a id="bug-011"></a>[BUG-011](bugs/unresolved/0011-blender-inventory-misses-node-workflow-pages.md) | Blender 数据集清单遗漏节点工作流所需的跨目录基础页 | open | high |
 
 ## 已解决问题
 
@@ -26,16 +29,16 @@
 | <a id="bug-005"></a>[BUG-005](bugs/resolved/0005-related-empty-result-ambiguous.md) | `related` 用空数组同时表示多种失败状态 | resolved | medium |
 | <a id="bug-006"></a>[BUG-006](bugs/resolved/0006-inventory-validation-allows-empty-datasets.md) | inventory 验收会把空数据集和空分类判为通过 | resolved | high |
 | <a id="bug-007"></a>[BUG-007](bugs/resolved/0007-sample-per-category-redistributes-quota.md) | `sample-per-category` 会把分类缺额补抓到其他分类 | resolved | medium |
-| <a id="bug-008"></a>[BUG-008](bugs/resolved/0008-ask-pending-pages-require-route-slug.md) | `ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面 | resolved | high |
 | <a id="bug-009"></a>[BUG-009](bugs/resolved/0009-non-ue-datasets-mislabeled-as-ue.md) | 非 Unreal 数据集仍被标记为 UE 和 ue_version | resolved | medium |
 | <a id="bug-010"></a>[BUG-010](bugs/resolved/0010-linked-headings-generate-broken-source-anchors.md) | 含 Markdown 链接的标题会生成不可跳转的来源锚点 | resolved | medium |
-| <a id="bug-011"></a>[BUG-011](bugs/resolved/0011-blender-inventory-misses-node-workflow-pages.md) | Blender 数据集清单遗漏节点工作流所需的跨目录基础页 | resolved | high |
 | <a id="bug-012"></a>[BUG-012](bugs/resolved/0012-class-members-are-not-entities.md) | 类页面成员表里的属性和方法没有成为实体 | resolved | high |
 | <a id="bug-013"></a>[BUG-013](bugs/resolved/0013-linked-pages-never-enter-the-inventory.md) | 范围内正文引用到的页面永远进不了清单 | resolved | high |
 
 ## 未解决增强建议
 
-（暂无。）
+| 编号 | 标题 | 状态 | 优先级 |
+|---|---|---|---|
+| — | 暂无 | — | — |
 
 ## 已解决增强建议
 
@@ -50,6 +53,7 @@
 | <a id="enh-007"></a>[ENH-007](enhancements/resolved/0007-natural-language-candidate-fetch.md) | AI/Skill 将自然语言问题落成官方术语后查询 | resolved | low |
 | <a id="enh-008"></a>[ENH-008](enhancements/resolved/0008-structured-version-intent-contract.md) | 版本意图的跨层结构化合同 | resolved | high |
 | <a id="enh-009"></a>[ENH-009](enhancements/resolved/0009-fourth-domain-generalisation-acceptance.md) | 用陌生领域验收分层架构：Roblox Creator Hub | resolved | high |
+| <a id="enh-010"></a>[ENH-010](enhancements/resolved/0010-related-safe-fetch-pending-targets.md) | `related` 安全补抓 pending 官方目标并增量建立关系 | closed | medium |
 
 ## 维护
 

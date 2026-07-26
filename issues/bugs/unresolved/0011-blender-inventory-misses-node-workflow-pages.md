@@ -2,13 +2,13 @@
 id: BUG-011
 title: "Blender 数据集清单遗漏节点工作流所需的跨目录基础页"
 type: bug
-status: resolved
-lifecycle: resolved
+status: open
+lifecycle: unresolved
 priority: high
 area: sources
 labels: [blender, inventory, source-adapter, relations]
 reported_at: 2026-07-26
-resolved_at: 2026-07-26
+resolved_at: null
 github_issue: null
 fix_pr: null
 related: [BUG-008, BUG-013]
@@ -215,6 +215,52 @@ python -m docatlas related "Interface Node Groups"
 52 页正文里没有任何一页链到它——机制只认站点自己写下的引用，不替它补。
 再抓几页 Shader Editor 相关的页面之后它会自己出现（第二轮已经出现了
 `/editors/geometry_node`）。
+
+### 2026-07-26：Shader Editor 真实学习流再次复现
+
+本轮数据集已增长到 647 页、60 个已抓页面，inventory/content 验收均通过，但
+Shader 学习流第一轮和主智能体复查仍无法取得 Shader Editor：
+
+```text
+docatlas_ask(
+  dataset_id="blender-manual-5.2",
+  category="shader_nodes",
+  query="Shader Editor",
+  version_target="5.2",
+  version_mode="strict",
+  token_budget=1500,
+  fetch_limit=1,
+  format="json"
+)
+```
+
+- `ask` 返回 `status=ok`、`fetch.requested=0`，首位为 K143
+  `RGB Curves Node > Examples`。
+- 同条件 `search "Shader Editor"` 首位仍为 K143；前八名没有目标页。
+- `related "Shader Editor"` 返回 `entity_not_found`，并声称“全站清单里也没有
+  对得上的页面”“说明官方文档确实没有这一页”。
+- 固定版本官网
+  `https://docs.blender.org/manual/en/5.2/editors/shader_editor.html` 实测
+  HTTP 200，标题为 `Shader Editor - Blender 5.2 LTS Manual`。
+
+这不只是普通排序偏差：目标页仍未进入清单，且失败诊断把来源范围缺口错误表述为
+官方文档不存在。测试方向明确要求覆盖 Shader Editor，因此重新打开本议题；原解决
+历史和一跳引用闭包的边界全部保留。
+
+## 2026-07-26 保留资格审查
+
+本议题继续保持 `open`，但当前未解决范围收窄为 **Shader Editor 的清单覆盖和错误
+诊断**：
+
+- **会造成实际误导：** 学习流程第一步就无法取得 Shader Editor，且系统把“本数据集
+  没收录”说成“官方文档确实没有”，不是无关紧要的边角差异。
+- **属于既定范围：** 数据集配置把 `Shader Editor` 明确列为触发词，固定版本官方页
+  也存在；因此它不是用户临时要求把 Blender 整站都收进来。
+- **可由程序修复：** 来源适配器或数据集配置可以用有限的附加入口收录该页，也可以
+  让诊断在没有全站证据时只说“当前清单未覆盖”。两种方案都不需要 AI 猜答案。
+
+已经由一跳引用闭包解决的 Modifier、Node Groups 和通用缺页检测保留为历史记录，
+不再作为本次未解决范围。修复不得以无限扩大到 Blender 全站为代价。
 
 ## 外部关联
 
