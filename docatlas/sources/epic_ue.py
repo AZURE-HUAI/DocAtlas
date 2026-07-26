@@ -44,6 +44,29 @@ def categorize_sitemap(dataset, url: str) -> str | None:
     return None
 
 
+# 站点地图之外的页面属于哪一类，看地址第一段。这是 Epic 的地址布局，
+# 不是这一轮发现的那几个目录——下面三条是清单里**仅有的**三个一级目录，
+# 各自纯度都是 100%：`API/` 139,268 页、`BlueprintAPI/` 56,894 页、
+# `node-reference/` 1,097 页。文档根下的扁平页在地址上分不出教程还是社区
+# 文档，所以不猜——那种页面留给数据集自己表态。
+_PATH_CATEGORIES = {
+    "api": "cpp_api",
+    "blueprintapi": "blueprint_api",
+    "node-reference": "node_reference",
+}
+
+
+def categorize_path(dataset, path: str) -> str | None:
+    """站内文档路径属于哪个分类；分不出来就返回 None，绝不猜。"""
+    prefix = _doc_prefix(dataset)
+    if not path.casefold().startswith(prefix.casefold()):
+        return None
+    segments = [s for s in path[len(prefix):].split("/") if s]
+    if len(segments) < 2:
+        return None  # 根下的扁平页，地址里没有分类信息
+    return _PATH_CATEGORIES.get(segments[0].casefold())
+
+
 def normalize_location(dataset, location: str) -> tuple[str, str] | None:
     """站点地图里的一条 URL → (标准路径, 正式地址)；不要的返回 None。
 

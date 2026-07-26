@@ -2,16 +2,16 @@
 id: BUG-011
 title: "Blender 数据集清单遗漏节点工作流所需的跨目录基础页"
 type: bug
-status: in_progress
-lifecycle: unresolved
+status: resolved
+lifecycle: resolved
 priority: high
 area: sources
 labels: [blender, inventory, source-adapter, relations]
 reported_at: 2026-07-26
-resolved_at: null
+resolved_at: 2026-07-26
 github_issue: null
 fix_pr: null
-related: [BUG-008]
+related: [BUG-008, BUG-013]
 ---
 
 # 问题
@@ -177,6 +177,44 @@ python -m docatlas related "Interface Node Groups"
 **仍未解决**：Blender 数据集本身的枚举范围。需要重新建立
 `blender-manual-5.2` 与对应适配器后，按议题"验证"一节的四条命令重跑；
 届时上面这套诊断会直接指出该补哪些目录。
+
+### 2026-07-26（续）：`blender-manual-5.2` 恢复之后，枚举范围也解决了
+
+数据集和适配器都回来了，于是上一段留下的那半件事可以做完。做的时候发现，
+"Blender 缺页"和"UE 55 个未覆盖目录"根本是同一件事的两种表现，所以机制只
+写了一套，记在 `BUG-013`。
+
+先要修的是一个更靠前的错误：**Blender 适配器把"这是不是官方文档链接"和
+"这一页在不在我们的收录范围"当成了同一个问题。**
+`normalize_link_target` 直接调 `normalize_location`，而后者要求路径命中
+`[categories]` 里声明的目录。结果是节点页链到 `interface/controls/nodes/groups`
+时，这条链接被记成**站外链接**——于是"清单漏了这个目录"这件事在库里彻底
+看不见：`missing_targets` 一直是 **0**。
+
+拆开之后，同一个库里立刻显出 **27 个**被范围内正文引用、清单里却没有的手册页
+（`_images/*.png` 这类素材按 `.html` 后缀挡掉了）。补抓 `Group` 两页之后
+涨到 29，其中就有议题点名的两页：
+
+```text
+   2  /interface/controls/nodes/groups        ← 议题第 2 个目标
+   1  /modeling/modifiers/geometry_nodes      ← 议题第 1 个目标
+```
+
+`/modeling/modifiers/geometry_nodes` 只被引用 **1 次**。这条数据直接决定了
+`--min-links` 的默认值必须是 1：设成 2 就正好把议题的主目标漏掉。
+
+收录之后重跑议题"复现"一节的命令：
+
+| 查询 | 改前 | 改后 |
+|---|---|---|
+| `related "Geometry Nodes Modifier"` | `entity_not_found`，并断言"全站清单里也没有对得上的页面" | 清单里有，给出路径和 `get` 命令；抓回来后 `status=ok` |
+| `related "Interface Node Groups"` | 同上 | 清单里有 `/interface/controls/nodes/groups`；该页官方标题是 `Node Groups`，按官方名查得到关系 |
+| `related "Node Groups"`（抓取后） | —— | `ok`，与 `Geometry Nodes Modifier`、`Attributes`、`Group` 等**跨目录**页面成关系 |
+
+议题期望的三条全部达成。`editors/shader_editor` 没有进来，因为目前已抓的
+52 页正文里没有任何一页链到它——机制只认站点自己写下的引用，不替它补。
+再抓几页 Shader Editor 相关的页面之后它会自己出现（第二轮已经出现了
+`/editors/geometry_node`）。
 
 ## 外部关联
 

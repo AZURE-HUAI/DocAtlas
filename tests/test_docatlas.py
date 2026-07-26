@@ -32,8 +32,8 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, crawl, dataset, db, discover, members, net,
-    ondemand, constants, relations, runtime, search, store, text, validate,
+    chunking, config, context, coverage, crawl, dataset, db, discover, members,
+    net, ondemand, constants, relations, runtime, search, store, text, validate,
     versions,
 )
 from docatlas import mcpserver  # noqa: E402
@@ -3337,6 +3337,250 @@ class UnrealMemberTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+
+class LinkClosureTests(unittest.TestCase):
+    """BUG-011 / BUG-013：范围内正文引用到、清单里却没有的页面怎么收进来。
+
+    假适配器只回答"这条路径属于本站哪一类"，一行具体目录都没写进核心。
+    """
+
+    class ToySource:
+        @staticmethod
+        def categorize_path(dataset, path):
+            return "guides" if path.startswith("/guide/") else None
+
+        @staticmethod
+        def normalize_link_target(dataset, target_url):
+            return target_url.removeprefix("https://example.invalid") or None
+
+        @staticmethod
+        def canonical_url(dataset, path):
+            return f"https://example.invalid{path}?v={dataset.version}"
+
+    def _library(self, links):
+        connection = temp_db(self)
+        connection.execute(
+            "INSERT INTO sitemaps(url, category, status)"
+            " VALUES('https://example.invalid/feed.xml', 'guides', 'success')"
+        )
+        page_id = connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, status, title,"
+            " route_depth, doc_version, locale)"
+            " VALUES('https://example.invalid/guide/start', '/guide/start',"
+            " 'guides', 'https://example.invalid/feed.xml', 'success', 'Start',"
+            " 2, '1', 'en')"
+        ).lastrowid
+        for target, count in links.items():
+            for index in range(count):
+                connection.execute(
+                    "INSERT INTO page_links(from_page_id, target_url, target_path,"
+                    " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+                    " VALUES(?, ?, ?, ?, 'reference', 'official_link', 'u', 'now')",
+                    (page_id, f"https://example.invalid{target}", target, f"a{index}"),
+                )
+        connection.commit()
+        return connection
+
+    def test_a_referenced_page_the_adapter_recognises_is_admitted(self):
+        connection = self._library({"/guide/advanced": 1})
+        with using(source=self.ToySource):
+            outcome = coverage.admit_linked_targets(connection)
+        self.assertEqual(outcome["admitted"], 1)
+        row = connection.execute(
+            "SELECT category, status, sitemap_url FROM pages"
+            " WHERE path='/guide/advanced'"
+        ).fetchone()
+        self.assertEqual(row["category"], "guides")
+        self.assertEqual(row["status"], "pending")
+        # 来路必须在库里看得出来：它不是任何清单入口列出来的。
+        self.assertIsNone(row["sitemap_url"])
+
+    def test_the_address_is_rebuilt_not_copied_from_the_link(self):
+        """链接里那串地址带着别人的包袱，不能直接当页面地址存下来。
+
+        实测 Unreal 的正文链接会带 `application_version=5.5`——原样存进 5.8
+        的库，引用给用户的就是一条 5.5 的地址。Blender 的会带 `#片段`。
+        """
+        connection = self._library({"/guide/advanced": 1})
+        connection.execute(
+            "UPDATE page_links SET target_url=? WHERE target_path='/guide/advanced'",
+            ("https://example.invalid/guide/advanced?v=0.1#section",),
+        )
+        connection.commit()
+        with using(source=self.ToySource) as workspace:
+            coverage.admit_linked_targets(connection)
+            expected = f"https://example.invalid/guide/advanced?v={workspace.version}"
+        self.assertEqual(
+            connection.execute(
+                "SELECT url FROM pages WHERE path='/guide/advanced'"
+            ).fetchone()["url"],
+            expected,
+        )
+
+    def test_a_page_outside_the_declared_scope_needs_the_dataset_to_say_so(self):
+        """适配器不认得的路径，收不收由数据集表态，核心不替它拿主意。"""
+        connection = self._library({"/manual/glossary": 3})
+        with using(source=self.ToySource, dataset={"inventory": {}}):
+            silent = coverage.admit_linked_targets(connection, dry_run=True)
+        self.assertEqual(silent["admitted"], 0)
+        self.assertEqual(silent["outside_scope"], 1)
+        with using(
+            source=self.ToySource,
+            dataset={"inventory": {"referenced_category": "referenced"}},
+        ):
+            opted_in = coverage.admit_linked_targets(connection)
+        self.assertEqual(opted_in["admitted"], 1)
+        self.assertEqual(opted_in["by_category"], {"referenced": 1})
+
+    def test_the_closure_only_walks_one_hop(self):
+        """收进来的页面处于 pending，它们自己的链接不会跟着展开。
+
+        再往外一层必须是一次明确的决定，不能是无声的雪球。
+        """
+        connection = self._library({"/guide/advanced": 1})
+        with using(source=self.ToySource):
+            coverage.admit_linked_targets(connection)
+            # 新页面自己也链出去，但它还没抓，所以不该被算作起点。
+            new_page = connection.execute(
+                "SELECT id FROM pages WHERE path='/guide/advanced'"
+            ).fetchone()["id"]
+            connection.execute(
+                "INSERT INTO page_links(from_page_id, target_url, target_path,"
+                " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+                " VALUES(?, 'https://example.invalid/guide/deeper', '/guide/deeper',"
+                " 'x', 'reference', 'official_link', 'u', 'now')",
+                (new_page,),
+            )
+            connection.commit()
+            second = coverage.admit_linked_targets(connection, dry_run=True)
+        self.assertEqual(second["candidates"], 0)
+
+    def test_min_links_and_limit_bound_a_round(self):
+        connection = self._library({"/guide/a": 3, "/guide/b": 1})
+        with using(source=self.ToySource):
+            self.assertEqual(
+                coverage.admit_linked_targets(
+                    connection, min_links=2, dry_run=True
+                )["admitted"],
+                1,
+            )
+            self.assertEqual(
+                coverage.admit_linked_targets(connection, limit=1, dry_run=True)[
+                    "admitted"
+                ],
+                1,
+            )
+
+    def test_a_dataset_that_declares_nothing_admits_nothing(self):
+        """没有 categorize_path、也没有范围策略的数据集必须完全不受影响。"""
+
+        class Bare:
+            @staticmethod
+            def normalize_link_target(dataset, target_url):
+                return None
+
+        connection = self._library({"/guide/advanced": 1})
+        with using(source=Bare, dataset={"inventory": {}}):
+            outcome = coverage.admit_linked_targets(connection)
+        self.assertEqual(outcome["admitted"], 0)
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM pages WHERE path='/guide/advanced'"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_stored_links_are_rejudged_when_the_rule_changes(self):
+        connection = self._library({})
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+            " VALUES(1, 'https://example.invalid/guide/late', NULL, 'a',"
+            " 'reference', 'external_link', 'u', 'now')"
+        )
+        # 模拟一个规则改动之前建的库：版本戳还是旧的。
+        connection.execute("DELETE FROM metadata WHERE key='link_targets'")
+        connection.commit()
+        with using(source=self.ToySource):
+            self.assertEqual(coverage.reclassify_links(connection), 1)
+            # 版本戳写下之后不该重复重判。
+            self.assertEqual(coverage.reclassify_links(connection), 0)
+        row = connection.execute(
+            "SELECT target_path, evidence_kind FROM page_links"
+            " WHERE target_url LIKE '%/guide/late'"
+        ).fetchone()
+        self.assertEqual(row["target_path"], "/guide/late")
+        self.assertEqual(row["evidence_kind"], "official_link")
+
+
+class AdapterScopeTests(unittest.TestCase):
+    """两个真实适配器各自怎么划范围。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ue = dataset.load_dataset("epic-ue-5.8", runtime.DATASET_CONFIG_DIR)
+        cls.blender = dataset.load_dataset(
+            "blender-manual-5.2", runtime.DATASET_CONFIG_DIR
+        )
+
+    def test_unreal_reads_the_category_off_the_first_path_segment(self):
+        cases = {
+            "/documentation/unreal-engine/API/Runtime/Engine/AActor/Tick": "cpp_api",
+            "/documentation/unreal-engine/BlueprintAPI/Camera/SetFOV": "blueprint_api",
+            "/documentation/unreal-engine/node-reference/x/y": "node_reference",
+        }
+        for path, expected in cases.items():
+            self.assertEqual(epic_ue.categorize_path(self.ue, path), expected)
+
+    def test_unreal_refuses_to_guess_for_flat_root_pages(self):
+        """根下的扁平页在地址上分不出教程还是社区文档，猜了才是错的。
+
+        实测这一批里还混着 5.6 的页面，一律收进来会污染 5.8 的库。
+        """
+        for path in (
+            "/documentation/unreal-engine/starter-content-in-unreal-engine",
+            "/documentation/unreal-engine/unreal-engine-5-6-release-notes",
+        ):
+            self.assertIsNone(epic_ue.categorize_path(self.ue, path))
+
+    def test_blender_tells_official_link_apart_from_declared_scope(self):
+        """指向手册的链接就是官方链接，收不收录那个目录是另一回事。
+
+        两者混为一谈时，"清单漏了这个目录"在库里彻底看不见（BUG-011）。
+        """
+        base = "https://docs.blender.org/manual/en/5.2/"
+        outside = base + "interface/controls/nodes/groups.html"
+        self.assertEqual(
+            blender_manual.normalize_link_target(self.blender, outside),
+            "/interface/controls/nodes/groups",
+        )
+        self.assertIsNone(blender_manual.normalize_location(self.blender, outside))
+        self.assertIsNone(
+            blender_manual.categorize_path(
+                self.blender, "/interface/controls/nodes/groups"
+            )
+        )
+
+    def test_blender_keeps_assets_and_other_versions_out(self):
+        base = "https://docs.blender.org/manual/en/5.2/"
+        self.assertIsNone(
+            blender_manual.normalize_link_target(
+                self.blender, base + "_images/node-groups.png"
+            )
+        )
+        self.assertIsNone(
+            blender_manual.normalize_link_target(
+                self.blender,
+                "https://docs.blender.org/manual/en/4.2/modeling/modifiers/x.html",
+            )
+        )
+
+    def test_blender_declares_a_scope_policy_and_unreal_does_not(self):
+        self.assertEqual(
+            self.blender.inventory_option("referenced_category"), "referenced"
+        )
+        self.assertIsNone(self.ue.inventory_option("referenced_category"))
 
 
 if __name__ == "__main__":

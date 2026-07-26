@@ -155,10 +155,22 @@ def validate_contract(
             SELECT COUNT(*) FROM pages
             WHERE url IS NULL OR path IS NULL OR category IS NULL
                OR doc_version IS NULL OR locale IS NULL
-               OR route_depth IS NULL OR sitemap_url IS NULL
+               OR route_depth IS NULL
             """
         ).fetchone()[0],
-        "页面必须具有路径、类型、版本、语言和来源站点地图",
+        "页面必须具有路径、类型、版本和语言",
+    )
+    # 来源清单入口刻意不在上面那条里：页面有两种来路，清单入口列出来的，
+    # 和范围内正文引用进来的（`coverage.admit_linked_targets`，`sitemap_url`
+    # 留空）。把"必须有站点地图"写成硬要求，等于禁止第二种来路存在。
+    add(
+        "page_provenance",
+        connection.execute(
+            "SELECT COUNT(*) FROM pages WHERE sitemap_url IS NULL"
+            " AND path NOT IN (SELECT target_path FROM page_links"
+            "                  WHERE target_path IS NOT NULL)"
+        ).fetchone()[0],
+        "没有来源清单入口的页面，必须是被正文引用进来的",
     )
     duplicate_paths = connection.execute(
         """

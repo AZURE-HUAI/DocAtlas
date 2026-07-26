@@ -34,6 +34,15 @@ def _category_for_docname(dataset, docname: str) -> str | None:
     return None
 
 
+def categorize_path(dataset, path: str) -> str | None:
+    """手册路径属于数据集声明的哪个目录；都不在就返回 None。
+
+    返回 None 不代表"这不是手册页"，只代表"不在我们声明的目录里"——
+    要不要把这种页面收进来是数据集的范围策略，见 `[inventory]`。
+    """
+    return _category_for_docname(dataset, path.strip("/"))
+
+
 def inventory_feeds(dataset) -> list[tuple[str, str | None]]:
     return [(dataset.option("search_index", ""), None)]
 
@@ -84,8 +93,29 @@ def document_request_url(dataset, path: str) -> str:
 
 
 def normalize_link_target(dataset, target_url: str) -> str | None:
-    normalized = normalize_location(dataset, target_url)
-    return normalized[0] if normalized else None
+    """正文里的这条链接指向本手册的哪一页；不是手册页就返回 None。
+
+    和 `normalize_location` 差一个条件：**不看分类**。一条指向固定版本手册
+    某一页的链接就是官方文档链接，我们收不收录那个目录是我们的范围决定，
+    不是这条链接的性质。两者混为一谈的后果是：节点页链到
+    `interface/controls/nodes/groups` 会被记成站外链接，于是"清单漏了这个
+    目录"这件事在库里彻底看不见（BUG-011）。
+    """
+    parsed = urllib.parse.urlsplit(html.unescape(target_url))
+    expected_host = urllib.parse.urlsplit(_base_url(dataset)).netloc.casefold()
+    if parsed.netloc and parsed.netloc.casefold() != expected_host:
+        return None
+    path = urllib.parse.unquote(parsed.path)
+    prefix = _manual_prefix(dataset)
+    if path.startswith(prefix):
+        path = "/" + path[len(prefix):]
+    elif parsed.netloc:
+        return None  # 别的版本或别的语言，不是这个数据集的页面
+    # 手册页一律是 .html。`_images/…png`、`_downloads/…zip` 是素材不是文档，
+    # 收进清单只会得到一堆抓不出正文的死页。
+    if not path.endswith(".html"):
+        return None
+    return path.removesuffix(".html").rstrip("/")
 
 
 def is_official_url(dataset, url: str) -> bool:

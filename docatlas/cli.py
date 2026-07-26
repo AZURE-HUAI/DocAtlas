@@ -31,6 +31,7 @@ from .documents import fetch_document
 from .store import store_document_result
 from .crawl import crawl_documents, reprocess_stored_documents
 from .assets import download_assets
+from .coverage import admit_linked_targets
 from .relations import build_cross_index, link_new_pages
 from .search import search_docs
 from .export import export_markdown
@@ -418,9 +419,18 @@ def command_related(args: argparse.Namespace) -> int:
     return 0 if result["status"] == "ok" else 1
 
 
-def command_inventory(_: argparse.Namespace) -> int:
+def command_inventory(args: argparse.Namespace) -> int:
     connection = connect_db()
     initialize_db(connection)
+    if args.admit_linked or args.show_linked:
+        outcome = admit_linked_targets(
+            connection, limit=args.limit, min_links=args.min_links,
+            dry_run=args.show_linked,
+        )
+        print(json.dumps(outcome, ensure_ascii=False, indent=2))
+        if args.show_linked:
+            connection.close()
+            return 0
     print(
         json.dumps(
             write_site_inventory(connection),
@@ -704,6 +714,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     inventory = subparsers.add_parser(
         "inventory", help="冻结并校验全站页面清单"
+    )
+    inventory.add_argument(
+        "--show-linked",
+        action="store_true",
+        help="只报告：范围内正文引用到、清单里却没有的页面（不写库）",
+    )
+    inventory.add_argument(
+        "--admit-linked",
+        action="store_true",
+        help="把这些被引用的页面收进清单（状态 pending，只走一跳）",
+    )
+    inventory.add_argument(
+        "--min-links", type=int, default=1, help="至少被引用多少次才收"
+    )
+    inventory.add_argument(
+        "--limit", type=int, default=None, help="本轮最多收多少页"
     )
     inventory.set_defaults(func=command_inventory)
 

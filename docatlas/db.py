@@ -448,6 +448,11 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     from .members import backfill as backfill_page_members
 
     backfill_page_members(connection)
+    # "这条链接算不算站内文档"的规则改了之后，已存链接也要跟着重判，
+    # 否则同一个库里两套判断，清单缺口统计会时准时不准。
+    from .coverage import reclassify_links
+
+    reclassify_links(connection)
     connection.commit()
 
 
