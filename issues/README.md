@@ -51,6 +51,11 @@
 | <a id="bug-003"></a>[BUG-003](bugs/unresolved/0003-set-field-of-view-not-found.md) | 本地搜索没有命中已存在的 `Set Field Of View` 蓝图 API 页面 | open | high |
 | <a id="bug-004"></a>[BUG-004](bugs/unresolved/0004-blueprint-property-setter-discovery.md) | 蓝图属性 Setter 难以按节点显示名检索和关联 | open | medium |
 | <a id="bug-005"></a>[BUG-005](bugs/unresolved/0005-related-empty-result-ambiguous.md) | `related` 用空数组同时表示多种失败状态 | open | medium |
+| <a id="bug-006"></a>[BUG-006](bugs/unresolved/0006-inventory-validation-allows-empty-datasets.md) | inventory 验收会把空数据集和空分类判为通过 | open | high |
+| <a id="bug-007"></a>[BUG-007](bugs/unresolved/0007-sample-per-category-redistributes-quota.md) | `sample-per-category` 会把分类缺额补抓到其他分类 | open | medium |
+| <a id="bug-008"></a>[BUG-008](bugs/unresolved/0008-ask-pending-pages-require-route-slug.md) | `ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面 | open | high |
+| <a id="bug-009"></a>[BUG-009](bugs/unresolved/0009-non-ue-datasets-mislabeled-as-ue.md) | 非 Unreal 数据集仍被标记为 UE 和 ue_version | open | medium |
+| <a id="bug-010"></a>[BUG-010](bugs/unresolved/0010-linked-headings-generate-broken-source-anchors.md) | 含 Markdown 链接的标题会生成不可跳转的来源锚点 | open | medium |
 
 ## 已解决问题
 
@@ -64,6 +69,7 @@
 | <a id="enh-001"></a>[ENH-001](enhancements/unresolved/0001-skill-installer-portability.md) | Skill 安装器支持多个客户端 | open | medium |
 | <a id="enh-002"></a>[ENH-002](enhancements/unresolved/0002-skill-mcp-integration.md) | Skill 与 MCP 形成明确的组合入口 | open | medium |
 | <a id="enh-003"></a>[ENH-003](enhancements/unresolved/0003-generic-relations-extensible-domains.md) | 关系能力通用化并允许领域独立扩展 | discussion | low |
+| <a id="enh-004"></a>[ENH-004](enhancements/unresolved/0004-non-sitemap-inventory-sources.md) | 来源适配器支持非 sitemap 的页面清单 | discussion | medium |
 
 ## 已解决增强建议
 
@@ -77,7 +83,7 @@
 - 文件名使用四位序号和简短英文描述，例如
   `0006-related-on-demand-fetch.md`。
 - 新议题先放入对应的 `unresolved` 目录。
-- 索引中的编号使用稳定锚点，例如 `<a id="bug-006"></a>`；GitHub Issue
+- 索引中的编号使用稳定锚点，例如 `<a id="bug-999"></a>`；GitHub Issue
   回链该锚点，档案封存或重新打开时不需要修改外部链接。
 - 一个文件只讨论一个可独立关闭的事项；相关事项通过 `related` 字段连接。
 - 完成后补充解决记录和验证结果，再移动到对应的 `resolved` 目录。

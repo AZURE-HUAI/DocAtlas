@@ -78,3 +78,27 @@ python -m docatlas related "Set Timer by Function Name"
 - 评估 CLI、MCP 和内部 Python API 哪些语义需要一致，哪些可以按入口呈现。
 
 具体返回格式应结合兼容性和调用方需求决定，示例中的状态名不是既定接口。
+
+## 调查记录
+
+### 2026-07-26：cppreference 与 Blender 小样
+
+新增跨数据集证据：
+
+```powershell
+python -m docatlas related "std::integral"
+python -m docatlas related "std::basic_string_view"
+python -m docatlas related "Mesh to Curve Node"
+python -m docatlas related "Curve to Mesh Node"
+python -m docatlas related "Mesh to Points Node"
+python -m docatlas related "Points to Vertices Node"
+```
+
+以上查询均在约 0.16–0.18 秒、退出码 0 后只返回 `[]`。在线对应页面存在；Blender
+`stats` 显示清单完整但目标正文仍为 pending，因此这些空数组至少混合了“实体尚未
+抓取”和“名称没有命中实体”。
+
+正向对照：Blender 的 Capture Attribute、Store Named Attribute、Named Attribute
+已抓取后，`related` 会返回实体、正反向 `official_link` 和 `confidence: 1.0`。
+另有已抓实体会返回实体对象加空 `relations`。这进一步确认调用方需要区分不同空
+状态，而不是把所有情况压成裸数组。
