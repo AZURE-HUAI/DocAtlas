@@ -75,7 +75,7 @@
 
 | 函数 | 干什么 |
 |---|---|
-| `sitemap_index_url(dataset)` | 站点地图总入口 |
+| `sitemap_index_url(dataset)` | 站点地图总入口（没有站点地图就不写，见下） |
 | `categorize_sitemap(dataset, url)` | 子地图属于哪一类；不要的返回 `None` |
 | `normalize_location(dataset, location)` | URL → `(标准路径, 正式地址)`；滤掉别的语言和非文档页 |
 | `canonical_url(dataset, path)` | 给人看、给引用用的正式地址 |
@@ -86,7 +86,7 @@
 | `entity_placement(dataset, category, segments)` | 路径片段 → 模块 / 归属类型 |
 | `document_locale(payload)` | **服务器实际给的语言**，没有返回 `None`——别省，站点没那个语言时通常不报错、默默给默认语言，不判断就会得到一个标着甲语言、装着乙语言的库 |
 
-站点没有 sitemap 时，改实现这两个（前两行就不用写）：
+站点没有 sitemap 时，改实现这两个，上表前两行整个不用写：
 
 | 函数 | 干什么 |
 |---|---|

@@ -1219,6 +1219,27 @@ class MetadataAndTagRenameTests(unittest.TestCase):
             ).fetchone()
         )
 
+    def test_sitemap_index_key_is_migrated_to_the_generic_name(self):
+        # 只有站点地图型来源有"总入口"，键名不该把这个假设写死在数据里。
+        self.connection.execute("DELETE FROM metadata WHERE key='inventory_index'")
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('sitemap_index', 'https://x/s.xml')"
+        )
+        self.connection.commit()
+        db.migrate_metadata_key(self.connection, "sitemap_index", "inventory_index")
+        self.connection.commit()
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM metadata WHERE key='sitemap_index'"
+            ).fetchone()
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "https://x/s.xml",
+        )
+
     def test_tag_type_renamed_when_only_old_type_present(self):
         self.connection.execute("DELETE FROM tags WHERE tag_type='doc_version'")
         self.connection.commit()
@@ -1539,13 +1560,49 @@ class InventoryFeedHookTests(unittest.TestCase):
             path = "/" + location.rsplit("/", 1)[-1]
             return (path, location)
 
-    def _connection(self):
+    def _connection(self, source=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         connection = connect_db(Path(directory.name) / "t.sqlite3")
-        initialize_db(connection)
         self.addCleanup(connection.close)
+        # 建库这一步也要跑在假来源上。先拿真来源初始化、之后才替换适配器，
+        # 等于永远测不到"这个来源根本没有站点地图"的那条路径。
+        with self.quiet_source(source or self.FakeSource):
+            initialize_db(connection)
         return connection
+
+    def test_a_feed_only_source_can_initialize_the_database(self):
+        # 只实现 inventory_feeds / read_feed 的来源没有 sitemap_index_url，
+        # 开库时无条件去问它要总入口，第一步就 AttributeError。
+        self.assertFalse(hasattr(self.FakeSource, "sitemap_index_url"))
+        connection = self._connection()
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "",
+        )
+        # 溯源信息缺一条不影响别的：库该建的都建齐了。
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()[0],
+            "3",
+        )
+
+    def test_sitemap_sources_still_record_their_index(self):
+        class WithSitemap(self.FakeSource):
+            @staticmethod
+            def sitemap_index_url(dataset):
+                return "https://example.invalid/sitemap.xml"
+
+        connection = self._connection(WithSitemap)
+        self.assertEqual(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='inventory_index'"
+            ).fetchone()[0],
+            "https://example.invalid/sitemap.xml",
+        )
 
     def test_adapter_supplied_inventory_lands_in_the_same_tables(self):
         connection = self._connection()
@@ -1586,14 +1643,20 @@ class InventoryFeedHookTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def quiet_source(self, source):
-        """换掉适配器，顺便把进度日志收进黑洞——测试输出该只有测试结果。"""
-        original = discover.SOURCE
-        discover.SOURCE = source
+        """换掉适配器，顺便把进度日志收进黑洞——测试输出该只有测试结果。
+
+        `db` 那份也要换。以前只换 `discover` 的，于是建库始终跑在真来源上，
+        "开库时无条件问来源要站点地图总入口"这个 bug 就一直没被测到。
+        """
+        originals = {discover: discover.SOURCE, db: db.SOURCE}
+        for module in originals:
+            module.SOURCE = source
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 yield
         finally:
-            discover.SOURCE = original
+            for module, original in originals.items():
+                module.SOURCE = original
 
     def _check_status(self, report, name):
         return next(c for c in report["checks"] if c["name"] == name)["status"]
