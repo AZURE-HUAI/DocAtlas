@@ -79,7 +79,7 @@ python -m docatlas ask "<要查的东西>" --token-budget 3000
 | `entity_not_found` | 查的是名字，没这个实体 | 看 `lookup.pending_pages`：清单有就补抓，没有就是官方确实没有 |
 | `knowledge_id_not_found` | 查的是 K 编号，编号不存在 | 编号是猜的或过期的，用 `search` 重新拿一个有效编号 |
 
-后两种状态还带一个 `next_steps` 数组，里面是可以直接执行的命令。
+除 `ok` 外的三种状态都带一个 `next_steps` 数组，里面是可以直接执行的命令。
 
 ## 上下文纪律
 

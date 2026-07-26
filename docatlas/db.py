@@ -10,6 +10,17 @@ from .config import DATASET, DB_PATH, DOC_PREFIX, LANGUAGE, SOURCE, VERSION
 from .util import utc_now
 
 
+def inventory_index_url() -> str:
+    """清单入口的总地址，纯粹是溯源信息，没有任何代码依赖它。
+
+    只有站点地图型来源才有"一个总入口"这个概念。用分页 API、目录页或静态
+    索引列页的来源（`inventory_feeds` / `read_feed`）压根没有总入口——那种
+    来源不实现 `sitemap_index_url`，这里就留空，而不是让开库直接崩掉。
+    """
+    index_url = getattr(SOURCE, "sitemap_index_url", None)
+    return index_url(DATASET) if index_url else ""
+
+
 def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
     # 第一次用的时候数据目录还不存在，不建的话 sqlite 只会甩一句
     # "unable to open database file"，看不出该干嘛。
@@ -247,6 +258,7 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     )
     rename_column_if_present(connection, "pages", "ue_version", "doc_version")
     migrate_metadata_key(connection, "ue_version", "doc_version")
+    migrate_metadata_key(connection, "sitemap_index", "inventory_index")
     migrate_tag_type(connection, "ue_version", "doc_version")
     add_column_if_missing(connection, "pages", "doc_version", "TEXT")
     add_column_if_missing(connection, "pages", "locale", "TEXT")
@@ -369,7 +381,7 @@ def initialize_db(connection: sqlite3.Connection) -> None:
             ("source", DATASET.name),
             ("source_adapter", DATASET.source),
             ("knowledge_pack", DATASET.knowledge or ""),
-            ("sitemap_index", SOURCE.sitemap_index_url(DATASET)),
+            ("inventory_index", inventory_index_url()),
             ("schema_version", "3"),
         ],
     )
