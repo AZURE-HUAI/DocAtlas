@@ -2,7 +2,7 @@
 id: BUG-008
 title: "`ask` 无法按官方页面名补抓 route slug 不完全相同的 pending 页面"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: high
 area: on-demand
@@ -96,11 +96,62 @@ python -m docatlas get "wavehtml" --limit 2
 
 ## 验证
 
-建立只抓少量正文的清单，对 C++ 限定符、带空格官方标题、`.html` 路径和短 slug
-分别测试“补抓前 → ask → 补抓后”结果。
+`InventoryCandidateTests` 用议题里的四种真实形状建了一份小清单，逐条验证：
+
+| 查询 | 清单里的路径 | 命中档位 | 修复前 |
+|---|---|---|---|
+| `Fields` | `/modeling/geometry_nodes/fields.html` | `exact_slug` | 要输入 `fieldshtml` 才行 |
+| `std::from_chars` | `/cpp/utility/from_chars` | `exact_slug` | 不命中 |
+| `Wave Texture Node` | `/render/shader_nodes/textures/wave.html` | `path_covers_query` | 不命中 |
+| `Set Field Of View` | `/…/BlueprintAPI/Camera/SetFieldOfView` | `exact_slug` | 只在无本地结果时才触发 |
+| `how do I make an object glow` | —— | 无候选 | —— |
+
+最后一行是反向保证：概念提问**不能**触发一堆补抓。
+
+真实库端到端（`epic-ue-5.8`）：
+
+```powershell
+python -m docatlas ask "Set Field Of View" --token-budget 1500
+# 2.72 秒；日志"本地还没有这一页，正在按需抓取 5 页（蓝图 API）…"；首条即目标页
+python -m docatlas ask "Blueprint Camera zoom Set Field Of View FOV" --token-budget 2500 --category blueprint_api --fetch-limit 3
+# 0.49 秒；首位 Set Field Of View（修复前该页完全不出现）
+```
+
+`PageSlugTests` 另外钉死"扩展名不算名字，但名字里的点要留着"：
+`fields.html` → `fields`，而 `UObject.Tick` → `uobjecttick`、`release-5.8` → `release58`。
+
+回归测试：128 用例全过。
 
 ## 解决记录
 
+**根因有三个，叠在一起才造成"查得到弱相关、查不到目标页"。**
+
+1. **slug 里带着站点实现细节**。`page_slug()` 直接取 URL 末段，
+   `fields.html` → `fieldshtml`，用户不可能这么打字。
+2. **只认整条查询的规范化结果**。`std::from_chars` → `stdfromchars`，
+   而页面地址里只有 `from_chars`；多词官方标题（`Wave Texture Node`）
+   与多段路径（`shader_nodes/textures/wave`）之间也没有任何桥。
+3. **有弱相关本地块就不补抓**。原判断是"本地有没有结果"，
+   于是小样里几条沾边的块直接把真正的目标页挡在门外。
+
+**改动**：
+
+- `db.page_slug()` 去掉文档类扩展名（固定白名单 `html/htm/php/md/…`，
+  避免把 `UObject.Tick` 这种名字里的点当扩展名切掉）。改了规则就得重算已有
+  数据，所以加了 `SLUG_VERSION` 标记：版本一变，`backfill_page_slugs()`
+  整批重算——否则同一个库里会并存两套 slug。
+- `text.qualifier_tail()`（核心、与产品无关）+ `knowledge/unreal.py::query_aliases()`
+  （领域）共同产出候选名，由 `search.query_names()` 按顺序去试。
+- `ondemand._candidate_queries()` 把定位整理成三档：`exact_slug` →
+  `slug_contains` → `path_covers_query`。第三档要求查询里**每个实词**都出现在
+  路径中且实词 ≥ 2 个，所以概念提问不会误触发，命中了那一页也确实值得取。
+- `context.answer()` 把补抓条件从"本地没有结果"改成
+  **"本地没有一条结果的页面标题就是所问的名字"**（`_has_exact_local_hit`）。
+
+**代价（有意接受）**：本地有结果但没有确切命中时，`ask` 现在会联网补抓，
+所以这类查询从 ~0.2 秒变成 ~1–3 秒。这正是议题要求的取舍——
+拿弱相关小样当完整回答的代价更大。需要纯离线时用 `--no-fetch`，
+补抓页数仍受 `--fetch-limit`（默认 5）硬约束。
 
 ## 外部关联
 

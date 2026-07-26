@@ -9,11 +9,55 @@ import time
 from typing import Any
 import zlib
 
-from .config import CATEGORY_PATTERNS, CHUNKER_VERSION
+from .config import CATEGORY_PATTERNS, CHUNKER_VERSION, DATASET
 from .net import REQUEST_LIMITER
 from .util import log
 from .documents import fetch_document, transform_document
 from .store import store_document_result
+
+# 先抓哪一类由数据集说了算；没配就一视同仁。
+CATEGORY_PRIORITY = DATASET.category_priority
+
+
+def _category_order() -> str:
+    """把优先级表编译成一段 SQL CASE。没配置时不排序，按 id 顺序抓。"""
+    if not CATEGORY_PRIORITY:
+        return "0"
+    branches = " ".join(
+        f"WHEN '{name}' THEN {rank}" for name, rank in CATEGORY_PRIORITY.items()
+    )
+    return f"CASE category {branches} ELSE {max(CATEGORY_PRIORITY.values()) + 1} END"
+
+
+def sample_quota(
+    connection: sqlite3.Connection,
+    sample_per_category: int,
+    *,
+    category: str | None = None,
+) -> dict[str, int]:
+    """每类还差几页才够 N。
+
+    "每类最多 N 页"是逐类的上限，不是全局配额：某类只有 9 页时，缺的 11 页
+    不该转到别的类去补——那会让别的类超过 N，抽样也就不成其为抽样了。
+    已经抓成功的算进这一类的额度里，所以重复运行不会越抓越多。
+    """
+    quota: dict[str, int] = {}
+    for key in CATEGORY_PATTERNS:
+        if category and key != category:
+            continue
+        available, done = connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(status IN ('pending', 'failed') AND attempts < 8), 0),
+                COALESCE(SUM(status IN ('success', 'redirect')), 0)
+            FROM pages WHERE category=?
+            """,
+            (key,),
+        ).fetchone()
+        remaining = min(sample_per_category - done, available)
+        if remaining > 0:
+            quota[key] = remaining
+    return quota
 
 
 def select_page_batch(
@@ -24,23 +68,24 @@ def select_page_batch(
     sample_per_category: int,
     category: str | None = None,
 ) -> list[sqlite3.Row]:
+    status_clause = "1=1" if refresh else "status IN ('pending', 'failed')"
     if sample_per_category:
         rows: list[sqlite3.Row] = []
-        for category in CATEGORY_PATTERNS:
-            status_clause = "1=1" if refresh else "status IN ('pending', 'failed')"
+        for key, remaining in sample_quota(
+            connection, sample_per_category, category=category
+        ).items():
             rows.extend(
                 connection.execute(
                     f"""
                     SELECT id, url, path, category FROM pages
-                    WHERE category=? AND {status_clause}
+                    WHERE category=? AND {status_clause} AND attempts < 8
                     ORDER BY CASE status WHEN 'failed' THEN 1 ELSE 0 END, id
                     LIMIT ?
                     """,
-                    (category, sample_per_category),
+                    (key, remaining),
                 )
             )
         return rows
-    status_clause = "1=1" if refresh else "status IN ('pending', 'failed')"
     category_clause = " AND category=?" if category else ""
     category_params: tuple[Any, ...] = (category,) if category else ()
     return list(
@@ -48,14 +93,7 @@ def select_page_batch(
             f"""
             SELECT id, url, path, category FROM pages
             WHERE {status_clause} AND attempts < 8{category_clause}
-            ORDER BY CASE category
-                WHEN 'guides' THEN 1
-                WHEN 'community_docs' THEN 2
-                WHEN 'blueprint_api' THEN 3
-                WHEN 'node_reference' THEN 4
-                WHEN 'python_api' THEN 5
-                WHEN 'cpp_api' THEN 6
-                ELSE 9 END, id
+            ORDER BY {_category_order()}, id
             LIMIT ?
             """,
             (*category_params, batch_size),
@@ -98,8 +136,13 @@ def crawl_documents(
     if max_pages:
         total_target = min(total_target, max_pages)
     if sample_per_category:
-        total_target = min(
-            total_target, sample_per_category * len(CATEGORY_PATTERNS)
+        # 逐类算，不是 N × 分类数：某类不足 N 页时，缺额不转给别的类。
+        quota = sample_quota(connection, sample_per_category, category=category)
+        total_target = min(total_target, sum(quota.values()))
+        log(
+            "抽样目标："
+            + "、".join(f"{key} {count}" for key, count in quota.items())
+            + f"，合计 {total_target:,}"
         )
     scope = f"，仅 {category}" if category else ""
     log(f"开始抓取正文，目标 {total_target:,} 页，并发 {workers}{scope}")

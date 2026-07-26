@@ -24,6 +24,7 @@ from .chunking import normalize_name
 from .config import DATASET, KNOWLEDGE
 from .dataset import knowledge_hook
 from .db import chunk_fts_mode, fts_mode
+from .text import qualifier_tail
 
 # 只在"任含"档剔除，避免 how/what 这类词淹没真正的关键词。
 STOPWORDS = frozenset(
@@ -137,28 +138,60 @@ def fts_expressions(query: str) -> list[tuple[str, str]]:
     return expressions
 
 
+def query_names(query: str) -> list[str]:
+    """这条查询该按哪几个名字去对实体表。
+
+    第一个永远是查询本身；后面是领域知识包补的说法（Unreal 的 `K2_` 前缀、
+    属性访问器脱 Get/Set 之类）。核心不知道这些规则，只负责按顺序试。
+    """
+    names = [query, qualifier_tail(query)]
+    expand = knowledge_hook(KNOWLEDGE, "query_aliases")
+    if expand:
+        names.extend(alias for alias in expand(query) if alias)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        normalized = normalize_name(name)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ordered.append(normalized)
+    return ordered
+
+
 def _entity_hits(
     connection: sqlite3.Connection, query: str, category: str | None, limit: int
 ) -> list[sqlite3.Row]:
-    normalized = normalize_name(query)
-    if not normalized:
-        return []
-    return list(
-        connection.execute(
+    """名称或别名精确命中的知识块。
+
+    刻意拆成两条 UNION 而不是 `名称=? OR 别名=?`：跨两张表的 OR 会让
+    SQLite 放弃索引去全表扫，两条分支各自都能走索引。
+    """
+    rows: list[sqlite3.Row] = []
+    seen: set[int] = set()
+    for normalized in query_names(query):
+        for row in connection.execute(
             f"""
-            SELECT DISTINCT {CHUNK_COLUMNS}
-            FROM entities e
-            LEFT JOIN entity_aliases a ON a.entity_id=e.id
-            JOIN knowledge_entities ke ON ke.entity_id=e.id
+            SELECT {CHUNK_COLUMNS}
+            FROM (
+                SELECT id AS entity_id FROM entities WHERE normalized_name=?
+                UNION
+                SELECT entity_id FROM entity_aliases WHERE normalized_alias=?
+            ) hit
+            JOIN knowledge_entities ke ON ke.entity_id=hit.entity_id
             JOIN chunks c ON c.id=ke.chunk_id
             JOIN pages p ON p.id=c.page_id
-            WHERE (e.normalized_name=? OR a.normalized_alias=?)
-              AND (? IS NULL OR p.category=?)
+            WHERE (? IS NULL OR p.category=?)
             LIMIT ?
             """,
             (normalized, normalized, category, category, limit),
-        )
-    )
+        ):
+            if row["id"] in seen:
+                continue
+            seen.add(row["id"])
+            rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
 
 
 def _fts_hits(
@@ -167,11 +200,14 @@ def _fts_hits(
     category: str | None,
     limit: int,
 ) -> list[sqlite3.Row]:
+    # CROSS JOIN 是有意的：它锁死连接顺序，逼 SQLite 从全文索引出发。
+    # 不锁的话，只要带上 `--category`，优化器就改从 pages 的分类索引出发，
+    # 于是每一个候选块都要单独跑一次全文匹配——实测 0.05 秒变 44 秒。
     sql = f"""
         SELECT {CHUNK_COLUMNS}
         FROM chunks_fts
-        JOIN chunks c ON c.id=chunks_fts.rowid
-        JOIN pages p ON p.id=c.page_id
+        CROSS JOIN chunks c ON c.id=chunks_fts.rowid
+        CROSS JOIN pages p ON p.id=c.page_id
         WHERE chunks_fts MATCH ?
     """
     params: list[Any] = [expression]
@@ -234,9 +270,14 @@ def _score(
         elif normalized_title.startswith(normalized_query):
             score += 6.0
 
-    # 大段的成员罗列几乎从不直接回答问题，但很占 token。
+    # 大段的成员罗列回答不了"这是什么、怎么做"，但很占 token，所以压后。
+    #
+    # 只在概念提问时压。问一个具体符号时，答案往往**就在**那张成员表里——
+    # 官方不给属性单独出页面，`TargetArmLength` 这类名字只记在所属类的成员
+    # 表中，一律压后就等于把唯一的官方定义压掉。
     if (
-        row["category"] in DATASET.verbose_categories
+        profile == "concept"
+        and row["category"] in DATASET.verbose_categories
         and row["knowledge_type"] in {"details", "navigation"}
         and (row["token_estimate"] or 0) > 300
     ):
@@ -325,11 +366,13 @@ def _legacy_section_search(
         expression = quote_fts_query(query)
         if not expression:
             return []
+        # CROSS JOIN 的理由同 `_fts_hits`：不锁连接顺序，带分类的查询会退化成
+        # 逐行跑全文匹配。
         sql = f"""
             SELECT {columns}
             FROM sections_fts
-            JOIN sections s ON s.id=sections_fts.rowid
-            JOIN pages p ON p.id=s.page_id
+            CROSS JOIN sections s ON s.id=sections_fts.rowid
+            CROSS JOIN pages p ON p.id=s.page_id
             WHERE sections_fts MATCH ?
         """
         params: list[Any] = [expression]

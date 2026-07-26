@@ -2,7 +2,7 @@
 id: BUG-007
 title: "`sample-per-category` 会把分类缺额补抓到其他分类"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: medium
 area: crawl
@@ -79,11 +79,52 @@ compiler_support 9
 
 ## 验证
 
-修复后用分类规模分别为 9、20、100 的清单请求每类 20 页，确认结果为
-9/20/20，且重复运行不会继续扩大已达到上限的分类。
+`SampleQuotaTests` 用议题要求的规模（9 / 20 / 100）验证：
+
+```python
+quota = crawl.sample_quota(connection, 20)
+# {'guides': 20, 'blueprint_api': 20, 'cpp_api': 9}      合计 49，不是 60
+rows = crawl.select_page_batch(connection, batch_size=999,
+                               refresh=False, sample_per_category=20)
+Counter(row["category"] for row in rows)
+# {'guides': 20, 'blueprint_api': 20, 'cpp_api': 9}
+```
+
+重复运行语义：某类已成功 20 页后再跑同一条命令 →
+`sample_quota` 返回 `{}`，`select_page_batch` 返回 `[]`，不会继续扩大。
+
+单分类运行：`sample_quota(connection, 5, category="cpp_api")` → `{'cpp_api': 5}`，
+其它分类不受影响。
+
+抓取主循环的日志现在会先把逐类目标打出来：
+
+```text
+抽样目标：guides 20、blueprint_api 20、cpp_api 9，合计 49
+```
+
+回归测试：128 用例全过。
 
 ## 解决记录
 
+**根因**：目标数和停止条件用的是全局公式 `sample_per_category × 分类数`，
+而 `select_page_batch` 每一轮又对每个分类各取 N 条。某类只有 9 页时，全局目标
+仍是 60，主循环就继续从别的分类补足总数，于是 `language` 抓到了 31 页。
+
+**改动**（`docatlas/crawl.py`）新增 `sample_quota()`，逐类计算"还差几页"：
+
+```python
+remaining = min(sample_per_category - 已成功页数, 可抓页数)
+```
+
+- 主循环的 `total_target` 改成 `sum(quota.values())`——上例是 49 而不是 60。
+- `select_page_batch` 按每类的 `remaining` 取，而不是一律取 N。
+- 已成功的页面计入该类额度，所以**重复运行不会继续扩大已达上限的分类**
+  （议题验证要求的第二条）。
+
+**顺带修掉的两处**：`select_page_batch` 原来在 `for category in CATEGORY_PATTERNS`
+里覆盖了同名的函数参数（抽样分支因此静默忽略 `--category`）；
+非抽样分支的排序里写死了 `guides/community_docs/blueprint_api/…` 这串 Unreal
+分类名——核心不该认识它们，已改为读数据集的 `category_priority`。
 
 ## 外部关联
 

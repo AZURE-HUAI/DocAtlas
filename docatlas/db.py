@@ -245,7 +245,8 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    add_column_if_missing(connection, "pages", "ue_version", "TEXT")
+    rename_column_if_present(connection, "pages", "ue_version", "doc_version")
+    add_column_if_missing(connection, "pages", "doc_version", "TEXT")
     add_column_if_missing(connection, "pages", "locale", "TEXT")
     add_column_if_missing(connection, "pages", "route_depth", "INTEGER")
     add_column_if_missing(connection, "pages", "parent_path", "TEXT")
@@ -361,7 +362,7 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         [
             ("dataset", DATASET.id),
             ("product", DATASET.product),
-            ("ue_version", VERSION),
+            ("doc_version", VERSION),
             ("language", LANGUAGE),
             ("source", DATASET.name),
             ("source_adapter", DATASET.source),
@@ -391,6 +392,19 @@ def add_column_if_missing(
     return True
 
 
+def rename_column_if_present(
+    connection: sqlite3.Connection, table: str, old: str, new: str
+) -> bool:
+    """老库改名用；SQLite 的 RENAME COLUMN 只改元数据，不重写数据。"""
+    columns = {
+        row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+    if old not in columns or new in columns:
+        return False
+    connection.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+    return True
+
+
 def route_metadata(path: str) -> tuple[int, str | None]:
     relative = path[len(DOC_PREFIX) :] if path.lower().startswith(DOC_PREFIX.lower()) else path.strip("/")
     segments = [segment for segment in relative.split("/") if segment]
@@ -403,7 +417,7 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             SELECT id, path FROM pages
-            WHERE ue_version IS NULL OR locale IS NULL OR route_depth IS NULL
+            WHERE doc_version IS NULL OR locale IS NULL OR route_depth IS NULL
                OR discovered_at IS NULL OR last_seen_at IS NULL
             """
         )
@@ -418,7 +432,7 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     connection.executemany(
         """
         UPDATE pages SET
-            ue_version=COALESCE(ue_version, ?),
+            doc_version=COALESCE(doc_version, ?),
             locale=COALESCE(locale, ?),
             route_depth=COALESCE(route_depth, ?),
             parent_path=COALESCE(parent_path, ?),
@@ -430,30 +444,50 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     )
 
 
+# 静态站点会把实现细节写进地址（`fields.html`、`index.php`）。用户说的是
+# 页面名，不会带这一截，所以定位前先去掉。只认这几种确定是"文件类型"的后缀，
+# 免得把 `UObject.Tick` 这种名字里的点当成扩展名切掉。
+PAGE_EXTENSIONS = frozenset(
+    {"html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "md", "txt"}
+)
+# 改了 page_slug 的规则就 +1：已有库里的 slug 会被整批重算，
+# 否则新规则只对以后发现的页面生效，同一个库里两套 slug 并存。
+SLUG_VERSION = "2"
+
+
 def page_slug(path: str) -> str:
     """URL 最后一段，标准化后用于精确定位。
 
     `/…/UKismetSystemLibrary/K2_SetTimer` → `k2settimer`，
-    而用户问的 `K2_SetTimer` 标准化后也是 `k2settimer`——两边能对上。
+    `/modeling/geometry_nodes/fields.html` → `fields`，
+    而用户问的 `K2_SetTimer` / `Fields` 标准化后正好是同一串。
     """
     from .text import normalize_name
 
     tail = urllib.parse.unquote(path.rstrip("/").rsplit("/", 1)[-1])
+    stem, dot, extension = tail.rpartition(".")
+    if dot and extension.casefold() in PAGE_EXTENSIONS:
+        tail = stem
     return normalize_name(tail)
 
 
 def backfill_page_slugs(connection: sqlite3.Connection) -> None:
-    rows = list(
-        connection.execute(
-            "SELECT id, path FROM pages WHERE normalized_slug IS NULL LIMIT 400000"
+    stored = connection.execute(
+        "SELECT value FROM metadata WHERE key='slug_version'"
+    ).fetchone()
+    stale = not stored or stored[0] != SLUG_VERSION
+    condition = "" if stale else " WHERE normalized_slug IS NULL"
+    rows = list(connection.execute(f"SELECT id, path FROM pages{condition}"))
+    if rows:
+        connection.executemany(
+            "UPDATE pages SET normalized_slug=? WHERE id=?",
+            [(page_slug(row["path"]), row["id"]) for row in rows],
         )
-    )
-    if not rows:
-        return
-    connection.executemany(
-        "UPDATE pages SET normalized_slug=? WHERE id=?",
-        [(page_slug(row["path"]), row["id"]) for row in rows],
-    )
+    if stale:
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('slug_version', ?)",
+            (SLUG_VERSION,),
+        )
     connection.commit()
 
 

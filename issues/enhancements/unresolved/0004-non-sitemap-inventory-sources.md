@@ -2,7 +2,7 @@
 id: ENH-004
 title: "来源适配器支持非 sitemap 的页面清单"
 type: enhancement
-status: discussion
+status: in_progress
 lifecycle: unresolved
 priority: medium
 area: sources
@@ -61,9 +61,57 @@ BUG-006 的验收要求保持一致。
 
 ## 验证
 
+`InventoryFeedHookTests` 用一个只会分页的假适配器（两个入口、三条页面、
+条目自带分类）验证：
+
+```python
+discover.SOURCE = FakeSource          # 只实现 inventory_feeds / read_feed
+discover.discover_inventory(connection, workers=2, refresh=False)   # → 3
+```
+
+- 分类计数 `{'guides': 2, 'cpp_api': 1}`——**条目自己声明的分类赢过入口分类**，
+  一个入口列出多个分类能表达得出来。
+- 落库字段与 sitemap 路径完全一致：`doc_version` / `locale` / `route_depth` /
+  `sitemap_url` 都非空，`inventory` 阶段的数据合同一项都没放松。
+- 入口抛异常时（`read_feed` 抛 `TimeoutError`）：两个入口都记为 `failed`，
+  `validate --phase inventory` 的 `inventory_feeds_complete` = fail，
+  不会被静默吞掉。
+
+配合 BUG-006，空清单在自定义来源上同样会被 `inventory_not_empty` 拦下。
+
+回归测试：128 用例全过；真实 sitemap 路径（`epic-ue-5.8`）不受影响。
 
 ## 解决记录
 
+**根因**：`discover.py` 把"清单是一份 XML sitemap"当成了核心事实，
+而不是当成一种实现。所以 cppreference 的分页 API 和 Blender 的
+`searchindex.js` 只能靠临时改核心才跑得通。
+
+**改动**：把清单来源拆成两半，**默认实现就是 sitemap**：
+
+```python
+inventory_feeds(dataset)  -> [(清单入口地址, 分类或 None)]
+read_feed(dataset, url)   -> [(分类或 None, 页面地址)]
+```
+
+适配器实现了就用它的，没实现就用内置的 sitemap 版本
+（`_sitemap_feeds` / `_read_sitemap`）。**只有一条代码路径**，
+不是"sitemap 分支 + 自定义分支"——后者迟早会分岔。
+
+回答议题的"待讨论问题"：
+
+- **翻页 / 重试 / 限流归谁**：归适配器。它们是"这个站怎么列页"的一部分，
+  核心无从知道 continuation token 长什么样。并发、写库、进度、失败诊断归核心。
+- **一个入口对应多个分类**：条目可以自带分类，优先于入口分类。
+- **分类为空是否允许**：由 BUG-006 的 `declared_categories_have_pages` +
+  `optional_categories` 统一回答，自定义来源不例外。
+- **验收命名**：`sitemaps_complete` 已改名为 `inventory_feeds_complete`，
+  状态语义不变。`sitemaps` 表名保留（避免无谓的 schema 变更），
+  在 `discover.py` 顶部注明它存的是"清单入口"。
+
+**非目标照旧**：没有内置 cppreference / Blender 适配器，没有写通用爬虫，
+建库纪律（先 discovery-only → inventory validate → 每类小样）一条没松。
+`WORKFLOWS.md` 的流程 B 已补上这两个函数的说明。
 
 ## 外部关联
 

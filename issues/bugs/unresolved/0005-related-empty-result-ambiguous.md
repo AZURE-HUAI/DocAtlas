@@ -2,7 +2,7 @@
 id: BUG-005
 title: "`related` 用空数组同时表示多种失败状态"
 type: bug
-status: open
+status: in_progress
 lifecycle: unresolved
 priority: medium
 area: related
@@ -102,3 +102,56 @@ python -m docatlas related "Points to Vertices Node"
 已抓取后，`related` 会返回实体、正反向 `official_link` 和 `confidence: 1.0`。
 另有已抓实体会返回实体对象加空 `relations`。这进一步确认调用方需要区分不同空
 状态，而不是把所有情况压成裸数组。
+
+## 验证
+
+```powershell
+python -m docatlas related "Set Field Of View"    # 清单里有、未抓
+python -m docatlas related "Nanite Virtualized Geometry"  # 实体在、无关系
+python -m docatlas related "zzzznotarealthing"    # 哪儿都没有
+```
+
+三种情况现在给三种 `status`，退出码也不同（`ok` → 0，其余 → 1）：
+
+```json
+{"subject": "Set Field Of View", "status": "entity_not_found",
+ "entities": [], "next_steps": ["本地没有正文，但全站清单里有 5 个页面对得上：", "…"],
+ "lookup": {"pending_pages": [{"path": "…/BlueprintAPI/Camera/SetFieldOfView",
+                               "matched_by": "exact_slug"}], "crawled_pages": []}}
+```
+
+正向对照未受影响：已覆盖实体仍返回 `status: ok` 与正反向关系、`evidence_kind`、
+`confidence`。
+
+回归测试：`RelatedContractTests` 3 个用例分别钉死三种状态，
+`InventoryCandidateTests.test_describe_lookup_gives_a_different_answer_for_each_state`
+钉死"三种没有必须给三种下一步"。
+
+## 解决记录
+
+**根因**：返回类型本身就丢信息。裸 `[]` 没有位置放"为什么空"。
+
+**改动**：`related` 的返回从数组换成对象：
+
+| 字段 | 含义 |
+|---|---|
+| `status` | `ok` / `entity_found_but_no_relations` / `entity_not_found` |
+| `entities` | 原来的数组，语义不变 |
+| `next_steps` | 可直接执行的下一步（字符串数组） |
+| `lookup` | 非 `ok` 时给出清单诊断：`pending_pages` / `crawled_pages` |
+
+实现只有一份：`context.related_payload()`。CLI 的 `related` 和 MCP 的
+`docatlas_related` 都调它，不存在两边语义不一致的可能。
+
+**没有保留旧的数组格式。** 议题的"可能方向"提过"保持数组兼容 + 额外字段"，
+但那会同时存在两套契约，正是本轮要清掉的那类债。这个项目还没有外部调用方，
+一次换干净比长期维护两种形状便宜得多；`SKILL.md` 里同步写了状态表，
+AI 侧的读法也一起更新了。
+
+**顺带修掉的**：实体查找原来用 `WHERE e.normalized_name=? OR a.normalized_alias=?`
+跨两张表 OR，同样会让 SQLite 放弃索引，已改为 `UNION`。
+
+## 外部关联
+
+- GitHub Issue：
+- 修复 PR：

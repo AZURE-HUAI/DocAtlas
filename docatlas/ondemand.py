@@ -1,17 +1,22 @@
 """按需抓取：用到哪一页才去取哪一页。
 
-全站清单（199,883 页）在正文抓取之前就已经冻结了，所以即使一页还没取正文，
-我们**依然知道它存在、在哪个分类、URL 是什么**。这就是按需抓取能成立的前提：
-不用漫无目的地爬，可以直接命中目标那一页。
+全站清单在正文抓取之前就已经冻结了，所以即使一页还没取正文，我们**依然知道
+它存在、在哪个分类、URL 是什么**。这就是按需抓取能成立的前提：不用漫无目的
+地爬，可以直接命中目标那一页。
 
-匹配靠 URL 最后一段（`normalized_slug`）：
+定位分三档，从最确定到最宽松，任何一档够数就停：
 
-    /…/UKismetSystemLibrary/K2_SetTimer   → k2settimer
-    用户问 "K2_SetTimer"                   → k2settimer
-    用户问 "Set Timer by Function Name"    → settimerbyfunctionname
-    /…/Time/SetTimerbyFunctionName        → settimerbyfunctionname
+    A 精确  slug 完全一致
+            /…/UKismetSystemLibrary/K2_SetTimer  ← "K2_SetTimer"
+            /…/geometry_nodes/fields.html        ← "Fields"（扩展名不算名字）
+            /…/charconv/from_chars               ← "std::from_chars"（限定符剥掉）
+    B 包含  slug 里含有这个词
+            /…/nanite-virtualized-geometry-…     ← "Nanite"
+    C 覆盖  查询里每个实词都出现在路径中
+            /render/shader_nodes/textures/wave…  ← "Wave Texture Node"
 
-所以用户怎么称呼都能对上，不需要先知道官方 URL。
+C 档要求**全部**实词命中，所以"怎么让物体发光"这种概念提问不会误触发补抓；
+真命中了，那一页也确实值得取。
 """
 
 from __future__ import annotations
@@ -24,14 +29,19 @@ from .chunking import normalize_name
 from .config import CATEGORY_LABELS, DATASET, KNOWLEDGE
 from .crossindex import RELATION_TYPE_BY_LINK_KIND
 from .dataset import knowledge_hook
-from .db import page_slug
 from .documents import fetch_document
+from .search import query_names, tokenize, STOPWORDS
 from .store import store_document_result
 from .util import log
 
 # 一次按需抓取最多取几页。目的是"补上缺的那一页"，不是顺手爬一片。
 DEFAULT_FETCH_LIMIT = 5
 MAX_FETCH_LIMIT = 40
+
+# 路径覆盖档至少要有这么多个实词，否则一个词就能扫回一大片。
+MIN_COVERAGE_TOKENS = 2
+# 太短的词（as、id、ue）做包含匹配会命中几万页，只在精确档用。
+MIN_CONTAINS_CHARS = 5
 
 # 同名候选谁优先，由数据集配置说了算（没配就一视同仁）。
 CATEGORY_PRIORITY = DATASET.category_priority
@@ -47,6 +57,73 @@ def _priority_case(column: str = "category") -> str:
     return f"CASE {column} {branches} ELSE {max(CATEGORY_PRIORITY.values()) + 1} END"
 
 
+def coverage_tokens(query: str) -> list[str]:
+    """路径覆盖档要求全部出现的那几个实词。"""
+    tokens = []
+    for token in tokenize(query):
+        if token.casefold() in STOPWORDS:
+            continue
+        stripped = normalize_name(token)
+        if len(stripped) >= 3:
+            tokens.append(stripped)
+    return tokens[:6]  # 再多就是整句话了，全部命中反而不可能
+
+
+def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
+    """返回 [(档位, WHERE 片段, 参数)]，从最确定到最宽松。"""
+    names = query_names(query)
+    if not names:
+        return []
+    stages: list[tuple[str, str, tuple[Any, ...]]] = []
+    placeholders = ",".join("?" for _ in names)
+    stages.append(("exact_slug", f"normalized_slug IN ({placeholders})", tuple(names)))
+    for name in names:
+        if len(name) >= MIN_CONTAINS_CHARS:
+            stages.append(("slug_contains", "normalized_slug LIKE ?", (f"%{name}%",)))
+    tokens = coverage_tokens(query)
+    if len(tokens) >= MIN_COVERAGE_TOKENS:
+        stages.append(
+            (
+                "path_covers_query",
+                " AND ".join("path LIKE ?" for _ in tokens),
+                tuple(f"%{token}%" for token in tokens),
+            )
+        )
+    return stages
+
+
+def _collect(
+    connection: sqlite3.Connection,
+    stages: list[tuple[str, str, tuple[Any, ...]]],
+    *,
+    status_clause: str,
+    limit: int,
+    category: str | None,
+) -> list[sqlite3.Row]:
+    category_clause = " AND category=?" if category else ""
+    category_params: tuple[Any, ...] = (category,) if category else ()
+    order = f"ORDER BY {_priority_case()}, route_depth, id"
+    rows: list[sqlite3.Row] = []
+    seen: set[int] = set()
+    for stage, where, params in stages:
+        for row in connection.execute(
+            f"SELECT id, url, path, category, status, ? AS match_stage "
+            f"FROM pages WHERE ({where}) AND {status_clause}{category_clause} "
+            f"{order} LIMIT ?",
+            (stage, *params, *category_params, limit * 3),
+        ):
+            if row["id"] in seen:
+                continue
+            seen.add(row["id"])
+            rows.append(row)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+_PENDING = "status IN ('pending', 'failed') AND attempts < 8"
+
+
 def find_uncrawled_candidates(
     connection: sqlite3.Connection,
     query: str,
@@ -56,42 +133,12 @@ def find_uncrawled_candidates(
     exact_only: bool = False,
 ) -> list[sqlite3.Row]:
     """在清单里找出"很可能是用户要的、但还没抓正文"的页面。"""
-    normalized = normalize_name(query)
-    if not normalized:
-        return []
-
-    category_clause = " AND category=?" if category else ""
-    category_params: tuple[Any, ...] = (category,) if category else ()
-    order = f"ORDER BY {_priority_case()}, route_depth, id"
-    pending = "status IN ('pending', 'failed') AND attempts < 8"
-
-    # 第一档：slug 完全一致。绝大多数"我要查某个节点/某个函数"都命中这里。
-    rows = list(
-        connection.execute(
-            f"SELECT id, url, path, category FROM pages "
-            f"WHERE normalized_slug=? AND {pending}{category_clause} {order} LIMIT ?",
-            (normalized, *category_params, limit),
-        )
+    stages = _candidate_queries(query)
+    if exact_only:
+        stages = [stage for stage in stages if stage[0] == "exact_slug"]
+    return _collect(
+        connection, stages, status_clause=_PENDING, limit=limit, category=category
     )
-    if exact_only or len(rows) >= limit:
-        return rows
-
-    # 第二档：slug 包含查询词（例如问 "Nanite" 命中 nanite-virtualized-geometry…）。
-    # 短词不做包含匹配，否则会捞回一大堆不相干的页面。
-    if len(normalized) >= 5:
-        seen = {row["id"] for row in rows}
-        for row in connection.execute(
-            f"SELECT id, url, path, category FROM pages "
-            f"WHERE normalized_slug LIKE ? AND {pending}{category_clause} "
-            f"{order} LIMIT ?",
-            (f"%{normalized}%", *category_params, limit * 3),
-        ):
-            if row["id"] in seen:
-                continue
-            rows.append(row)
-            if len(rows) >= limit:
-                break
-    return rows
 
 
 def missing_exact_pages(
@@ -102,19 +149,59 @@ def missing_exact_pages(
     否则会出现这种事：问 `GetCharacterMovement`，本地只有某篇教程的代码示例
     顺带提到了它，于是就用那段代码来回答，而真正的 API 页面明明就在清单里。
     """
-    normalized = normalize_name(query)
-    if not normalized:
+    names = query_names(query)
+    if not names:
         return 0
-    sql = """
-        SELECT COUNT(*) FROM pages
-        WHERE normalized_slug=?
-          AND status IN ('pending', 'failed') AND attempts < 8
-    """
-    params: list[Any] = [normalized]
+    placeholders = ",".join("?" for _ in names)
+    sql = (
+        f"SELECT COUNT(*) FROM pages WHERE normalized_slug IN ({placeholders})"
+        f" AND {_PENDING}"
+    )
+    params: list[Any] = list(names)
     if category:
         sql += " AND category=?"
         params.append(category)
     return connection.execute(sql, params).fetchone()[0]
+
+
+def inventory_lookup(
+    connection: sqlite3.Connection,
+    query: str,
+    *,
+    category: str | None = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """清单对这个名字知道些什么。
+
+    没有它，"查不到"就只能是一个空结果——调用方分不清是官方压根没这一页，
+    还是这一页在清单里躺着、只是正文还没取。这两件事的下一步完全不同。
+    """
+    stages = _candidate_queries(query)
+    pending = _collect(
+        connection, stages, status_clause=_PENDING, limit=limit, category=category
+    )
+    crawled = _collect(
+        connection,
+        stages,
+        status_clause="status IN ('success', 'redirect')",
+        limit=limit,
+        category=category,
+    )
+    return {
+        "query": query,
+        "pending_pages": [
+            {
+                "path": row["path"],
+                "url": row["url"],
+                "category": row["category"],
+                "matched_by": row["match_stage"],
+            }
+            for row in pending
+        ],
+        "crawled_pages": [
+            {"path": row["path"], "category": row["category"]} for row in crawled
+        ],
+    }
 
 
 def fetch_now(
