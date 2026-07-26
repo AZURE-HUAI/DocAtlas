@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import sqlite3
 from typing import Any, Iterator
 
@@ -64,6 +65,8 @@ _ENTITY_FIELDS = (
     "owner_type",
     "module",
     "source_url",
+    "member_of_id",
+    "attributes_json",
 )
 
 
@@ -91,9 +94,18 @@ class Entity:
     owner_type: str | None
     module: str | None
     source_url: str
+    # 非 None 表示它是别人页面上的一个成员（属性、方法），值是所有者实体 id。
+    member_of_id: int | None = None
+    # 抓取时记下的原样事实，领域包据此判断（Unreal 的 UPROPERTY 修饰符就在这）。
+    attributes: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def of(cls, row: sqlite3.Row, prefix: str = "") -> "Entity":
+        raw = row[f"{prefix}attributes_json"]
+        try:
+            attributes = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            attributes = {}
         return cls(
             id=row[f"{prefix}id"],
             page_id=row[f"{prefix}page_id"],
@@ -104,6 +116,8 @@ class Entity:
             owner_type=row[f"{prefix}owner_type"],
             module=row[f"{prefix}module"],
             source_url=row[f"{prefix}source_url"],
+            member_of_id=row[f"{prefix}member_of_id"],
+            attributes=attributes if isinstance(attributes, dict) else {},
         )
 
 
@@ -405,7 +419,11 @@ def _official_links(
         JOIN entities target_entity
             ON target_entity.page_id=page_links.target_page_id
         WHERE page_links.evidence_kind='official_link'
-          AND source_entity.id != target_entity.id{scope}
+          AND source_entity.id != target_entity.id
+          -- 链接是**这一页**指向另一页，不是页面上每个成员各指一次。不挡的话，
+          -- 一页 60 个成员 × 20 条链接会变成 1200 条一模一样的关系。
+          AND source_entity.member_of_id IS NULL
+          AND target_entity.member_of_id IS NULL{scope}
         """,
         params,
     ):
@@ -432,6 +450,39 @@ def _official_links(
     return created
 
 
+def _member_links(
+    connection: sqlite3.Connection, now: str, page_ids: list[int] | None
+) -> int:
+    """成员表里列着它 = 它属于这一页讲的东西。
+
+    和官方链接一样是抓来的事实，不是推断：类型页自己把这个属性列在
+    `Variables` 里。任何有类型页的文档站都成立，所以归核心。
+    """
+    scope = ""
+    params: tuple[Any, ...] = ()
+    if page_ids is not None:
+        placeholders = ",".join("?" for _ in page_ids)
+        scope = f" AND m.page_id IN ({placeholders})"
+        params = tuple(page_ids)
+    created = 0
+    for row in connection.execute(
+        f"SELECT m.id, m.member_of_id, m.source_url FROM entities m"
+        f" WHERE m.member_of_id IS NOT NULL{scope}",
+        params,
+    ):
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO relations(
+                from_entity_id, to_entity_id, relation_type, evidence_kind,
+                confidence, source_url, origin, created_at, updated_at
+            ) VALUES(?, ?, 'belongs_to', 'page_member_table', 1.0, ?, ?, ?, ?)
+            """,
+            (row["id"], row["member_of_id"], row["source_url"], CORE_ORIGIN, now, now),
+        )
+        created += 1
+    return created
+
+
 def rebuild(
     connection: sqlite3.Connection, *, page_ids: list[int] | None = None
 ) -> dict[str, Any]:
@@ -449,6 +500,7 @@ def rebuild(
         connection.execute("DELETE FROM relations WHERE origin=?", (pack,))
 
     official = _official_links(connection, now, page_ids)
+    members = _member_links(connection, now, page_ids)
 
     graph = RelationGraph(connection, page_ids=page_ids)
     rules = workspace.hook("relation_rules")
@@ -464,6 +516,7 @@ def rebuild(
     connection.commit()
     return {
         "official_links": official,
+        "member_links": members,
         "domain_relations": accepted,
         "rejected": rejected,
         # 领域规则想连、但库里没有这个实体的名字。多半是目标页还没抓，
@@ -589,4 +642,8 @@ def link_new_pages(connection: sqlite3.Connection, page_ids: list[int]) -> int:
     if not page_ids:
         return 0
     outcome = rebuild(connection, page_ids=page_ids)
-    return outcome["official_links"] + outcome["domain_relations"]
+    return (
+        outcome["official_links"]
+        + outcome["member_links"]
+        + outcome["domain_relations"]
+    )

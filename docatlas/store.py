@@ -22,6 +22,79 @@ def _is_throttled(error: str) -> bool:
     return any(marker in error for marker in THROTTLE_MARKERS)
 
 
+def _store_entity(
+    connection: sqlite3.Connection,
+    page_id: int,
+    entity: dict[str, Any],
+    stored_at: str,
+    member_of_id: int | None = None,
+) -> int | None:
+    """写一个实体和它的别名。返回实体 id；被去重挡下时返回 None。
+
+    页面主体和页面上的成员走同一段代码——两条路各写一遍，迟早会在别名、
+    版本或属性上分叉。
+    """
+    cursor = connection.execute(
+        """
+        INSERT OR IGNORE INTO entities(
+            page_id, entity_type, canonical_name, normalized_name,
+            qualified_name, module, owner_type, signature, source_url,
+            version, attributes_json, member_of_id, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            page_id,
+            entity["entity_type"],
+            entity["canonical_name"],
+            entity["normalized_name"],
+            entity["qualified_name"],
+            entity["module"],
+            entity["owner_type"],
+            entity["signature"],
+            entity["source_url"],
+            entity["version"],
+            entity["attributes_json"],
+            member_of_id,
+            stored_at,
+            stored_at,
+        ),
+    )
+    if not cursor.rowcount:
+        # UNIQUE(page_id, entity_type, normalized_name) 挡下的：成员名撞上了
+        # 页面主体（构造函数与类同名就是这样）。这不是错误，是同一个东西。
+        return None
+    entity_id = cursor.lastrowid
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO entity_aliases(
+            entity_id, alias, normalized_alias, alias_type, source
+        ) VALUES(?, ?, ?, ?, 'document')
+        """,
+        [
+            (entity_id, alias, normalize_name(alias), alias_type)
+            for alias, alias_type in entity["aliases"]
+            if alias and normalize_name(alias)
+        ],
+    )
+    return entity_id
+
+
+def store_members(
+    connection: sqlite3.Connection,
+    page_id: int,
+    owner_entity_id: int | None,
+    members: list[dict[str, Any]],
+) -> int:
+    """写这一页上的成员实体，全部挂在页面主体实体下。"""
+    if not owner_entity_id:
+        return 0
+    return sum(
+        1
+        for member in members
+        if _store_entity(connection, page_id, member, utc_now(), owner_entity_id)
+    )
+
+
 def store_document_result(
     connection: sqlite3.Connection,
     result: dict[str, Any],
@@ -188,43 +261,8 @@ def store_document_result(
             ),
         )
     entity = result["entity"]
-    entity_cursor = connection.execute(
-        """
-        INSERT INTO entities(
-            page_id, entity_type, canonical_name, normalized_name,
-            qualified_name, module, owner_type, signature, source_url,
-            version, attributes_json, created_at, updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            page_id,
-            entity["entity_type"],
-            entity["canonical_name"],
-            entity["normalized_name"],
-            entity["qualified_name"],
-            entity["module"],
-            entity["owner_type"],
-            entity["signature"],
-            entity["source_url"],
-            entity["version"],
-            entity["attributes_json"],
-            stored_at,
-            stored_at,
-        ),
-    )
-    entity_id = entity_cursor.lastrowid
-    connection.executemany(
-        """
-        INSERT OR IGNORE INTO entity_aliases(
-            entity_id, alias, normalized_alias, alias_type, source
-        ) VALUES(?, ?, ?, ?, 'document')
-        """,
-        [
-            (entity_id, alias, normalize_name(alias), alias_type)
-            for alias, alias_type in entity["aliases"]
-            if alias and normalize_name(alias)
-        ],
-    )
+    entity_id = _store_entity(connection, page_id, entity, stored_at)
+    store_members(connection, page_id, entity_id, result.get("members") or [])
     page_chunk_ids: list[int] = []
     for chunk in result["chunks"]:
         section_id = section_ids[chunk["section_position"]]

@@ -65,7 +65,10 @@ CORE_RELATION_LABELS = {
     "official_reference": "官方相关文档",
 }
 
-CORE_EVIDENCE_LABELS = {"official_link": "官方文档链接"}
+CORE_EVIDENCE_LABELS = {
+    "official_link": "官方文档链接",
+    "page_member_table": "官方页面的成员表",
+}
 
 # 相关项的排序：领域特有的关系（有实锤证据的对应）排在通用关系前面，
 # 所以通用关系的数字都比较大。

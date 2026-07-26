@@ -32,8 +32,9 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, crawl, dataset, db, discover, net, ondemand,
-    constants, relations, runtime, search, store, text, validate, versions,
+    chunking, config, context, crawl, dataset, db, discover, members, net,
+    ondemand, constants, relations, runtime, search, store, text, validate,
+    versions,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
@@ -1922,9 +1923,19 @@ class GenericRelationLayerTests(unittest.TestCase):
             self.assertIn("belongs_to", workspace.relation_labels)
             self.assertIn("official_link", workspace.evidence_labels)
 
-    def test_official_link_is_expected_without_any_knowledge_pack(self):
-        with using(knowledge=None):
+    def test_only_core_evidence_is_expected_without_any_knowledge_pack(self):
+        """没挂知识包时，该期待的只有核心证据，一条领域证据都不能混进来。
+
+        核心证据有两条，第二条要看来源适配器认不认成员表：官方链接任何站都有，
+        成员表只有会读类型页的适配器才产出。
+        """
+        with using(knowledge=None, source=cppreference):
             self.assertEqual(validate.expected_evidence_kinds(), ["official_link"])
+        with using(knowledge=None, source=epic_ue):
+            self.assertEqual(
+                validate.expected_evidence_kinds(),
+                ["official_link", "page_member_table"],
+            )
 
     def test_query_names_work_without_a_knowledge_pack(self):
         with using(knowledge=None):
@@ -2959,6 +2970,373 @@ class VersionIntentTests(unittest.TestCase):
             )
         self.assertEqual(len(kept), 1)
         self.assertIn("不认识版本", report["note"])
+
+
+class PageMemberTests(unittest.TestCase):
+    """BUG-012：类型页成员表里的成员必须能成为实体。
+
+    这里的假适配器一行 Unreal 的东西都没有——核心要是认得 `BlueprintReadWrite`
+    或者 `cpp_property`，这些用例就该垮掉。
+    """
+
+    class ToySource:
+        """假站点：小节正文每行 `名字 | 类型` 就是一个成员。"""
+
+        @staticmethod
+        def page_members(dataset, *, category, title, path, sections):
+            found = []
+            for section in sections:
+                if section["heading_path"].split(" > ")[-1] != "Fields":
+                    continue
+                for line in section["body_md"].splitlines():
+                    name, _, kind = line.partition("|")
+                    if name.strip():
+                        found.append(
+                            {
+                                "name": name.strip(),
+                                "entity_type": "toy_field",
+                                "attributes": {"declared": kind.strip()},
+                            }
+                        )
+            return found
+
+    def _page(self, connection, title, path, body):
+        page_id = connection.execute(
+            "INSERT INTO pages(url, path, category, status, title, route_depth)"
+            " VALUES(?, ?, 'guides', 'success', ?, 2)",
+            (f"https://example.invalid{path}", path, title),
+        ).lastrowid
+        now = "2026-07-26T00:00:00Z"
+        owner_id = connection.execute(
+            "INSERT INTO entities(page_id, entity_type, canonical_name,"
+            " normalized_name, source_url, version, created_at, updated_at)"
+            " VALUES(?, 'toy_class', ?, ?, ?, '1', ?, ?)",
+            (page_id, title, text.normalize_name(title),
+             f"https://example.invalid{path}", now, now),
+        ).lastrowid
+        sections = [
+            {
+                "heading_path": f"{title} > Fields",
+                "body_md": body,
+                "knowledge_type": "details",
+                "source_anchor": f"https://example.invalid{path}#fields",
+            }
+        ]
+        with using(source=self.ToySource, knowledge=None, dataset={"knowledge": None}):
+            found = members.collect(
+                category="guides",
+                title=title,
+                path=path,
+                source_url=f"https://example.invalid{path}",
+                sections=sections,
+                module=None,
+            )
+            store.store_members(connection, page_id, owner_id, found)
+        connection.commit()
+        return page_id, owner_id
+
+    def test_members_become_entities_without_any_domain_knowledge(self):
+        connection = temp_db(self)
+        self._page(connection, "Widget", "/api/widget", "Length|float\nWidth|float")
+        rows = list(
+            connection.execute(
+                "SELECT canonical_name, qualified_name, owner_type, entity_type"
+                " FROM entities WHERE member_of_id IS NOT NULL ORDER BY canonical_name"
+            )
+        )
+        self.assertEqual([r["canonical_name"] for r in rows], ["Length", "Width"])
+        self.assertEqual(rows[0]["qualified_name"], "Widget::Length")
+        self.assertEqual(rows[0]["owner_type"], "Widget")
+        self.assertEqual(rows[0]["entity_type"], "toy_field")
+
+    def test_the_same_member_name_on_two_pages_stays_two_things(self):
+        """不同类的同名属性不能串成一个——这是身份带所有者的全部理由。"""
+        connection = temp_db(self)
+        self._page(connection, "Widget", "/api/widget", "Length|float")
+        self._page(connection, "Gadget", "/api/gadget", "Length|int")
+        qualified = sorted(
+            row[0]
+            for row in connection.execute(
+                "SELECT qualified_name FROM entities WHERE canonical_name='Length'"
+            )
+        )
+        self.assertEqual(qualified, ["Gadget::Length", "Widget::Length"])
+
+    def test_belongs_to_is_built_by_the_core_not_by_a_domain_pack(self):
+        connection = temp_db(self)
+        _, owner_id = self._page(
+            connection, "Widget", "/api/widget", "Length|float\nWidth|float"
+        )
+        with using(source=self.ToySource, knowledge=None, dataset={"knowledge": None}):
+            outcome = relations.rebuild(connection)
+        self.assertEqual(outcome["member_links"], 2)
+        rows = list(
+            connection.execute(
+                "SELECT relation_type, evidence_kind, confidence, origin,"
+                " to_entity_id FROM relations"
+            )
+        )
+        self.assertEqual({r["relation_type"] for r in rows}, {"belongs_to"})
+        self.assertEqual({r["evidence_kind"] for r in rows}, {"page_member_table"})
+        self.assertEqual({r["confidence"] for r in rows}, {1.0})
+        self.assertEqual({r["origin"] for r in rows}, {"core"})
+        self.assertEqual({r["to_entity_id"] for r in rows}, {owner_id})
+
+    def test_official_links_do_not_multiply_by_the_number_of_members(self):
+        """一页 N 个成员 × M 条链接不能变成 N×M 条关系。
+
+        链接是这一页指向另一页，不是页面上每个成员各指一次。
+        """
+        connection = temp_db(self)
+        source_page, _ = self._page(
+            connection, "Widget", "/api/widget", "A|int\nB|int\nC|int\nD|int"
+        )
+        self._page(connection, "Gadget", "/api/gadget", "E|int")
+        connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " anchor_text, link_kind, evidence_kind, source_url, created_at)"
+            " VALUES(?, 'https://example.invalid/api/gadget', '/api/gadget',"
+            " 'Gadget', 'official_reference', 'official_link',"
+            " 'https://example.invalid/api/widget', 'now')",
+            (source_page,),
+        )
+        connection.commit()
+        with using(source=self.ToySource, knowledge=None, dataset={"knowledge": None}):
+            outcome = relations.rebuild(connection)
+        self.assertEqual(outcome["official_links"], 1, "成员不该各连一条")
+
+    def test_incremental_builds_the_same_member_relations_as_a_full_run(self):
+        connection = temp_db(self)
+        page_id, _ = self._page(
+            connection, "Widget", "/api/widget", "Length|float\nWidth|float"
+        )
+        with using(source=self.ToySource, knowledge=None, dataset={"knowledge": None}):
+            relations.link_new_pages(connection, [page_id])
+            incremental = connection.execute(
+                "SELECT COUNT(*) FROM relations WHERE evidence_kind='page_member_table'"
+            ).fetchone()[0]
+            connection.execute("DELETE FROM relations")
+            relations.rebuild(connection)
+            full = connection.execute(
+                "SELECT COUNT(*) FROM relations WHERE evidence_kind='page_member_table'"
+            ).fetchone()[0]
+        self.assertEqual(incremental, full)
+        self.assertEqual(full, 2)
+
+    def test_an_adapter_without_member_tables_changes_nothing(self):
+        """没实现 page_members 的数据集必须零开销、零副作用。"""
+        connection = temp_db(self)
+        with using(source=cppreference):
+            self.assertFalse(members.supported())
+            self.assertEqual(members.backfill(connection), 0)
+        with using(source=blender_manual):
+            self.assertFalse(members.supported())
+
+    def test_domain_aliases_reach_members_through_the_knowledge_pack(self):
+        """成员的领域别名走知识包，核心不认识任何一种叫法。"""
+
+        class ToyDomain:
+            @staticmethod
+            def member_aliases(*, name, entity_type, owner, attributes):
+                return {(f"{name} ({attributes['declared']})", "toy_display")}
+
+        connection = temp_db(self)
+        page_id = connection.execute(
+            "INSERT INTO pages(url, path, category, status, title, route_depth)"
+            " VALUES('https://example.invalid/w', '/w', 'guides', 'success', 'W', 2)"
+        ).lastrowid
+        owner_id = connection.execute(
+            "INSERT INTO entities(page_id, entity_type, canonical_name,"
+            " normalized_name, source_url, version, created_at, updated_at)"
+            " VALUES(?, 'toy_class', 'W', 'w', 'u', '1', 'n', 'n')",
+            (page_id,),
+        ).lastrowid
+        with using(source=self.ToySource, knowledge=ToyDomain):
+            found = members.collect(
+                category="guides", title="W", path="/w", source_url="u",
+                sections=[{"heading_path": "W > Fields", "body_md": "Length|float",
+                           "knowledge_type": "details", "source_anchor": "u"}],
+                module=None,
+            )
+            store.store_members(connection, page_id, owner_id, found)
+        aliases = {
+            row[0]
+            for row in connection.execute(
+                "SELECT alias FROM entity_aliases WHERE alias_type='toy_display'"
+            )
+        }
+        self.assertEqual(aliases, {"Length (float)"})
+
+
+class UnrealMemberTests(unittest.TestCase):
+    """UE 侧：属性怎么变成蓝图里看得见的名字，以及访问器关系。"""
+
+    VARIABLES = (
+        "| Name | Type | Remarks | Include Path |"
+        " [Unreal Specifiers](https://example.invalid/spec) |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| TargetArmLength | float | Natural length of the spring arm |"
+        " GameFramework/SpringArmComponent.h | - EditAnywhere - BlueprintReadWrite |\n"
+        "| bIsCameraFixed | bool | Internal state | GameFramework/S.h |  |\n"
+        "| JumpMaxCount | int32 | How many jumps | GameFramework/S.h |"
+        " - BlueprintReadOnly |\n"
+        "| CrouchedHalfHeight | float | Collision half-height | GameFramework/S.h |"
+        " - BlueprintReadWrite - BlueprintSetter=SetCrouchedHalfHeight |\n"
+        "| [Linked](https://example.invalid/api/x) | float | Has its own page |"
+        " a.h |  |\n"
+    )
+    FUNCTIONS = (
+        "| Name | Remarks | Include Path |"
+        " [Unreal Specifiers](https://example.invalid/spec) |\n"
+        "| --- | --- | --- | --- |\n"
+        "| void SetCrouchedHalfHeight ( const float NewValue ) | Sets it |"
+        " GameFramework/S.h | - BlueprintSetter |\n"
+        "| void K2_OnEndCrouch ( float Adjust ) | Event |  GameFramework/S.h |"
+        ' - Meta=(DisplayName="On End Crouch") |\n'
+    )
+
+    def _sections(self, title):
+        return [
+            {"heading_path": f"{title} > Variables > Public",
+             "body_md": self.VARIABLES, "knowledge_type": "details",
+             "source_anchor": "https://example.invalid/api/c#public"},
+            {"heading_path": f"{title} > Functions > Public",
+             "body_md": self.FUNCTIONS, "knowledge_type": "details",
+             "source_anchor": "https://example.invalid/api/c#public-2"},
+        ]
+
+    def _members(self, title="UToyComponent"):
+        with using(source=epic_ue, knowledge=unreal):
+            return members.collect(
+                category="cpp_api", title=title, path=f"/api/{title}",
+                source_url=f"https://example.invalid/api/{title}",
+                sections=self._sections(title), module="Engine",
+            )
+
+    def test_the_adapter_reads_both_member_tables(self):
+        found = {m["canonical_name"]: m["entity_type"] for m in self._members()}
+        self.assertEqual(found["TargetArmLength"], "cpp_property")
+        self.assertEqual(found["SetCrouchedHalfHeight"], "cpp_function")
+
+    def test_a_member_with_its_own_page_is_left_alone(self):
+        """Name 一栏带链接 = 官方给它出了页面，那一页本身就是实体。"""
+        self.assertNotIn("Linked", {m["canonical_name"] for m in self._members()})
+
+    def test_prose_pages_named_variables_produce_no_members(self):
+        """写着"Blueprint Variables"的教程页不是类型页，不能凭标题就切成员。"""
+        with using(source=epic_ue, knowledge=unreal):
+            found = members.collect(
+                category="guides", title="Blueprint Variables", path="/guide",
+                source_url="u", sections=self._sections("Blueprint Variables"),
+                module=None,
+            )
+        self.assertEqual(found, [])
+
+    def test_blueprint_exposure_decides_which_accessor_names_exist(self):
+        by_name = {m["canonical_name"]: dict(m["aliases"]) for m in self._members()}
+        read_write = set(by_name["TargetArmLength"])
+        self.assertIn("Get Target Arm Length", read_write)
+        self.assertIn("Set Target Arm Length", read_write)
+        # ReadOnly 只有 Get：蓝图里根本没有它的 Set 节点，造出来就是假的。
+        read_only = set(by_name["JumpMaxCount"])
+        self.assertIn("Get Jump Max Count", read_only)
+        self.assertNotIn("Set Jump Max Count", read_only)
+        # 没有 Blueprint 说明符的属性在蓝图里看不见，两个都不该有。
+        private = set(by_name["bIsCameraFixed"])
+        self.assertNotIn("Get Is Camera Fixed", private)
+        self.assertNotIn("Set Is Camera Fixed", private)
+
+    def test_display_name_metadata_becomes_an_alias(self):
+        by_name = {m["canonical_name"]: dict(m["aliases"]) for m in self._members()}
+        self.assertEqual(
+            by_name["K2_OnEndCrouch"]["On End Crouch"], "unreal_display_name"
+        )
+        self.assertIn("OnEndCrouch", by_name["K2_OnEndCrouch"])
+
+    def _seed(self, connection, title, path):
+        page_id = connection.execute(
+            "INSERT INTO pages(url, path, category, status, title, route_depth)"
+            " VALUES(?, ?, 'cpp_api', 'success', ?, 2)",
+            (f"https://example.invalid{path}", path, title),
+        ).lastrowid
+        owner_id = connection.execute(
+            "INSERT INTO entities(page_id, entity_type, canonical_name,"
+            " normalized_name, source_url, version, created_at, updated_at)"
+            " VALUES(?, 'cpp_symbol', ?, ?, ?, '5.8', 'n', 'n')",
+            (page_id, title, text.normalize_name(title),
+             f"https://example.invalid{path}"),
+        ).lastrowid
+        with using(source=epic_ue, knowledge=unreal):
+            found = members.collect(
+                category="cpp_api", title=title, path=path,
+                source_url=f"https://example.invalid{path}",
+                sections=self._sections(title), module="Engine",
+            )
+            store.store_members(connection, page_id, owner_id, found)
+        connection.commit()
+        return page_id
+
+    def test_an_explicit_setter_becomes_a_relation_with_full_evidence(self):
+        connection = temp_db(self)
+        self._seed(connection, "UToyComponent", "/api/UToyComponent")
+        with using(source=epic_ue, knowledge=unreal, dataset={"knowledge": "unreal"}):
+            relations.rebuild(connection)
+        row = connection.execute(
+            "SELECT r.relation_type, r.evidence_kind, r.confidence, r.note,"
+            " r.source_url, f.canonical_name AS src, t.canonical_name AS dst"
+            " FROM relations r JOIN entities f ON f.id=r.from_entity_id"
+            " JOIN entities t ON t.id=r.to_entity_id"
+            " WHERE r.relation_type='blueprint_setter'"
+        ).fetchone()
+        self.assertIsNotNone(row, "显式 BlueprintSetter= 必须建出关系")
+        # 方向：属性 → 访问器，不是反过来。
+        self.assertEqual(row["src"], "CrouchedHalfHeight")
+        self.assertEqual(row["dst"], "SetCrouchedHalfHeight")
+        self.assertEqual(row["evidence_kind"], "unreal_property_specifier")
+        self.assertEqual(row["confidence"], 1.0)
+        self.assertIn("BlueprintSetter=SetCrouchedHalfHeight", row["note"])
+        self.assertTrue(row["source_url"].startswith("https://example.invalid/"))
+
+    def test_a_property_never_links_to_another_classs_accessor(self):
+        """两个类各有一个 CrouchedHalfHeight 时，不能连到对方的 Setter 上。"""
+        connection = temp_db(self)
+        self._seed(connection, "UToyComponent", "/api/UToyComponent")
+        self._seed(connection, "UOtherComponent", "/api/UOtherComponent")
+        with using(source=epic_ue, knowledge=unreal, dataset={"knowledge": "unreal"}):
+            relations.rebuild(connection)
+        for row in connection.execute(
+            "SELECT f.page_id AS a, t.page_id AS b FROM relations r"
+            " JOIN entities f ON f.id=r.from_entity_id"
+            " JOIN entities t ON t.id=r.to_entity_id"
+            " WHERE r.relation_type IN ('blueprint_setter', 'blueprint_getter')"
+        ):
+            self.assertEqual(row["a"], row["b"], "访问器关系必须留在同一个类页里")
+
+    def test_implicit_accessors_stay_aliases_and_never_become_relations(self):
+        """自动生成的 Get/Set 没有文档实体，硬连一条就是把猜测写成事实。"""
+        connection = temp_db(self)
+        self._seed(connection, "UToyComponent", "/api/UToyComponent")
+        with using(source=epic_ue, knowledge=unreal, dataset={"knowledge": "unreal"}):
+            relations.rebuild(connection)
+        target = connection.execute(
+            "SELECT id FROM entities WHERE canonical_name='TargetArmLength'"
+        ).fetchone()["id"]
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM relations WHERE from_entity_id=?"
+                " AND relation_type LIKE 'blueprint_%'",
+                (target,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM entity_aliases WHERE entity_id=?"
+                " AND alias_type='blueprint_setter_node'",
+                (target,),
+            ).fetchone()[0],
+            1,
+        )
 
 
 if __name__ == "__main__":

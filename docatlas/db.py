@@ -165,6 +165,9 @@ def initialize_db(connection: sqlite3.Connection) -> None:
             source_url TEXT NOT NULL,
             version TEXT NOT NULL,
             attributes_json TEXT NOT NULL DEFAULT '{}',
+            -- 这个实体是不是别人页面上的一个成员。NULL = 它就是这一页讲的东西。
+            -- 成员实体永远和所有者同页，所以按 page_id 删就能连它一起删干净。
+            member_of_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             deleted_at TEXT,
@@ -308,6 +311,14 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         connection, "chunk_versions", "scope", "TEXT NOT NULL DEFAULT 'body'"
     ):
         connection.execute("DELETE FROM metadata WHERE key='version_marks'")
+    # 老库加成员列时，已有实体全是"一页一个"，member_of_id 留 NULL 正好是
+    # 它们的真实身份，不需要回填；成员由下面的 backfill 从已存正文里重算。
+    if add_column_if_missing(connection, "entities", "member_of_id", "INTEGER"):
+        connection.execute("DELETE FROM metadata WHERE key='page_members'")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entities_member_of"
+        " ON entities(member_of_id)"
+    )
     add_column_if_missing(connection, "pages", "normalized_slug", "TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(normalized_slug)"
@@ -433,6 +444,10 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     from .versions import backfill as backfill_chunk_versions
 
     backfill_chunk_versions(connection)
+    # 成员实体同理：已抓页面的小节正文都在，重读一遍表格即可，不必重抓。
+    from .members import backfill as backfill_page_members
+
+    backfill_page_members(connection)
     connection.commit()
 
 

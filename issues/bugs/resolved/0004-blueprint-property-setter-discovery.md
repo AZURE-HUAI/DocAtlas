@@ -11,7 +11,7 @@ reported_at: 2026-07-26
 resolved_at: 2026-07-26
 github_issue: null
 fix_pr: https://github.com/AZURE-HUAI/DocAtlas/pull/2
-related: [BUG-005, ENH-003]
+related: [BUG-005, BUG-012, ENH-003]
 ---
 
 # 问题
@@ -153,6 +153,13 @@ search.query_names("Set Target Arm Length")  # → [..., 'targetarmlength', ...]
 
 **若将来 Epic 开始为属性出独立页面**，ENH-003 讨论的领域关系扩展点可以直接接上，
 届时才值得引入 `blueprint_property_accessor` 这类关系。
+
+**后续（`BUG-012`，2026-07-26）**：上面第 3 条的推理没有错，但它的前提被换掉了。
+"没有页面就没有实体"当时是核心的硬规定（一页只能有一个实体），不是官方证据的
+限制。`BUG-012` 把成员表里的成员提升成了实体，于是 `related "TargetArmLength"`
+现在能答出它属于 `USpringArmComponent`；显式声明了访问器的属性（如
+`CrouchedHalfHeight`）也有了带证据的 Getter/Setter 关系。**自动生成**的访问器
+仍然只给别名不给关系，理由与这里第 3 条完全相同。
 
 ## 外部关联
 

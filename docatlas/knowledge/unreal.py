@@ -37,6 +37,7 @@ DERIVED_EVIDENCE_KINDS = (
     "exact_normalized_name",
     "document_statement",
     "unreal_display_name_metadata",
+    "unreal_property_specifier",
 )
 
 RELATION_LABELS = {
@@ -44,10 +45,13 @@ RELATION_LABELS = {
     "blueprint_cpp_candidate": "候选 C++ API（需核对签名）",
     "node_api_candidate": "候选 API（需核对签名）",
     "targets_type": "Target 类型",
+    "blueprint_getter": "蓝图 Getter",
+    "blueprint_setter": "蓝图 Setter",
 }
 
 EVIDENCE_LABELS = {
     "unreal_display_name_metadata": "Unreal DisplayName 元数据",
+    "unreal_property_specifier": "UPROPERTY 说明符",
     "document_statement": "文档正文声明",
     "exact_normalized_name": "名称标准化后一致",
 }
@@ -55,6 +59,8 @@ EVIDENCE_LABELS = {
 # 上下文包里同一个知识块的相关项按这个顺序排；数字越小越靠前。
 RELATION_PRIORITY = {
     "blueprint_cpp_api": 1,
+    "blueprint_getter": 1,
+    "blueprint_setter": 1,
     "targets_type": 2,
     "blueprint_cpp_candidate": 5,
     "node_api_candidate": 6,
@@ -166,6 +172,68 @@ def document_aliases(
 
 
 # ---------------------------------------------------------------------------
+# 成员实体：类页面上的属性和方法在领域里还能叫什么名字。
+# ---------------------------------------------------------------------------
+
+# UPROPERTY 的蓝图暴露级别。ReadWrite 有 Get 也有 Set，ReadOnly 只有 Get，
+# 两个都没有的属性在蓝图里根本看不见——名字不该被造出来。
+_BLUEPRINT_READ_WRITE = "BlueprintReadWrite"
+_BLUEPRINT_READ_ONLY = "BlueprintReadOnly"
+
+# `BlueprintGetter=GetFoo` / `BlueprintSetter=SetFoo`：属性显式指定了访问器。
+ACCESSOR_SPECIFIER_RE = re.compile(
+    r"\bBlueprint(Getter|Setter)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def member_aliases(
+    *, name: str, entity_type: str, owner: str, attributes: dict
+) -> set[tuple[str, str]]:
+    """一个类成员在蓝图和编辑器里还会叫什么。
+
+    最要紧的一条：`BlueprintReadWrite` 的属性会在蓝图里自动生成
+    `Get X` / `Set X` 两个节点，而官方**不给这些节点单独出页面**。
+    用户看到的是节点名，库里存的是属性名，中间这一层只能由别名补上。
+
+    注意这里只造名字，不造关系——自动生成的访问器没有独立实体，
+    硬编一条指向不存在东西的关系，等于把猜测写成事实。
+    """
+    aliases: set[tuple[str, str]] = {
+        (humanize_cpp_identifier(name), "cpp_humanized_name")
+    }
+    specifiers = str(attributes.get("unreal_specifiers") or "")
+
+    if entity_type == "cpp_property":
+        readable = _BLUEPRINT_READ_ONLY in specifiers or _BLUEPRINT_READ_WRITE in specifiers
+        writable = _BLUEPRINT_READ_WRITE in specifiers
+        # 布尔属性的匈牙利前缀不出现在蓝图节点名里：bDoCollisionTest 显示成
+        # "Do Collision Test"。
+        display_base = name[1:] if re.fullmatch(r"b[A-Z]\w*", name) else name
+        humanized = humanize_cpp_identifier(display_base)
+        if readable:
+            aliases.add((f"Get {humanized}", "blueprint_getter_node"))
+        if writable:
+            aliases.add((f"Set {humanized}", "blueprint_setter_node"))
+        if display_base != name:
+            aliases.add((display_base, "unreal_prefix_stripped"))
+            aliases.add((humanized, "unreal_prefix_stripped_humanized"))
+
+    if entity_type == "cpp_function" and name.startswith(K2_PREFIX):
+        base = name[len(K2_PREFIX):]
+        if base:
+            aliases.add((base, "k2_base_name"))
+            aliases.add((humanize_cpp_identifier(base), "k2_humanized_name"))
+
+    # `Meta=(DisplayName="On End Crouch")` 就是蓝图里显示的名字，和 C++ 名
+    # 常常对不上（K2_OnEndCrouch → On End Crouch）。
+    for match in re.finditer(r'\bDisplayName\s*=\s*"([^"]+)"', specifiers):
+        alias = match.group(1).strip()
+        if alias:
+            aliases.add((alias, "unreal_display_name"))
+    return aliases
+
+
+# ---------------------------------------------------------------------------
 # 关系规则：凭什么说两个实体有关。
 #
 # 找候选、验证目标、挡撞名、去重、存储、全量/增量更新都归通用核心
@@ -183,16 +251,48 @@ MAX_TARGET_WORDS = 8
 
 
 def relation_rules(graph):
-    """Unreal 的三种关系证据，按硬度从高到低排。
+    """Unreal 的四种关系证据，按硬度从高到低排。
 
-    三条规则的 `relation_type` + `evidence_kind` 两两不同，而去重是按
+    每条规则的 `relation_type` + `evidence_kind` 两两不同，而去重是按
     （起点、终点、关系类型、证据类型）来的，所以它们不会互相覆盖——同一对
     实体可以既有 `blueprint_cpp_api` 又有 `targets_type`，各带各的证据。
     这里的顺序只是给人读的：先写最硬的那条。
     """
     yield from _display_name_metadata(graph)
+    yield from _property_accessors(graph)
     yield from _target_type_statements(graph)
     yield from _same_name_candidates(graph)
+
+
+def _property_accessors(graph):
+    """`BlueprintSetter=SetCrouchedHalfHeight` 指名道姓说了访问器是谁。
+
+    只连**同一个类页面上**的那个函数。不限定所有者的话，
+    `ACharacter` 和 `UCharacterMovementComponent` 各有一个 `ClientLoc`，
+    同名属性会互相串到对方的访问器上去。
+
+    没有显式指定访问器的 `BlueprintReadWrite` 属性不在这里出现：那种访问器
+    是引擎自动生成的，官方没有对应文档实体，能给的只有别名
+    （见 `member_aliases`），不是关系。
+    """
+    for prop in graph.entities("cpp_property"):
+        specifiers = str(prop.attributes.get("unreal_specifiers") or "")
+        for role, accessor_name in ACCESSOR_SPECIFIER_RE.findall(specifiers):
+            for accessor in graph.find(accessor_name, entity_type="cpp_function"):
+                if accessor.page_id != prop.page_id:
+                    continue
+                yield RelationCandidate(
+                    source=prop,
+                    target=accessor,
+                    relation_type=f"blueprint_{role.lower()}",
+                    evidence_kind="unreal_property_specifier",
+                    confidence=1.0,
+                    evidence_url=prop.source_url,
+                    note=(
+                        f"{prop.owner_type} 的成员表里，属性 {prop.name} 的 UPROPERTY "
+                        f"说明符写着 Blueprint{role}={accessor_name}"
+                    ),
+                )
 
 
 def _display_name_metadata(graph):
