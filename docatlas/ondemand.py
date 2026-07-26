@@ -225,7 +225,7 @@ def _collect(
     for stage, where, params in stages:
         found = list(
             connection.execute(
-                f"SELECT id, url, path, category, status, ? AS match_stage "
+                f"SELECT id, url, path, category, status, redirect_url, ? AS match_stage "
                 f"FROM pages WHERE ({where}) AND {status_clause}{category_clause} "
                 f"{order} LIMIT ?",
                 (stage, *params, *category_params, limit * 3),
@@ -407,7 +407,15 @@ def inventory_lookup(
             for row in pending
         ],
         "crawled_pages": [
-            {"path": row["path"], "category": row["category"]} for row in crawled
+            {
+                "path": row["path"],
+                "category": row["category"],
+                # 抓过了不等于有正文：官方撤掉的页面会留下一个只有跳转的空壳。
+                # 这两样让调用方分得清"没命中查询词"和"这一页已经没有内容了"。
+                "status": row["status"],
+                "redirect_url": row["redirect_url"],
+            }
+            for row in crawled
         ],
         # 后两样只在什么都没找到时才算：它们回答的是"到底是哪一种没有"。
         "linked_targets": (

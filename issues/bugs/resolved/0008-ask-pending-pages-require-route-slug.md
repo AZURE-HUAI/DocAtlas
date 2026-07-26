@@ -177,6 +177,76 @@ python -m docatlas get "/render/shader_nodes/index"
 - 四个数据集 `validate` 的 inventory 7 项、content 16 项**全 pass**。
 - 一个进程内交错切换四个库 8 次，`dataset.dataset_id` 逐条对齐，无串库。
 
+## 2026-07-27 补：上面那份解决记录验收得不够，漏了回答层
+
+用户当天用**新进程 CLI** 复测，直接把漏检打出来了：
+
+```text
+ask "https://cppreference.com/cpp/language/coroutines"
+→ 首位仍是 C++ language，fetch.requested=0
+```
+
+**漏检的原因不是测得少，是测错了层。** 上面的验收全部打在
+`find_uncrawled_candidates`（候选定位器）上，它确实认得 URL 了；可
+`build_context_pack`（回答层）仍然拿整串 URL 去做全文检索——地址里的
+`language`、`cpp` 这些词让 `C++ language` 总页稳赢。定位器把页面找对了，
+回答答的却是别的页。
+
+更难看的是证据当时就在我自己的输出里：那一轮 `ask` 的前三条是
+`C++ language` / `C++ language` / `Coroutines (C++20)`。我看到"目标页出现了"
+就过了，没看它排第几。**"页面在结果里"和"页面是答案"是两回事。**
+
+### 修复
+
+`context.build_context_pack` 增加"指名页面"这一档：
+
+- 查询解析出页面（`ondemand.target_paths`）时，检索词换成那一页的标题
+  ——拿地址去撞全文检索本身就是本末倒置。
+- 候选只保留那一页。检索没排进来就 `search.page_chunks` 直接按页读，
+  **绝不拿别的页面顶上**：顶上去会让 `answer()` 以为已有答案，于是该补抓的
+  那一页永远抓不到，用户得到"答非所问但看着像答案"。
+- `retrieval_policy.named_page_scope` 如实报出这次是被指名限定的。
+- `answer()` 据此判断要不要补抓：指名页已有正文=精确命中不再乱抓；
+  指名页还空着=必须走补抓。
+
+### 端到端复测（新进程 CLI，真实库，看**首位**）
+
+| 数据集 | 查询 | 首位 | 结果页 | scoped |
+|---|---|---|---|---|
+| cppreference | `https://…/cpp/language/coroutines` | `Coroutines (C++20)` | 只有这一页 | ✓ |
+| cppreference | `https://en.…/w/cpp/algorithm/ranges/sort` | `std::ranges::sort` | 只有这一页 | ✓ |
+| cppreference | `/cpp/language/coroutines`（路径形式） | `Coroutines (C++20)` | 只有这一页 | ✓ |
+| cppreference | `https://…/cpp/chrono/duration/ceil`（冷查询） | `std::chrono::ceil` | 当场抓 1 页 | ✓ |
+| blender | `https://…/editors/shader_editor.html` | `Shader Editor` | 只有这一页 | ✓ |
+| cppreference | `std::ranges::sort`（对照组，无地址） | `std::ranges::sort` | —— | ✗ |
+| cppreference | `what is a coroutine`（对照组，普通问句） | `Coroutines (C++20)` | —— | ✗ |
+| blender | `Principled BSDF`（对照组） | `Principled BSDF` | —— | ✗ |
+
+### 顺带暴露出来的：失效地址
+
+UE 的 `…/GameFramework/AActor` 抓回来是 `status=redirect`、无正文的空壳
+（真实库里这样的有 22 个）——Epic 把它撤了，跳转目标是 5.8 文档**首页**，
+不是搬家后的新页。限定到指名页之后答案必然为空，而原来的诊断会说
+"换个说法再试"，那条路永远走不通。
+
+改成如实报跳转、并把库里同名的活页摆出来（`…/Engine/AActor` 就在库里），
+但**不替用户跟着跳转走**——跟过去只会拿到首页。实测下一步命令可直接跑通：
+
+```text
+ask "https://…/GameFramework/AActor"
+  → 这 1 个页面官方做了重定向，抓回来没有正文……
+    /…/GameFramework/AActor → https://…/unreal-engine-5-8-documentation
+    库里另有同名页面还在，很可能是搬家后的位置：
+      /documentation/unreal-engine/API/Runtime/Engine/AActor
+  → 照着查：首位 AActor，2 条知识块 ✓
+```
+
+### 回归
+
+单元测试 241 → **247 全过**，新增的都打在回答层而不是定位器上：
+`EndToEndTests` 四条（URL 限定、路径限定、指名页无正文时宁可空着、
+普通查询不受影响）+ 失效地址两条。四个数据集 `validate` 仍全 pass。
+
 ### 明确不做的
 
 关键词堆（`co_await expression awaiter protocol await_ready …`）不在修复范围。

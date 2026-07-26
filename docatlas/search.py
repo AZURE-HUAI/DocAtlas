@@ -348,6 +348,44 @@ def search_chunks(
     return ranked
 
 
+def page_chunks(
+    connection: sqlite3.Connection, page_ids: list[int], *, limit: int
+) -> list[dict[str, Any]]:
+    """整页读取：不检索，直接按顺序取这几页的知识块。
+
+    用在"查询已经把页面指出来了"的场合（贴了官方地址或清单路径）。那时再让
+    全文检索去撞是本末倒置——地址里的 `documentation`、`language` 这类词会把
+    总目录页顶到第一位，而用户明明已经说清楚要哪一页了。
+
+    先给能直接回答问题的类型（概要、签名、概述），其余按页内顺序。
+    """
+    if not page_ids:
+        return []
+    placeholders = ",".join("?" for _ in page_ids)
+    rows = connection.execute(
+        f"""
+        SELECT {CHUNK_COLUMNS}
+        FROM chunks c JOIN pages p ON p.id=c.page_id
+        WHERE c.page_id IN ({placeholders})
+        ORDER BY CASE c.knowledge_type
+                     WHEN 'summary' THEN 1 WHEN 'signature' THEN 2
+                     WHEN 'overview' THEN 3 ELSE 4 END,
+                 c.page_id, c.chunk_index
+        LIMIT ?
+        """,
+        (*page_ids, limit),
+    )
+    items: list[dict[str, Any]] = []
+    for rank, row in enumerate(rows):
+        item = dict(row)
+        item["score"] = round(STAGE_BASE["entity"] - rank, 2)
+        item["match_stage"] = "named_page"
+        item["query_profile"] = "api"
+        item["snippet"] = _snippet(item["content_md"], set())
+        items.append(item)
+    return items
+
+
 def _legacy_section_search(
     connection: sqlite3.Connection,
     query: str,
