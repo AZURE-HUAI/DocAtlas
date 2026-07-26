@@ -17,9 +17,12 @@ AI 负责理解用户并把自然语言翻译成 MCP 可执行的请求：
 
 1. 判断目标数据集、用户意图、官方术语、分类、版本和关系查询需求。
 2. 将用户语言转换为数据集原文语言，保留代码符号、版本号和专有名词。
-3. 把版本意图传成 `version_target` 与 `version_mode`，不要让核心猜。
+3. 先用 `dataset_id` 选择数据集；只有
+   `docatlas_list_datasets.version_vocabulary` 声明支持内容版本时，才把版本意图
+   传成 `version_target` 与 `version_mode`，不要让核心猜。
 4. 结果弱、语言不匹配或候选不足时，改用更准确的官方术语重试。
-5. 用用户的语言解释结果，并保留原始文档出处。
+5. 结果给出安全的 `next_steps` 时继续执行，直到得到答案或明确的覆盖边界。
+6. 用用户的语言解释结果，并保留原始文档出处。
 
 DocAtlas 核心负责确定性检索、排序、关系和证据；开放式理解与翻译留在 AI 层。
 
@@ -51,6 +54,11 @@ Markdown，需要稳定字段时才用 `format="json"`。
 - `compare`：比较版本，不排除内容。
 - `any`：不限定版本。
 
+数据集版本或快照日期只标识**选中的资料集**，由 `dataset_id` 保证隔离；它不等于
+正文的可过滤版本。若 `version_vocabulary` 为空，不传 `version_target`，也不要把
+`dataset_supports_versions=false` 判为故障。迁移证据不在当前资料集时，如实说明
+覆盖边界；有旧版数据集才切换 `dataset_id` 查询，不能让核心或 AI 补写缺失史料。
+
 ## 关系与证据
 
 `related` 用于回答“属于什么、对应什么、作用于什么”。每条关系都带方向、证据、
@@ -61,9 +69,20 @@ Markdown，需要稳定字段时才用 `format="json"`。
 
 自动生成但没有官方独立实体的内容可以作为检索别名，不能伪造成官方关系。
 
+`related` 返回 `entity_found_but_no_relations` 且 `next_steps` 列出同一清单内的
+pending 路径时，AI 应自动完成一次有上限的闭环：
+
+1. 用相同 `dataset_id` 调用 `docatlas_ask`，查询返回的精确 path 或官方页面名，
+   保持有限 `fetch_limit`。
+2. 补抓成功后，用原实体重试一次 `docatlas_related`。
+3. `target_outside_inventory`、站外目标、弱候选或抓取失败时停止，并说明实际边界；
+   不得无限重试或放宽来源范围。
+
+这一步属于 AI 编排，不要求用户复制路径，也不让只读的 `related` 隐式联网写库。
+
 ## 查不到时
 
-先读返回的 `status` 和 `next_steps`：
+读取返回的 `status` 和 `next_steps`；安全且可执行的步骤由 AI 继续完成：
 
 | 状态 | 含义 |
 |---|---|
@@ -75,7 +94,8 @@ Markdown，需要稳定字段时才用 `format="json"`。
 | `target_outside_inventory` | 官方目标存在，但来源清单未覆盖 |
 | `knowledge_id_not_found` | K 编号无效或已过期 |
 
-只有清单也没有候选时，才能说库中确实没有该页面。不要用记忆补写缺失内容。
+清单没有候选时只能说“当前数据集未收录或未找到”，不能据此断言官网没有该页面。
+不要用记忆补写缺失内容。
 
 ## 引用与上下文
 
