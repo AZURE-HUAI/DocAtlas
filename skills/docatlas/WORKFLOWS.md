@@ -39,12 +39,7 @@ python -m docatlas validate --phase inventory
 | 正文与链接 | `parse_document`、`normalize_link_target` |
 | 边界 | `is_official_url` |
 | 实体归属 | `entity_placement` |
-
-`parse_document` 返回的 `description`：用 `htmlmd.lead_sentence(markdown)`，
-不要自己再写一遍"挑正文第一句"。三个现有适配器都各写过一份，规则还互相不
-一致，最后在同一处漏了同一个坑——整行只有一张图时把 alt 当成了摘要
-（BUG-024）。这个函数已经处理了图片行、表格行、列表项、过短标签这几种
-干扰，新站点不必重新踩一遍。
+| 摘要 | `parse_document` 的 `description` 字段用 `htmlmd.lead_sentence(markdown)` 取，不要自己写 |
 
 按需实现 `document_locale`、`page_members`、`version_marks`、`version_sort_key`
 和 `categorize_path`（只有要让引用闭包自动分类时才需要；cppreference 没有它
