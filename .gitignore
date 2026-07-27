@@ -23,5 +23,8 @@ venv/
 Thumbs.db
 desktop.ini
 
-# 安装时选定的数据位置，一机一份，不入库。
-.docatlas-home
+# 安装时定下的数据位置和默认库，一机一份，不入库。
+.docatlas-local.toml
+
+# 内部测试流程，不发布。
+测试流.md

@@ -33,27 +33,36 @@ from .runtime import (  # noqa: F401
     active,
 )
 
-_DEFAULT = active()
-
 # 一个数据集 = 一个产品的一个版本，独占一个目录、一个数据库。
 # 不合并成大库：删除、备份、出问题时的隔离都简单得多。
-DATASET_ID = _DEFAULT.id
-DATA_DIR = _DEFAULT.data_dir
-DB_PATH = _DEFAULT.db_path
-EXPORT_DIR = _DEFAULT.export_dir
-ASSET_DIR = _DEFAULT.asset_dir
+#
+# 这些值全都从"当前生效的数据集"派生，所以**按需算**，不在导入时算。导入时算
+# 的话，一个还没选定数据集的进程连 `import docatlas.net` 都过不去——而程序不
+# 内置默认库（装什么是用户的选择），MCP 服务器更是完全可以不带默认库跑起来，
+# 每次调用自带 `dataset_id`。
+_FROM_WORKSPACE = {
+    "DATASET_ID": lambda default: default.id,
+    "DATA_DIR": lambda default: default.data_dir,
+    "DB_PATH": lambda default: default.db_path,
+    "EXPORT_DIR": lambda default: default.export_dir,
+    "ASSET_DIR": lambda default: default.asset_dir,
+    "DATASET": lambda default: default.dataset,
+    "SOURCE": lambda default: default.source,
+    "KNOWLEDGE": lambda default: default.knowledge,
+    "VERSION": lambda default: default.version,
+    "LANGUAGE": lambda default: default.language,
+    # 页面可能带的分类全集。用的是 query_categories 而不是 categories：后者是
+    # "分类 → 路径前缀"的枚举规则，引用闭包收进来的那一类没有前缀，写不进去，
+    # 但它的页面照样落库。命令行选项、抽样配额、导出和报表要的都是"能落库的分类"。
+    "CATEGORY_IDS": lambda default: default.dataset.query_categories,
+    "CATEGORY_LABELS": lambda default: default.category_labels,
+    "ENTITY_TYPES": lambda default: default.dataset.entity_types,
+    # 路径前缀：什么样的路径才算"这个数据集的一篇文档"。
+    "DOC_PREFIX": lambda default: default.doc_prefix,
+}
 
-DATASET = _DEFAULT.dataset
-SOURCE = _DEFAULT.source
-KNOWLEDGE = _DEFAULT.knowledge
 
-VERSION = _DEFAULT.version
-LANGUAGE = _DEFAULT.language
-# 页面可能带的分类全集。用的是 query_categories 而不是 categories：后者是
-# "分类 → 路径前缀"的枚举规则，引用闭包收进来的那一类没有前缀，写不进去，
-# 但它的页面照样落库。命令行选项、抽样配额、导出和报表要的都是"能落库的分类"。
-CATEGORY_IDS = _DEFAULT.dataset.query_categories
-CATEGORY_LABELS = _DEFAULT.category_labels
-ENTITY_TYPES = _DEFAULT.dataset.entity_types
-# 路径前缀：什么样的路径才算"这个数据集的一篇文档"。
-DOC_PREFIX = _DEFAULT.doc_prefix
+def __getattr__(name: str):
+    if name in _FROM_WORKSPACE:
+        return _FROM_WORKSPACE[name](active())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

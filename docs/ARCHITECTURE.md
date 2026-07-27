@@ -101,7 +101,7 @@ DocAtlas 要同时服务多个版本、多个产品、多个文档站，所以�
 
 ```
 DOCATLAS_HOME     数据放哪（默认 <仓库>/data）
-DOCATLAS_DATASET  用哪个数据集（默认 epic-ue-5.8）
+DOCATLAS_DATASET  用哪个数据集（不设内置默认，见 .docatlas-local.toml）
 ```
 
 一个数据集独占一个目录、一个 SQLite。**刻意不合并成大库**：

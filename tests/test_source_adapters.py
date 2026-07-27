@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
 import unittest
 
-from docatlas.dataset import load_dataset
-from docatlas.runtime import DATASET_CONFIG_DIR
-from docatlas.sources import blender_manual, cppreference, roblox_creator
+# 跑在哪个库上要显式说：程序不内置默认库，而 config 在导入时就要定下来。
+os.environ.setdefault("DOCATLAS_DATASET", "epic-ue-5.8")
+
+from docatlas.dataset import load_dataset  # noqa: E402
+from docatlas.runtime import DATASET_CONFIG_DIR  # noqa: E402
+from docatlas.sources import (  # noqa: E402
+    blender_manual,
+    cppreference,
+    roblox_creator,
+)
 
 
 class CppreferenceAdapterTests(unittest.TestCase):

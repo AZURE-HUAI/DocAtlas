@@ -183,8 +183,13 @@ DocAtlas/
       └─ site_inventory.jsonl   冻结的全站页面清单（带 sha256）
 ```
 
-数据放哪由三级优先级决定：环境变量 `DOCATLAS_HOME` > 安装时写下的 `.docatlas-home`
-（`install.py --data-dir` 生成）> 仓库里的 `data/`。想用别的数据集：设 `DOCATLAS_DATASET`。
+数据放哪、默认查哪个库，都由 `.docatlas-local.toml` 记着（`install.py` 生成，一机
+一份，不入库）。优先级都是：环境变量（`DOCATLAS_HOME` / `DOCATLAS_DATASET`）>
+这份文件 > 内置回退。
+
+**默认库没有内置回退**——装什么库是你自己的选择，程序不替你挑一个。只配了一个
+数据集时不必选（没有歧义）；配了多个又没定过，命令行会直接说"本机可选：…"，
+MCP 则要求调用时带上 `dataset_id`。定下来用 `python install.py --dataset <id>`。
 
 ---
 

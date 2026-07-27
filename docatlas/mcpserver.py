@@ -240,10 +240,15 @@ TOOLS: list[dict[str, Any]] = [
 
 
 def _workspace(arguments: dict[str, Any]) -> runtime.Workspace:
-    """按 dataset_id 选库；不给就用启动时那个。"""
+    """按 dataset_id 选库；不给就用安装时定下的那个。"""
     dataset_id = str(arguments.get("dataset_id") or "").strip()
     if not dataset_id:
-        return runtime.active()
+        try:
+            return runtime.active()
+        except runtime.DatasetNotChosen as exc:
+            # 本机不止一个库、又没定过默认。这不是故障，是缺一个参数——说清楚
+            # 让 AI 补上 dataset_id 再来，别把它当成"查不到"。
+            raise ToolError(f"{exc} 或者在本次调用里直接给 dataset_id。") from exc
     try:
         return runtime.workspace(dataset_id)
     except SystemExit as exc:
@@ -744,9 +749,13 @@ def serve(stdin=None, stdout=None) -> int:
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     catalogue = "、".join(key for key, _ in _dataset_catalogue())
+    try:
+        opening = f"默认数据集 {runtime.active().id}"
+    except runtime.DatasetNotChosen:
+        # 没定过默认不该让服务器起不来：每个工具都能自带 dataset_id，照样能用。
+        opening = "未指定默认数据集，调用时请带 dataset_id"
     print(
-        f"[docatlas] MCP 服务器已启动。默认数据集 {runtime.active().id}；"
-        f"可查：{catalogue}",
+        f"[docatlas] MCP 服务器已启动。{opening}；可查：{catalogue}",
         file=sys.stderr,
         flush=True,
     )

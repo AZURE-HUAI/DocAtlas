@@ -31,7 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 数据集仍用真实的那一份配置——这样 datasets/*.toml 本身也在测试覆盖范围内。
 _TEMP_HOME = tempfile.mkdtemp(prefix="docatlas_test_")
 os.environ["DOCATLAS_HOME"] = _TEMP_HOME
-os.environ.pop("DOCATLAS_DATASET", None)
+# 跑在哪个库上要**显式**说。程序本身不内置默认库（装什么是用户的选择），所以
+# 这里原来那句 pop 等于在悄悄依赖那个写死的 UE 默认——它一没了，导入就崩。
+os.environ["DOCATLAS_DATASET"] = "epic-ue-5.8"
 
 from docatlas import (  # noqa: E402
     chunking, config, context, coverage, crawl, dataset, db, discover, htmlmd,
@@ -1499,11 +1501,17 @@ class DataRootTests(unittest.TestCase):
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.pointer = Path(self.directory.name) / ".docatlas-home"
-        original = runtime.DATA_ROOT_POINTER
-        runtime.DATA_ROOT_POINTER = self.pointer
-        self.addCleanup(setattr, runtime, "DATA_ROOT_POINTER", original)
+        self.settings = Path(self.directory.name) / ".docatlas-local.toml"
+        original = runtime.LOCAL_SETTINGS
+        runtime.LOCAL_SETTINGS = self.settings
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original)
         self.addCleanup(self.directory.cleanup)
+
+    def write(self, **values):
+        self.settings.write_text(
+            "".join(f'{key} = "{value}"\n' for key, value in values.items()),
+            encoding="utf-8",
+        )
 
     def resolve(self, home: str | None = None):
         previous = os.environ.pop("DOCATLAS_HOME", None)
@@ -1523,20 +1531,67 @@ class DataRootTests(unittest.TestCase):
         """必须落到文件里：MCP 客户端起子进程时不会带上你终端里的环境变量，
         只认 DOCATLAS_HOME 的话，命令行查得到的库、MCP 查不到（BUG-021）。"""
         chosen = Path(self.directory.name) / "elsewhere"
-        self.pointer.write_text(str(chosen) + "\n", encoding="utf-8")
+        self.write(home=chosen.as_posix())
         self.assertEqual(self.resolve(), chosen.resolve())
 
     def test_the_environment_variable_still_wins(self):
-        """临时换一个库跑一次，不该被迫改文件。"""
-        self.pointer.write_text(str(Path(self.directory.name) / "installed"),
-                                encoding="utf-8")
+        """临时挪一次，不该被迫改文件。"""
+        self.write(home=(Path(self.directory.name) / "installed").as_posix())
         temporary = Path(self.directory.name) / "just-this-once"
         self.assertEqual(self.resolve(str(temporary)), temporary.resolve())
 
-    def test_an_empty_pointer_falls_back_instead_of_pointing_at_the_repo(self):
-        """写了个空文件不能解成仓库根本身——那会把数据倒进代码目录。"""
-        self.pointer.write_text("  \n", encoding="utf-8")
-        self.assertEqual(self.resolve(), (runtime.REPO_ROOT / "data").resolve())
+    def test_a_broken_settings_file_is_loud(self):
+        """悄悄退回默认值，会让人对着另一个库的答案查半天。"""
+        self.settings.write_text("home = 这不是 TOML\n", encoding="utf-8")
+        with self.assertRaises(Exception):
+            runtime.local_settings()
+
+
+class DefaultDatasetTests(unittest.TestCase):
+    """装什么库是用户的选择，程序不替他挑一个（不写死 UE）。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.settings = Path(self.directory.name) / ".docatlas-local.toml"
+        original = runtime.LOCAL_SETTINGS
+        runtime.LOCAL_SETTINGS = self.settings
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original)
+        self.addCleanup(self.directory.cleanup)
+        self.previous = os.environ.pop("DOCATLAS_DATASET", None)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        os.environ.pop("DOCATLAS_DATASET", None)
+        if self.previous is not None:
+            os.environ["DOCATLAS_DATASET"] = self.previous
+
+    def test_no_product_is_hardcoded_as_the_default(self):
+        """写死某个产品，别人建了别的库还得先发现自己被默认到了另一个上面，
+        而这种错误看起来只是"查不到"。"""
+        source = (runtime.REPO_ROOT / "docatlas" / "runtime.py").read_text(
+            encoding="utf-8"
+        )
+        for dataset_id in runtime.available_dataset_ids():
+            self.assertNotIn(dataset_id, source, "运行时写死了某个数据集 id")
+
+    def test_the_installed_choice_is_used(self):
+        chosen = runtime.available_dataset_ids()[0]
+        self.settings.write_text(f'dataset = "{chosen}"\n', encoding="utf-8")
+        self.assertEqual(runtime.default_dataset_id(), chosen)
+
+    def test_the_environment_variable_still_wins(self):
+        self.settings.write_text(
+            f'dataset = "{runtime.available_dataset_ids()[0]}"\n', encoding="utf-8"
+        )
+        os.environ["DOCATLAS_DATASET"] = "just-this-once"
+        self.assertEqual(runtime.default_dataset_id(), "just-this-once")
+
+    def test_without_a_choice_it_says_so_instead_of_guessing(self):
+        """本机不止一个库又没选过，要说清楚是缺一个参数，不是"查不到"。"""
+        with self.assertRaises(runtime.DatasetNotChosen) as caught:
+            runtime.default_dataset_id()
+        for dataset_id in runtime.available_dataset_ids():
+            self.assertIn(dataset_id, str(caught.exception), "报错里没列出可选项")
 
 
 class RuntimeWorkspaceTests(unittest.TestCase):
@@ -1582,7 +1637,7 @@ class RuntimeWorkspaceTests(unittest.TestCase):
                 self.assertEqual(executor.submit(bound).result(), "in-thread")
                 # 反向证明这个测试真的能抓到问题：不 bind 就退回默认数据集。
                 self.assertEqual(
-                    executor.submit(naked).result(), runtime.DEFAULT_DATASET_ID
+                    executor.submit(naked).result(), runtime.default_dataset_id()
                 )
 
     def test_every_thread_pool_submits_a_bound_callable(self):

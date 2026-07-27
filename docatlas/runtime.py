@@ -29,6 +29,7 @@ from functools import cached_property, lru_cache
 import os
 from pathlib import Path
 import re
+import tomllib
 from types import ModuleType
 from typing import Any, Callable, Iterator
 
@@ -45,30 +46,62 @@ from .dataset import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATASET_CONFIG_DIR = REPO_ROOT / "datasets"
 
-# 安装时选定的数据位置。程序在哪、数据在哪是两件事：仓库可以放在系统盘，
-# 二十万页的库可以放在别的盘。安装器把选择写进这个文件，一行一个路径。
-DATA_ROOT_POINTER = REPO_ROOT / ".docatlas-home"
+# 安装时定下来的两件事：数据放哪、默认查哪个库。必须落到文件里——MCP 客户端起
+# 子进程时不会带上你终端里的环境变量，只认环境变量的话，命令行查得到的库、
+# MCP 查不到。一机一份，不入库。
+LOCAL_SETTINGS = REPO_ROOT / ".docatlas-local.toml"
+
+
+def local_settings() -> dict[str, Any]:
+    """读安装时写下的选择。读不出来就直说，不要悄悄退回默认值。
+
+    这份文件是安装器写的；它坏了要么是手改坏了、要么是安装器有 bug。两种都该
+    被看见——静悄悄地换回另一个库，会让人对着错误的答案查半天。
+    """
+    if not LOCAL_SETTINGS.exists():
+        return {}
+    return tomllib.loads(LOCAL_SETTINGS.read_text(encoding="utf-8"))
 
 
 def _data_root() -> Path:
     """数据根：所有数据集的家。
 
     优先级是环境变量 > 安装时的选择 > 仓库里的 `data/`。环境变量排最前，是为了
-    临时换一个库跑一次不用改任何文件；安装时的选择要落到文件里，是因为 MCP 客户端
-    起子进程时不会带上你终端里的环境变量。
+    临时挪一次不用改任何文件。
     """
-    if override := os.environ.get("DOCATLAS_HOME"):
-        return Path(override).resolve()
-    if DATA_ROOT_POINTER.exists():
-        if chosen := DATA_ROOT_POINTER.read_text(encoding="utf-8").strip():
-            return Path(chosen).resolve()
-    return (REPO_ROOT / "data").resolve()
+    chosen = os.environ.get("DOCATLAS_HOME") or local_settings().get("home")
+    return Path(chosen).resolve() if chosen else (REPO_ROOT / "data").resolve()
 
 
 DATA_ROOT = _data_root()
 
-# 没有显式指定时用哪个数据集。命令行一个进程只服务一个库，靠的就是它。
-DEFAULT_DATASET_ID = os.environ.get("DOCATLAS_DATASET") or "epic-ue-5.8"
+
+class DatasetNotChosen(RuntimeError):
+    """没定下来查哪个库，而本机不止一个可选。"""
+
+
+def default_dataset_id() -> str:
+    """没显式指定时用哪个数据集。
+
+    **不设内置默认。** 装什么库是用户自己的选择，程序不替他挑一个——写死某个
+    产品，别人建了别的库还得先发现自己被默认到了另一个上面，而这种错误看起来
+    只是"查不到"。只配了一个库时不必问，那没有歧义。
+    """
+    chosen = os.environ.get("DOCATLAS_DATASET") or local_settings().get("dataset")
+    if chosen:
+        return str(chosen)
+    if len(available := available_dataset_ids()) == 1:
+        return available[0]
+    raise DatasetNotChosen(
+        "没有指定要查哪个数据集。"
+        + (
+            f"本机可选：{'、'.join(available)}。"
+            if available
+            else "datasets/ 下没有任何配置。"
+        )
+        + " 临时指定用 DOCATLAS_DATASET；定下来用 python install.py --dataset <id>。"
+    )
+
 
 # 什么样的词算"标识符"。通用规则认得 `::`、下划线和驼峰；领域知识包可以
 # 补充自己的形状（比如 Unreal 的 AActor、FVector）。
@@ -256,7 +289,7 @@ def active() -> Workspace:
     try:
         return _active.get()
     except LookupError:
-        default = workspace(DEFAULT_DATASET_ID)
+        default = workspace(default_dataset_id())
         _active.set(default)
         return default
 
