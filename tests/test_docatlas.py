@@ -207,6 +207,79 @@ def chunking_entity(*, title: str, path: str, category: str) -> dict:
     )
 
 
+class LeadSentenceTests(unittest.TestCase):
+    """摘要挑哪一句，三个适配器共用一条规则。
+
+    以前每家各抄一份，规则还互相不一致，而且都漏了同一件事：整行只有一张图
+    时，图的 alt 被当成了摘要。Blender 的节点页每页开头都是示意图，于是
+    `pages.description` 存的是图片语法拍平后的残骸，还会漏进 Markdown 导出。
+    """
+
+    def test_an_image_only_line_is_not_the_summary(self):
+        """Blender 的形状：示意图在前，真正的说明在后。"""
+        self.assertEqual(
+            htmlmd.lead_sentence(
+                "![Blur Attribute node.](https://docs.blender.org/x.webp)\n\n"
+                "The Blur Attribute node smooths values between neighbors.\n"
+            ),
+            "The Blur Attribute node smooths values between neighbors.",
+        )
+
+    def test_an_image_wrapped_in_a_link_is_also_skipped(self):
+        self.assertEqual(
+            htmlmd.lead_sentence(
+                "[![Node.](https://example.invalid/a.png)](https://example.invalid/a)\n"
+                "This node converts a shader to a color value.\n"
+            ),
+            "This node converts a shader to a color value.",
+        )
+
+    def test_a_bare_label_is_not_a_summary(self):
+        """`EEVEE Only` 是徽章、`Image` 是参数名，都不是"这一页在讲什么"。"""
+        self.assertEqual(
+            htmlmd.lead_sentence(
+                "EEVEE Only\n\nThe Shader to RGB node is used for stylized shading.\n"
+            ),
+            "The Shader to RGB node is used for stylized shading.",
+        )
+
+    def test_a_bold_opening_is_kept(self):
+        """`**加粗**` 开头的是正文首句，不是列表项——按 `*` 一刀切会丢掉它。"""
+        self.assertEqual(
+            htmlmd.lead_sentence("**Chaos Physics** is a light-weight solution.\n"),
+            "Chaos Physics is a light-weight solution.",
+        )
+
+    def test_a_blockquote_opening_is_kept(self):
+        """Roblox 有一批页面的开场白写在引用块里，记号去掉正好是那句话。"""
+        self.assertEqual(
+            htmlmd.lead_sentence("> This service manages player data storage.\n"),
+            "This service manages player data storage.",
+        )
+
+    def test_headings_tables_and_lists_are_skipped(self):
+        self.assertEqual(
+            htmlmd.lead_sentence(
+                "# Page title\n| a | b |\n| --- | --- |\n- bullet item here\n"
+                "* star bullet item\n\nThe actual description sentence lives here.\n"
+            ),
+            "The actual description sentence lives here.",
+        )
+
+    def test_a_page_with_nothing_quotable_gets_no_summary(self):
+        """一个都不合格就空着。页面叫什么，标题里本来就有。"""
+        self.assertEqual(
+            htmlmd.lead_sentence("## Inputs\n\n  Image\n\n  Brightness\n"), ""
+        )
+
+    def test_length_is_measured_in_characters_not_words(self):
+        """按字数不按词数：中日韩整句话没有空格，按词数会被判成标签。"""
+        self.assertEqual(
+            htmlmd.lead_sentence("这个节点用于平滑相邻几何元素之间的属性值。\n"),
+            "这个节点用于平滑相邻几何元素之间的属性值。",
+        )
+
+
 class PageSummaryTests(unittest.TestCase):
     """摘要只在正文没说过这句话时才补进正文（BUG-022）。
 
@@ -3329,8 +3402,10 @@ class BreadcrumbNoiseTests(unittest.TestCase):
         """切分规则变了不改版本号，旧块会和新块混在同一个库里。
 
         v7：摘要与正文重复时不再插入正文（BUG-022）。
+        v8：摘要改由 `lead_sentence` 统一挑选；cppreference 标准版本页换了
+        分类，而分类标签是要写进 `context_prefix` 的（ENH-011）。
         """
-        self.assertEqual(constants.CHUNKER_VERSION, "v7")
+        self.assertEqual(constants.CHUNKER_VERSION, "v8")
 
 
 class CrossLanguageDiagnosisTests(unittest.TestCase):

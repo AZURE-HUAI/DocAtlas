@@ -289,3 +289,50 @@ def plain_text(markdown: str) -> str:
     value = MARKDOWN_MARKUP_RE.sub(" ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
+# 整行只有一张图，外面可以再套一层链接：
+# `![alt](src)`、`[![alt](src)](href)`。
+_IMAGE_ONLY_LINE_RE = re.compile(
+    r"^\[?\s*!\[[^\]]*\]\([^)]*\)\s*\]?(?:\([^)]*\))?$"
+)
+# 列表项的星号，不是 `**加粗**`：只认星号后面跟空白的写法。
+_STAR_BULLET_RE = re.compile(r"^\*\s")
+
+# 一句摘要至少要有多少个字。低于这个数的是标签不是句子：Blender 的节点页
+# 除了示意图就只有 `Image`、`EEVEE Only`、`Brightness` 这类参数名和徽章，
+# 挑中任何一个当"这一页在讲什么"都是误导。
+#
+# 按**字数**不按词数：词数要靠空格切，而中日韩整句话一个空格都没有，用词数
+# 会把这些语言的正常句子全判成标签。数据集的语言由它自己声明，这里不做假设。
+MIN_LEAD_CHARS = 16
+
+
+def lead_sentence(markdown: str) -> str:
+    """正文里第一句像话的句子，用来当页面摘要。
+
+    三个适配器本来各抄了一份这段逻辑，规则还互相不一致，而且都漏了同一件事：
+    **整行只有一张图时，图的 alt 会被当成摘要**。Blender 的节点页每一页开头
+    都是一张示意图，于是 `pages.description` 存下来的是
+    `![Blur Attribute node. ](https://…/node-types_GeometryNodeBlurAttribute.webp)`
+    拍平后的残骸，还会原样漏进 Markdown 导出。
+
+    跳过的几类都不是"这一页在讲什么"的答案：标题（那是页面自己的名字）、表格
+    行、列表项（多半是目录或导航）、纯图片行，以及短于 `MIN_LEAD_CHARS` 的
+    标签。一个都不合格就返回空串——宁可没有摘要，也不要拿一句不知所云的东西
+    冒充；页面叫什么，标题里本来就有。
+
+    刻意**不**跳引用块：Roblox 有一批页面的开场白就写在 `> …` 里，`plain_text`
+    会把记号去掉，正好是要的那句话。也刻意只把"星号加空格"当列表项——`**加粗**`
+    开头的句子是正文，不是列表，一起排除会连 "**Chaos Physics** is a…" 这种
+    正经首句都丢掉。
+    """
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "|", "-")):
+            continue
+        if _STAR_BULLET_RE.match(stripped) or _IMAGE_ONLY_LINE_RE.match(stripped):
+            continue
+        if len(text := plain_text(stripped)) >= MIN_LEAD_CHARS:
+            return text
+    return ""

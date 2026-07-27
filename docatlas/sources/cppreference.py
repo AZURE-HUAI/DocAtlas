@@ -9,7 +9,7 @@ import re
 from typing import Any
 import urllib.parse
 
-from ..htmlmd import html_to_markdown, plain_text
+from ..htmlmd import html_to_markdown, lead_sentence, plain_text
 from ..net import fetch_bytes
 from ._html import (
     absolutize_html_urls,
@@ -23,6 +23,11 @@ def _base_url(dataset) -> str:
     return dataset.option("base_url", "https://cppreference.com").rstrip("/")
 
 
+# 标准版本总览页：`cpp/11`、`cpp/20`、`cpp/23`……后面不再跟路径。
+# 只认整串，否则 `cpp/compiler_support/20` 也会被算进来。
+_STANDARD_VERSION_RE = re.compile(r"^cpp/\d+$")
+
+
 def _category_for_title(title: str) -> str | None:
     normalized = title.replace("_", " ").casefold()
     if not normalized.startswith("cpp/"):
@@ -31,6 +36,11 @@ def _category_for_title(title: str) -> str | None:
         return "compiler_support"
     if normalized.startswith("cpp/language"):
         return "language"
+    # 标准版本总览页横跨语言和标准库两边（`New language features` 和
+    # `New library features` 各占一节），归进兜底的 standard_library 只是
+    # "既不是语言也不是编译器支持"的副产品，不是判断的结果（ENH-011）。
+    if _STANDARD_VERSION_RE.match(normalized):
+        return "standard_versions"
     return "standard_library"
 
 
@@ -158,18 +168,10 @@ def parse_document(dataset, path: str, body: bytes) -> dict[str, Any]:
     content = clean_active_content(content)
     content = absolutize_html_urls(content, page_url)
     markdown, assets = html_to_markdown(content, page_url)
-    description = next(
-        (
-            plain_text(line)
-            for line in markdown.splitlines()
-            if line.strip() and not line.lstrip().startswith(("#", "|", "-"))
-        ),
-        "",
-    )
     return {
         "kind": "document",
         "title": _title(document_html, path),
-        "description": description,
+        "description": lead_sentence(markdown),
         "markdown": markdown,
         "assets": assets,
         "block_types": {"html"},

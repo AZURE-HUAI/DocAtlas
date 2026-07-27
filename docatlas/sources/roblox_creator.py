@@ -33,7 +33,7 @@ import re
 from typing import Any
 import urllib.parse
 
-from ..htmlmd import plain_text
+from ..htmlmd import lead_sentence
 from ..net import fetch_bytes
 
 
@@ -238,17 +238,10 @@ def parse_document(dataset, path: str, body: bytes) -> dict[str, Any]:
         or (heading.group(1).strip() if heading else "")
         or Path(path).name
     )
-    description = fields.get("summary") or fields.get("description") or ""
-    if not description:
-        # 没有摘要字段时，用正文里第一句引用块（`> …`）或第一个自然段。
-        description = next(
-            (
-                plain_text(line.lstrip("> ").strip())
-                for line in markdown.splitlines()
-                if line.strip() and not line.lstrip().startswith(("#", "|", "-", "*"))
-            ),
-            "",
-        )
+    # front matter 里的摘要最可信；没有才退回正文第一句（含 `> …` 引用块）。
+    description = (
+        fields.get("summary") or fields.get("description") or lead_sentence(markdown)
+    )
     return {
         "kind": "document",
         "title": title.strip(),
