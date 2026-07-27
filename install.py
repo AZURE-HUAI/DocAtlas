@@ -51,22 +51,42 @@ class Failed(Exception):
 # --------------------------------------------------------------------------
 
 
-def choose_data_dir(requested: str | None) -> Path:
-    """定下数据根，并把选择写进 `.docatlas-home`。
+def save_choices(data_dir: str | None, dataset: str | None) -> tuple[Path, str | None]:
+    """把"数据放哪"和"默认查哪个库"写进 `.docatlas-local.toml`。
 
     必须落到文件里：MCP 客户端起子进程时不会带上你终端里的环境变量，只靠
-    `DOCATLAS_HOME` 的话，命令行查得到的库、MCP 查不到。
-    """
-    from docatlas.runtime import DATA_ROOT_POINTER
+    `DOCATLAS_HOME` / `DOCATLAS_DATASET` 的话，命令行查得到的库、MCP 查不到。
 
-    default = REPO_ROOT / "data"
-    target = Path(requested).expanduser().resolve() if requested else default
-    target.mkdir(parents=True, exist_ok=True)
-    if target == default.resolve():
-        DATA_ROOT_POINTER.unlink(missing_ok=True)
+    没传的那一项保持原样，不会被这次安装抹掉。
+    """
+    from docatlas.runtime import LOCAL_SETTINGS, available_dataset_ids, local_settings
+
+    settings = local_settings()
+    default_dir = REPO_ROOT / "data"
+    if data_dir:
+        target = Path(data_dir).expanduser().resolve()
+        settings["home"] = str(target)
     else:
-        DATA_ROOT_POINTER.write_text(str(target) + "\n", encoding="utf-8")
-    return target
+        target = Path(settings.get("home") or default_dir).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    if target == default_dir.resolve():
+        settings.pop("home", None)
+
+    if dataset:
+        if dataset not in (available := available_dataset_ids()):
+            raise Failed(f"没有这个数据集：{dataset}。可选：{'、'.join(available)}")
+        settings["dataset"] = dataset
+
+    if settings:
+        LOCAL_SETTINGS.write_text(
+            "# 由 install.py 生成，一机一份，不入库。\n"
+            + "".join(f"{key} = {json.dumps(str(value))}\n"
+                      for key, value in sorted(settings.items())),
+            encoding="utf-8",
+        )
+    else:
+        LOCAL_SETTINGS.unlink(missing_ok=True)
+    return target, settings.get("dataset")
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +240,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--data-dir", help="数据放哪（默认 <仓库>/data）")
+    parser.add_argument("--dataset", help="默认查哪个库（不指定就每次自己说）")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="只打印 MCP 配置片段，不动任何文件")
     parser.add_argument("--skip-mcp", action="store_true", help="不注册 MCP")
@@ -243,9 +264,10 @@ def main() -> int:
         return 0
 
     try:
-        data_dir = choose_data_dir(args.data_dir)
+        data_dir, dataset = save_choices(args.data_dir, args.dataset)
         print(f"程序：{REPO_ROOT}")
         print(f"数据：{data_dir}")
+        print(f"默认库：{dataset or '未指定（每次自己说，或 --dataset 定下来）'}")
         print(f"Python：{python}\n")
 
         if not args.skip_mcp:

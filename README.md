@@ -1,18 +1,21 @@
 # DocAtlas
 
-给 AI 用的本地文档知识库。把官方技术文档抓下来切成小块、建好索引和交叉关系，
-AI 查的时候拿到**刚好够用的那几段**，每段都带原始 URL。
+A local documentation knowledge base for AI agents. It crawls official technical
+docs, splits them into small chunks with a full-text index and cross-references,
+and hands the agent **just the few passages it needs** — each one carrying the
+source URL.
 
-解决的是这个问题：AI 回答技术问题，要么凭记忆瞎编，要么把整页文档塞进上下文
-然后没预算干正事。
+Without it, an AI answering a technical question either makes things up from
+memory or dumps a whole page into the context window and runs out of budget.
 
-仓库里只有程序。已经写好了四个站点的适配器和配置——Unreal Engine 5.8、
-cppreference、Blender Manual、Roblox Creator Hub——**文档数据要自己抓**（见下）。
-加别的站点写一个适配器就行，核心代码不用动。
+The repository ships **code only**. Adapters and configs are included for four
+sites — Unreal Engine 5.8, cppreference, Blender Manual, Roblox Creator Hub —
+but **you crawl the docs yourself** (see below). Adding another site means
+writing one adapter; the core stays untouched.
 
-## 安装
+## Install
 
-需要 Python 3.11+，不装任何第三方包。
+Python 3.11+, no third-party packages.
 
 ```bash
 git clone https://github.com/AZURE-HUAI/DocAtlas.git
@@ -20,33 +23,37 @@ cd DocAtlas
 python install.py
 ```
 
-`install.py` 装好 Skill、注册 MCP，并且真起一次服务器确认连得上——没通过就不写
-任何配置。Claude Code 和 Codex 会自动注册，其他客户端用 `--print` 打印配置片段
-自己粘。数据想放别的盘：`--data-dir D:/DocAtlasData`。
+`install.py` installs the Skill, registers the MCP server, and actually starts
+that server once to confirm it connects — nothing is written to your config if
+that check fails. Claude Code and Codex are registered automatically; for other
+clients run `python install.py --print` and paste the snippet.
 
-## 建库
+Options: `--data-dir D:/DocAtlasData` puts the databases on another drive,
+`--dataset <id>` picks which library is the default.
 
-```bash
-python -m docatlas crawl --discovery-only    # 枚举全站页面清单，几十分钟
-```
-
-**做完这一步就能用了。** 清单记着每一页在哪，所以本地还没有的页面，AI 问到时会
-当场抓回来——不需要先把二十万页全下载下来。想要全量：
+## Build a library
 
 ```bash
-python -m docatlas crawl --skip-discovery    # 随时可中断，下次自动续传
+DOCATLAS_DATASET=cppreference-2026-07-26 python -m docatlas crawl --discovery-only
 ```
 
-默认建的是 UE 5.8。换别的：先设 `DOCATLAS_DATASET=cppreference-2026-07-26`，
-再照上面跑。四个库互不干扰，删掉一个不影响另一个。
+That enumerates the site's page list (tens of minutes) without downloading
+article bodies — **and that is enough to start using it.** The list records
+where every page lives, so anything not held locally is fetched on demand.
 
-## 用
+For a fully local copy, follow up with `crawl --skip-discovery`; it resumes
+after any interruption.
 
-在 Claude Code 之类的客户端里直接问就行，AI 会自己查库、自己带上出处。
-也可以自己敲：`python -m docatlas ask "Nanite"`。
+There is no built-in default library — pick the one you want with
+`DOCATLAS_DATASET`, or make it stick with `python install.py --dataset <id>`.
 
-## 更多
+## Use
 
-- [使用手册](docs/USAGE.md) —— 全部命令、抓取、数据结构、加新数据集
-- [代码架构](docs/ARCHITECTURE.md) · [数据合同](docs/DATA_CONTRACT.md) · [AI 检索规则](docs/AI_ROUTING.md)
-- [问题记录](issues/README.md) · [参与开发](CONTRIBUTING.md)
+Just ask in Claude Code or any MCP client; the agent queries the library and
+cites its sources. Or run it yourself: `python -m docatlas ask "std::vector"`.
+
+## More
+
+- [Usage guide](docs/USAGE.md) — every command, crawling, data layout, new datasets
+- [Architecture](docs/ARCHITECTURE.md) · [Data contract](docs/DATA_CONTRACT.md) · [AI routing](docs/AI_ROUTING.md)
+- [Issue log](issues/README.md) · [Contributing](CONTRIBUTING.md)
