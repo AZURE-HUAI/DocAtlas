@@ -411,22 +411,23 @@ def command_mcp(_: argparse.Namespace) -> int:
 def command_paths(_: argparse.Namespace) -> int:
     """告诉调用方数据在哪。PowerShell 脚本靠它定位日志和数据库，
     这样路径规则只在 config.py 写一次，别处不再各写一遍。"""
-    print(
-        json.dumps(
-            {
-                "dataset": DATASET_ID,
-                # 原文是什么语言由数据集说了算，不是程序的假设——安装技能时
-                # 要把它填进说明里，好让 AI 知道该用哪种语言的词去查。
-                "language": LANGUAGE,
-                "repo_root": str(REPO_ROOT),
-                "data_root": str(DATA_ROOT),
-                "data_dir": str(DATA_DIR),
-                "database": str(DB_PATH),
-                "exists": DB_PATH.exists(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    from .runtime import available_dataset_ids
+
+    print_json(
+        {
+            "dataset": DATASET_ID,
+            # 原文是什么语言由数据集说了算，不是程序的假设——安装技能时
+            # 要把它填进说明里，好让 AI 知道该用哪种语言的词去查。
+            "language": LANGUAGE,
+            # 本机装了哪几个库。没 MCP 时这是唯一能发现它们的途径，
+            # 否则只能靠去翻 datasets/ 目录——那正是技能手册不该教的事。
+            "datasets": available_dataset_ids(),
+            "repo_root": str(REPO_ROOT),
+            "data_root": str(DATA_ROOT),
+            "data_dir": str(DATA_DIR),
+            "database": str(DB_PATH),
+            "exists": DB_PATH.exists(),
+        }
     )
     return 0
 
