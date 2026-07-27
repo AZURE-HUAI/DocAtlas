@@ -123,8 +123,11 @@ python -m docatlas ask "<明确存在的官方术语>" --token-budget 1500
 python -m docatlas validate --phase content
 ```
 
-项目移动或 Skill 内容变化后重新安装：
+项目移动或 Skill 内容变化后重新安装（技能与 MCP 一起更新，装完自己验一遍）：
 
 ```powershell
-.\scripts\install-skill.ps1
+python install.py
 ```
+
+技能文件和 MCP 配置里都写死着仓库的实际位置，移动或改名目录后不重跑这一条，
+AI 会按旧路径去找然后失败。

@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import sqlite3
+from collections.abc import Sequence
 from typing import Any
 
 from .chunking import normalize_name
@@ -69,10 +70,25 @@ CONCEPT_TYPE_BONUS = {
 STAGE_BASE = {
     "entity": 100.0,
     "phrase": 70.0,
-    "all_terms": 50.0,
-    "any_term": 30.0,
+    "all_terms": 40.0,
+    "any_term": 40.0,
     "prefix": 20.0,
 }
+
+# `all_terms` 和 `any_term` 查的是同一组词，只有布尔运算符不同，所以同一行在两档
+# 里的 bm25 完全相等——两档的分数落在同一把尺子上，可以直接比大小。因此它们**共用
+# 起评分**，由 bm25 分出高下。
+#
+# 从前 `all_terms` 比 `any_term` 高 20 分，等于宣称"凑齐了所有词"一定比"只中了
+# 部分词"更相关。这在长文档面前不成立：几万字的版本说明里随便都能凑齐三个常见词，
+# 而真正讲这件事的那一节可能不含其中某个词。实测 `random stream nodes` 的正确页面
+# 落到第 8 位，前 7 位全是噪音；同样的形状在 cppreference 和 Roblox 上也各复现一次
+# ——bm25 早就把顺序排对了，只是它的**分值**被丢掉、只用了档内名次（BUG-020）。
+COMPARABLE_STAGES = frozenset({"all_terms", "any_term"})
+
+# 归一化 bm25 能拿到的分数区间。要压得住"整页标题全中"的 12 分加成，否则常见词
+# 拼出来的弱匹配又会靠标题字面重合翻上来。
+RELEVANCE_WEIGHT = 30.0
 
 
 def query_profile(query: str, *, entity_hit: bool) -> str:
@@ -90,6 +106,10 @@ CHUNK_COLUMNS = """
     p.category, c.knowledge_type, c.token_estimate, c.quality_score,
     c.content_hash
 """
+
+# 全文索引四列的权重：标题 > 小节路径 > 上下文前缀 > 正文。排序和打分必须用同一
+# 个式子，各写一遍迟早分岔。
+_BM25 = "bm25(chunks_fts, 2.5, 1.8, 1.5, 1.0)"
 
 
 def tokenize(query: str) -> list[str]:
@@ -205,7 +225,7 @@ def _fts_hits(
     # 不锁的话，只要带上 `--category`，优化器就改从 pages 的分类索引出发，
     # 于是每一个候选块都要单独跑一次全文匹配——实测 0.05 秒变 44 秒。
     sql = f"""
-        SELECT {CHUNK_COLUMNS}
+        SELECT {CHUNK_COLUMNS}, {_BM25} AS bm25_score
         FROM chunks_fts
         CROSS JOIN chunks c ON c.id=chunks_fts.rowid
         CROSS JOIN pages p ON p.id=c.page_id
@@ -215,7 +235,7 @@ def _fts_hits(
     if category:
         sql += " AND p.category=?"
         params.append(category)
-    sql += " ORDER BY bm25(chunks_fts, 2.5, 1.8, 1.5, 1.0) LIMIT ?"
+    sql += " ORDER BY bm25_score LIMIT ?"
     params.append(limit)
     try:
         return list(connection.execute(sql, params))
@@ -258,8 +278,45 @@ class _Scoring:
     profile: str = "api"
 
 
-def _score(row: sqlite3.Row, stage: str, rank: int, ctx: _Scoring) -> float:
-    score = STAGE_BASE[stage] - min(rank, 40) * 0.4
+def stage_relevance(
+    batches: Sequence[tuple[str, Sequence[sqlite3.Row]]],
+) -> list[list[float] | None]:
+    """逐档给出归一化到 0..1 的 bm25 相关度；同尺的几档共用一个基准。
+
+    基准必须**跨档**取。只按本档取的话，每一档的第一名都是 1.0，宽松档里的最佳
+    匹配和精确档里的勉强匹配就一样高——那正是 BUG-020 的成因。不同尺的档（`phrase`
+    是整串短语、`prefix` 有词干展开）返回 None，由档内名次兜底。
+    """
+    best = min(
+        (
+            row["bm25_score"]
+            for stage, rows in batches
+            if stage in COMPARABLE_STAGES
+            for row in rows
+        ),
+        default=0.0,
+    )
+    return [
+        [row["bm25_score"] / best for row in rows]
+        if stage in COMPARABLE_STAGES and best
+        else None
+        for stage, rows in batches
+    ]
+
+
+def _score(
+    row: sqlite3.Row,
+    stage: str,
+    rank: int,
+    ctx: _Scoring,
+    relevance: float | None = None,
+) -> float:
+    # 档内名次只是同档的平局裁决，跨档没有可比性——`all_terms` 的第 4 名未必
+    # 比 `any_term` 的第 1 名更相关。所以能拿到归一化 bm25 时一律用它。
+    if relevance is None:
+        score = STAGE_BASE[stage] - min(rank, 40) * 0.4
+    else:
+        score = STAGE_BASE[stage] + relevance * RELEVANCE_WEIGHT
     if ctx.profile == "concept":
         score += CONCEPT_TYPE_BONUS.get(row["knowledge_type"], 0.0)
         score += ctx.workspace.concept_category_bonus.get(row["category"], 0.0)
@@ -345,9 +402,13 @@ def search_chunks(
         ),
     )
 
-    def absorb(rows: list[sqlite3.Row], stage: str) -> None:
+    def absorb(
+        rows: list[sqlite3.Row], stage: str, relevance: list[float] | None = None
+    ) -> None:
         for rank, row in enumerate(rows):
-            score = _score(row, stage, rank, ctx)
+            score = _score(
+                row, stage, rank, ctx, None if relevance is None else relevance[rank]
+            )
             existing = scored.get(row["id"])
             if existing and existing["score"] >= score:
                 continue
@@ -361,11 +422,19 @@ def search_chunks(
     ctx.profile = query_profile(query, entity_hit=bool(entity_rows))
     absorb(entity_rows, "entity")
     if chunk_fts_mode(connection) == "fts5":
+        # 共用同一把尺子的那两档要先收齐再打分：归一化的基准是两档合起来的最佳
+        # bm25，边收边打分就只能拿本档的基准，等于又回到"本档第一名必得满分"。
+        batches: list[tuple[str, list[sqlite3.Row]]] = []
+        collected = set(scored)
         for stage, expression in fts_expressions(query):
             # 高精度档已经够用就不再下探，避免宽松档冲淡结果。
-            if len(scored) >= pool and stage in {"any_term", "prefix"}:
+            if len(collected) >= pool and stage in {"any_term", "prefix"}:
                 break
-            absorb(_fts_hits(connection, expression, category, pool), stage)
+            rows = _fts_hits(connection, expression, category, pool)
+            collected.update(row["id"] for row in rows)
+            batches.append((stage, rows))
+        for (stage, rows), relevance in zip(batches, stage_relevance(batches)):
+            absorb(rows, stage, relevance)
     elif not scored:
         absorb(_like_hits(connection, query, category, pool), "all_terms")
 

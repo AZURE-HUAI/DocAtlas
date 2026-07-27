@@ -15,11 +15,13 @@ Python API、节点参考、社区文档）。加别的版本或别的产品见[
 
 ## 零、从零开始（第一次用）
 
-只要有 Python 3.11+ 就行，**不需要装任何第三方包**。
+只要有 Python 3.11+ 就行，**不需要装任何第三方包**。程序放哪都行，不用装进 Python
+环境；数据可以跟程序放一起，也可以单独挪到别的盘。
 
 ```powershell
 git clone <这个仓库> DocAtlas
 cd DocAtlas
+python install.py                            # 装技能 + 注册 MCP（详见第六节）
 python -m docatlas crawl --discovery-only    # 第一步：枚举全站页面清单
 ```
 
@@ -255,38 +257,56 @@ $env:DOCATLAS_DATASET = 'epic-ue-5.9'
 
 ## 六、AI 怎么用
 
-两种接法，装哪个都行，也可以都装。
+两种接法，Skill 和 MCP，`install.py` 一次都装上：
+
+```bash
+python install.py                      # 装技能 + 注册 MCP，装完自己验一遍
+python install.py --data-dir D:/Docs   # 顺便把数据挪到别的盘
+python install.py --print              # 只打印 MCP 配置片段，不动任何文件
+```
+
+安装器守两条纪律：
+
+1. **先验证，再写配置。** 注册之前先从一个陌生目录把 MCP 服务器真起一次、走完
+   握手，通不过就什么都不写——一次失败留下半截配置，比没装还难查。
+2. **不代改你的现成配置。** Claude Code 交给官方的 `claude mcp add`；Codex 只在
+   没有该条目时追加；其余客户端只打印片段让你粘贴。
 
 ### Skill（Claude Code / Codex）
 
-```powershell
-.\scripts\install-skill.ps1                 # 装到检测到的所有客户端
-.\scripts\install-skill.ps1 -Client codex   # 只装某一个
-```
-
-支持 Claude Code（`~/.claude/skills/`）和 Codex（`~/.codex/skills/`），
-只装到真实存在的客户端目录。写出的文件一律是 **UTF-8 无 BOM**——
-Windows PowerShell 默认会加 BOM，而 Codex 读到 BOM 就认不出 `SKILL.md`。
-装完脚本会自己验一遍（文件非空、无 BOM、占位符都填掉了、frontmatter 完好）。
+装到 `~/.claude/skills/` 和 `~/.codex/skills/`，只装到真实存在的客户端目录。
+写出的文件一律是 **UTF-8 无 BOM**——Codex 读到 BOM 就认不出 `SKILL.md`。装完会
+自己验一遍（文件非空、无 BOM、占位符都填掉了、frontmatter 完好）。
 
 装完之后任何会话里问到相关问题，AI 会自动先查本地库，而不是凭记忆或联网。
 
-技能文件里必须写明程序在哪，这个脚本会在安装时把**仓库的实际位置**填进去——
-所以以后移动或改名项目目录，重跑一次脚本就行，不用手工改任何文件。
+技能文件里必须写明程序在哪，安装时会把**仓库的实际位置**填进去——所以以后移动或
+改名项目目录，重跑一次就行，不用手工改任何文件。
 
-### MCP 服务器（Claude Desktop / Cursor / Cline …）
+### MCP 服务器（Claude Code / Claude Desktop / Cursor / Cline …）
+
+不认识的客户端就手工填这一段（把路径换成你自己的）：
 
 ```json
 {
   "mcpServers": {
     "docatlas": {
-      "command": "python",
-      "args": ["-m", "docatlas", "mcp"],
-      "cwd": "C:/你的路径/DocAtlas"
+      "command": "C:/你的/python.exe",
+      "args": ["C:/你的路径/DocAtlas/mcp_server.py"]
     }
   }
 }
 ```
+
+**别写 `cwd`。** DocAtlas 不是装进 Python 环境的包，就是个普通文件夹，所以
+`python -m docatlas mcp` 只有在仓库目录下才找得到它；而各家客户端的 stdio 配置
+不一定支持 `cwd`——Claude Code 就只认 `command` / `args` / `env`，写了会静默失效，
+只留下一句 `No module named docatlas`（BUG-021）。用仓库根的 `mcp_server.py` 当
+入口没有这个问题：Python 会把脚本所在目录放进 `sys.path`，从任何工作目录启动都成立，
+不需要 cwd，不需要 PYTHONPATH，也不需要 pip install。
+
+`command` 建议写 Python 的**绝对路径**：客户端起子进程时的 PATH 不一定和你的终端
+一样，写 `python` 可能解析到另一个解释器。
 
 提供五个工具：`docatlas_ask`（默认用这个）、`docatlas_search`、
 `docatlas_show`、`docatlas_related`、`docatlas_list_datasets`。

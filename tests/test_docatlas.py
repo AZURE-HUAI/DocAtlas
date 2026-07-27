@@ -804,6 +804,196 @@ class EndToEndTests(unittest.TestCase):
         )
 
 
+class RelevanceRankingTests(unittest.TestCase):
+    """跨档排序必须按 bm25 相关度，不按"凑齐了几个词"（BUG-020）。
+
+    典型形状：用户多打了一个到处都是的通用词，于是几万字的版本说明也能凑齐全部
+    关键词，把真正讲这件事、只是碰巧不含那个词的那一页顶掉。
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.connection = connect_db(Path(self.directory.name) / "test.sqlite3")
+        initialize_db(self.connection)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status) "
+            "VALUES('https://example.invalid/sitemap.xml', 'guides', 'success')"
+        )
+        self.connection.commit()
+
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
+
+    def add_page(self, path, title, blocks):
+        cursor = self.connection.execute(
+            """
+            INSERT INTO pages(url, path, category, sitemap_url, doc_version, locale,
+                              route_depth, discovered_at, last_seen_at)
+            VALUES(?, ?, 'guides', 'https://example.invalid/sitemap.xml', '5.8',
+                   'en-US', 3, '2026-01-01', '2026-01-01')
+            """,
+            (f"https://example.invalid{path}", path),
+        )
+        page_id = cursor.lastrowid
+        row = FakeRow(id=page_id, path=path, url=f"https://example.invalid{path}",
+                      category="guides")
+        store.store_document_result(
+            self.connection,
+            transform_document(row, make_document(title, blocks)),
+            "guides",
+        )
+        self.connection.commit()
+        return page_id
+
+    def seed(self):
+        """一页短而准（缺 "node" 一词），一页又长又杂（三个词全有）。
+
+        先铺 20 页普通节点文档，"node" 才是个到处都有的常见词。这一步不能省：
+        两三页的语料里任何词都是稀有词，IDF 是反的，复现不出真实库里的形状。
+        """
+        for n in range(20):
+            self.add_page(
+                f"/nodes/{n}",
+                f"Node Reference {n}",
+                [
+                    text_block(
+                        f"This node exposes pins on the blueprint node graph. "
+                        f"Connect the node output to another node input {n}."
+                    )
+                ],
+            )
+        focused = self.add_page(
+            "/random-streams",
+            "Random Streams",
+            [
+                text_block(
+                    "A random stream produces a repeatable sequence of random "
+                    "values from a single seed. Expose the initial seed to change "
+                    "which stream of random values the blueprint variable yields."
+                )
+            ],
+        )
+        filler = " ".join(
+            f"Fixed an unrelated regression in subsystem {n} affecting editor "
+            f"startup, asset cooking and platform packaging behaviour."
+            for n in range(40)
+        )
+        bloated = self.add_page(
+            "/release-notes",
+            "Release Notes",
+            [
+                text_block(
+                    f"{filler} Added a Shared State input to the Array Random Get "
+                    f"node so random state is shared between nodes. Improved audio "
+                    f"stream chunk loading. {filler}"
+                )
+            ],
+        )
+        return focused, bloated
+
+    def best_per_page(self, query, limit=20):
+        """每页只留得分最高的那一块——长页面会切成好几块，落在不同档里。"""
+        best = {}
+        for row in search.search_chunks(self.connection, query, limit=limit):
+            best.setdefault(row["page_id"], row)
+        return best
+
+    def test_focused_page_beats_a_bloated_page_that_matches_every_term(self):
+        focused, bloated = self.seed()
+        results = search.search_chunks(
+            self.connection, "random stream node", limit=5
+        )
+        self.assertTrue(results)
+        self.assertIn(
+            bloated,
+            {row["page_id"] for row in results},
+            "对照组：长页面确实进了候选池，不是被过滤掉的",
+        )
+        self.assertEqual(
+            results[0]["page_id"],
+            focused,
+            "短而准的那一页必须排第一，哪怕它缺了查询里的一个通用词",
+        )
+
+    def test_the_winner_comes_from_the_looser_stage(self):
+        """确认赢的是跨档比较，而不是碰巧两页都落在同一档。"""
+        focused, _ = self.seed()
+        best = self.best_per_page("random stream node")
+        self.assertEqual(best[focused]["match_stage"], "any_term")
+
+    def test_score_gap_tracks_bm25_not_result_position(self):
+        """分差必须由 bm25 拉开，而不是"名次差一位"的那 0.4 分。
+
+        没有这条，把相关度整个拿掉、退回按名次打分，前面两条断言照样过——因为
+        标题字面重合单独就够把正确页面推上去。那样测的是标题加成，不是这次的修复。
+        """
+        focused, bloated = self.seed()
+        best = self.best_per_page("random stream node")
+        self.assertGreater(
+            best[focused]["score"] - best[bloated]["score"],
+            search.RELEVANCE_WEIGHT * 0.5,
+            "相关度没有真正参与打分",
+        )
+
+    def test_fts_hits_come_back_best_first(self):
+        """候选池是"取前 N 名"，所以取之前必须已经按 bm25 排好——否则真实库里
+        好几万条命中，被 LIMIT 截下来的是哪一批就纯看运气了。"""
+        self.seed()
+        rows = search._fts_hits(
+            self.connection, '"node" OR "random" OR "stream"', None, 10
+        )
+        scores = [row["bm25_score"] for row in rows]
+        self.assertLess(min(scores), -1.0, "夹具本身要有区分度，否则断言恒真")
+        self.assertEqual(scores, sorted(scores), "bm25 越负越好，应升序返回")
+
+    def test_relevance_baseline_spans_every_comparable_stage(self):
+        """归一化基准跨档取：宽松档里的最佳匹配不该和精确档里的勉强匹配同分。"""
+        batches = [
+            ("all_terms", [FakeRow(bm25_score=-2.0), FakeRow(bm25_score=-1.0)]),
+            ("any_term", [FakeRow(bm25_score=-8.0)]),
+        ]
+        strict, loose = search.stage_relevance(batches)
+        self.assertEqual(loose, [1.0])
+        self.assertEqual(strict, [0.25, 0.125])
+
+    def test_unlike_scales_fall_back_to_result_position(self):
+        """`phrase` / `prefix` 的 bm25 不同尺，不能混进同一次归一化。"""
+        batches = [
+            ("phrase", [FakeRow(bm25_score=-9.0)]),
+            ("all_terms", [FakeRow(bm25_score=-4.0)]),
+        ]
+        phrase, all_terms = search.stage_relevance(batches)
+        self.assertIsNone(phrase)
+        self.assertEqual(all_terms, [1.0])
+
+    def test_relevance_outweighs_the_stage_it_came_from(self):
+        """同一把尺子上，bm25 更好的一定得分更高——哪怕它在更宽松的档里。"""
+        ctx = search._Scoring(
+            workspace=runtime.workspace("epic-ue-5.8"),
+            terms=set(),
+            normalized_query="",
+        )
+        row = FakeRow(
+            knowledge_type="details", category="guides", quality_score=0.0,
+            page_title="", heading_path="", source_url="",
+        )
+        strong = search._score(row, "any_term", 0, ctx, relevance=1.0)
+        weak = search._score(row, "all_terms", 0, ctx, relevance=0.3)
+        self.assertGreater(strong, weak)
+
+    def test_stage_base_still_ranks_precise_evidence_above_loose_matches(self):
+        """反向控制组：放宽跨档比较不等于把档位取消。"""
+        self.assertGreater(
+            search.STAGE_BASE["entity"],
+            search.STAGE_BASE["phrase"],
+        )
+        self.assertGreater(
+            search.STAGE_BASE["phrase"],
+            search.STAGE_BASE["all_terms"] + search.RELEVANCE_WEIGHT * 0.5,
+        )
+
+
 def make_section(title, body, *, position, level=2, knowledge_type="details",
                  parent="Page"):
     return {
@@ -1135,6 +1325,35 @@ class McpProtocolTests(unittest.TestCase):
             for required in schema.get("required", []):
                 self.assertIn(required, schema["properties"], tool["name"])
 
+    def _serve(self, payload: str):
+        out, err = io.StringIO(), io.StringIO()
+        stderr = sys.stderr
+        sys.stderr = err
+        try:
+            self.assertEqual(mcpserver.serve(io.StringIO(payload), out), 0)
+        finally:
+            sys.stderr = stderr
+        return out.getvalue(), err.getvalue()
+
+    def test_a_leading_bom_does_not_silence_the_server(self):
+        """Windows 客户端很容易在管道开头多写一个 BOM（.NET 一取 StandardInput
+        就会把 UTF-8 preamble 冲出去）。带着它 json 解不开，而服务器原本是**静默**
+        丢掉坏行的——客户端那头看到的就是"进程起来了却永远不回话"（BUG-021）。"""
+        request = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        })
+        out, _ = self._serve("﻿" + request + "\n")
+        self.assertTrue(out.strip(), "带 BOM 的请求被丢掉了")
+        self.assertEqual(json.loads(out)["result"]["protocolVersion"], "2024-11-05")
+
+    def test_an_unparsable_line_says_so_on_stderr(self):
+        """坏行照样要丢，但不能一声不吭——不然没有任何线索可查。
+        协议独占 stdout，所以提示只能走 stderr。"""
+        out, err = self._serve("{not json\n")
+        self.assertEqual(out, "", "stdout 只能走协议，一个字都不能多")
+        self.assertIn("{not json", err)
+
     def test_unknown_tool_is_a_protocol_error(self):
         reply = mcpserver.handle({
             "jsonrpc": "2.0", "id": 9, "method": "tools/call",
@@ -1273,6 +1492,51 @@ class DatasetLayeringTests(unittest.TestCase):
             loaded, "https://dev.epicgames.com/documentation/zh-cn/unreal-engine/x"
         )
         self.assertEqual(path, "/documentation/unreal-engine/x")
+
+
+class DataRootTests(unittest.TestCase):
+    """程序在哪、数据在哪是两件事：仓库可以在系统盘，二十万页的库可以在别的盘。"""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.pointer = Path(self.directory.name) / ".docatlas-home"
+        original = runtime.DATA_ROOT_POINTER
+        runtime.DATA_ROOT_POINTER = self.pointer
+        self.addCleanup(setattr, runtime, "DATA_ROOT_POINTER", original)
+        self.addCleanup(self.directory.cleanup)
+
+    def resolve(self, home: str | None = None):
+        previous = os.environ.pop("DOCATLAS_HOME", None)
+        if home:
+            os.environ["DOCATLAS_HOME"] = home
+        try:
+            return runtime._data_root()
+        finally:
+            os.environ.pop("DOCATLAS_HOME", None)
+            if previous is not None:
+                os.environ["DOCATLAS_HOME"] = previous
+
+    def test_defaults_to_the_data_dir_inside_the_repo(self):
+        self.assertEqual(self.resolve(), (runtime.REPO_ROOT / "data").resolve())
+
+    def test_the_installed_choice_is_read_from_a_file(self):
+        """必须落到文件里：MCP 客户端起子进程时不会带上你终端里的环境变量，
+        只认 DOCATLAS_HOME 的话，命令行查得到的库、MCP 查不到（BUG-021）。"""
+        chosen = Path(self.directory.name) / "elsewhere"
+        self.pointer.write_text(str(chosen) + "\n", encoding="utf-8")
+        self.assertEqual(self.resolve(), chosen.resolve())
+
+    def test_the_environment_variable_still_wins(self):
+        """临时换一个库跑一次，不该被迫改文件。"""
+        self.pointer.write_text(str(Path(self.directory.name) / "installed"),
+                                encoding="utf-8")
+        temporary = Path(self.directory.name) / "just-this-once"
+        self.assertEqual(self.resolve(str(temporary)), temporary.resolve())
+
+    def test_an_empty_pointer_falls_back_instead_of_pointing_at_the_repo(self):
+        """写了个空文件不能解成仓库根本身——那会把数据倒进代码目录。"""
+        self.pointer.write_text("  \n", encoding="utf-8")
+        self.assertEqual(self.resolve(), (runtime.REPO_ROOT / "data").resolve())
 
 
 class RuntimeWorkspaceTests(unittest.TestCase):

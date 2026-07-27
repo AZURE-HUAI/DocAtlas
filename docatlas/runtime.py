@@ -45,8 +45,27 @@ from .dataset import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATASET_CONFIG_DIR = REPO_ROOT / "datasets"
 
-# 数据根：所有数据集的家。默认 <仓库>/data，可用 DOCATLAS_HOME 挪到别的盘。
-DATA_ROOT = Path(os.environ.get("DOCATLAS_HOME") or REPO_ROOT / "data").resolve()
+# 安装时选定的数据位置。程序在哪、数据在哪是两件事：仓库可以放在系统盘，
+# 二十万页的库可以放在别的盘。安装器把选择写进这个文件，一行一个路径。
+DATA_ROOT_POINTER = REPO_ROOT / ".docatlas-home"
+
+
+def _data_root() -> Path:
+    """数据根：所有数据集的家。
+
+    优先级是环境变量 > 安装时的选择 > 仓库里的 `data/`。环境变量排最前，是为了
+    临时换一个库跑一次不用改任何文件；安装时的选择要落到文件里，是因为 MCP 客户端
+    起子进程时不会带上你终端里的环境变量。
+    """
+    if override := os.environ.get("DOCATLAS_HOME"):
+        return Path(override).resolve()
+    if DATA_ROOT_POINTER.exists():
+        if chosen := DATA_ROOT_POINTER.read_text(encoding="utf-8").strip():
+            return Path(chosen).resolve()
+    return (REPO_ROOT / "data").resolve()
+
+
+DATA_ROOT = _data_root()
 
 # 没有显式指定时用哪个数据集。命令行一个进程只服务一个库，靠的就是它。
 DEFAULT_DATASET_ID = os.environ.get("DOCATLAS_DATASET") or "epic-ue-5.8"
