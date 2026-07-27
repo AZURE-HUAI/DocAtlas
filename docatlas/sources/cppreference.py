@@ -123,6 +123,28 @@ def _title(document_html: str, path: str) -> str:
     return Path(path).name.replace("_", " ")
 
 
+def extra_entity_aliases(
+    *, title: str, category: str, segments: list[str]
+) -> set[tuple[str, str]]:
+    """cppreference 的标题会把同一个东西的几个官方写法并排列出来。
+
+        std::ranges::views::transform, std::ranges::transform_view
+
+    这是**两个**名字，不是一个。整串当一个名字登记，归一化出来是
+    `stdrangesviewstransformstdrangestransformview`，没有人会这么打字，于是
+    这一页只能靠末段 `transform` 被找到——而这个库里叫 transform 的有八个
+    （BUG-017）。
+
+    只拆带 `::` 的那几段：普通标题里的逗号是行文，不是并列名字，
+    "Lighting, Shadows and Reflections" 拆开只会拼出两个假名字。
+    """
+    return {
+        (name, "title_alternative")
+        for raw in title.split(",")
+        if "::" in (name := raw.strip())
+    }
+
+
 def parse_document(dataset, path: str, body: bytes) -> dict[str, Any]:
     document_html = body.decode("utf-8", errors="replace")
     page_url = canonical_url(dataset, path)

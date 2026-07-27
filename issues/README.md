@@ -35,6 +35,11 @@
 | <a id="bug-012"></a>[BUG-012](bugs/resolved/0012-class-members-are-not-entities.md) | 类页面成员表里的属性和方法没有成为实体 | resolved | high |
 | <a id="bug-013"></a>[BUG-013](bugs/resolved/0013-linked-pages-never-enter-the-inventory.md) | 范围内正文引用到的页面永远进不了清单 | resolved | high |
 | <a id="bug-014"></a>[BUG-014](bugs/resolved/0014-exact-url-fragment-does-not-select-section.md) | 精确 URL 的 fragment 没有限定到对应小节 | resolved | high |
+| <a id="bug-015"></a>[BUG-015](bugs/resolved/0015-referenced-category-excluded-from-filter.md) | 分类过滤会静默排除引用闭包收录的页面（referenced 分类未接入 category 白名单） | resolved | high |
+| <a id="bug-016"></a>[BUG-016](bugs/resolved/0016-non-line-anchored-headings-merge-into-prior-section.md) | 标题没被识别，整段正文静默并入前一节（行内元素后的标题标记，与布局表格里的整节内容） | resolved | high |
+| <a id="bug-017"></a>[BUG-017](bugs/resolved/0017-namespace-alias-qualifier-not-used-in-ranking.md) | 带命名空间限定符的查询找不到官方页面（并列标题未拆名，限定名后缀不参与匹配） | resolved | medium |
+| <a id="bug-018"></a>[BUG-018](bugs/resolved/0018-per-page-chunk-cap-forces-irrelevant-cross-page-filler.md) | 每页最多 2 块的硬上限，会在预算充足时用不相关的跨页内容顶替同页更优候选 | resolved | medium |
+| <a id="bug-019"></a>[BUG-019](bugs/resolved/0019-code-fence-comments-parsed-as-headings.md) | 代码块里的注释被当成标题，代码被切碎且小节名是半句代码 | resolved | high |
 
 ## 未解决增强建议
 

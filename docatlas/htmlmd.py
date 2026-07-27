@@ -11,7 +11,30 @@ import re
 from typing import Any
 import urllib.parse
 
-from .constants import MARKDOWN_LINK_RE, MARKDOWN_MARKUP_RE, WHITESPACE_RE
+from .constants import (
+    CODE_FENCE_RE,
+    HEADING_RE,
+    MARKDOWN_LINK_RE,
+    MARKDOWN_MARKUP_RE,
+    WHITESPACE_RE,
+)
+
+
+def _holds_blocks(cell: str) -> bool:
+    """这个单元格里装的是块级内容（标题、代码块）吗。
+
+    Markdown 表格的一格只放得下行内内容。站点却常拿 `<table>` 当布局容器：
+    cppreference 的 `t-rev-begin` 就用一张表包住整个"自 C++20 起"的小节，
+    格子里是完整的 `<h3>` + 段落 + `<pre>`。照着表格压成一行，标题、段落和
+    代码块一起没了，整段正文挂到上一节名下（BUG-016）。
+
+    只认标题和代码围栏这两样：它们在表格里确实无法表达，丢失是实打实的。
+    多段纯文字被压成一行只是难看，不影响意思，不值得为它改变表格形状。
+    """
+    return any(
+        HEADING_RE.match(line) or CODE_FENCE_RE.match(line)
+        for line in cell.splitlines()
+    )
 
 
 class HTMLToMarkdown(HTMLParser):
@@ -27,6 +50,7 @@ class HTMLToMarkdown(HTMLParser):
         self.list_stack: list[dict[str, Any]] = []
         self.table_row: list[str] | None = None
         self.table_cell: list[str] | None = None
+        self.block_cells: list[str] = []
         self.table_header = False
         self.table_header_written = False
         self.assets: set[str] = set()
@@ -127,16 +151,24 @@ class HTMLToMarkdown(HTMLParser):
             self.append(f"]({href})" if href else "]")
         elif tag in {"th", "td"}:
             cell = "".join(self.table_cell or [])
-            cell = WHITESPACE_RE.sub(" ", cell.replace("\n", " ")).strip()
             if self.table_row is not None:
-                self.table_row.append(cell.replace("|", "\\|"))
+                if _holds_blocks(cell):
+                    self.block_cells.append(cell)
+                else:
+                    flat = WHITESPACE_RE.sub(" ", cell.replace("\n", " ")).strip()
+                    self.table_row.append(flat.replace("|", "\\|"))
             self.table_cell = None
         elif tag == "tr":
+            # 单元格里装着标题或代码块，这张表就不是数据表，是布局容器——
+            # 那些东西在 Markdown 表格里根本表达不出来，压成一行就等于删掉。
+            for block in self.block_cells:
+                self.append("\n\n" + block.strip() + "\n\n")
             if self.table_row:
                 self.append("| " + " | ".join(self.table_row) + " |\n")
                 if not self.table_header_written:
                     self.append("| " + " | ".join("---" for _ in self.table_row) + " |\n")
                     self.table_header_written = True
+            self.block_cells = []
             self.table_row = None
         elif tag == "table":
             self.newline(2)

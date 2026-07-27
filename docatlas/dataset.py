@@ -61,6 +61,23 @@ class Dataset:
     def inventory_option(self, key: str, default: Any = None) -> Any:
         return self.inventory.get(key, default)
 
+    @property
+    def query_categories(self) -> tuple[str, ...]:
+        """检索时可以合法用来过滤的分类全集。
+
+        跟 `categories` 是两件事，不能共用一个：`categories` 是"分类 → 路径前缀"
+        的**枚举规则**，只有声明了目录的分类才写得进去；而引用闭包收进来的那一类
+        按定义没有固定前缀（它收的正是"散落在声明目录之外、被正文引用到"的页面）。
+
+        但这些页面确实带着这个分类落进了库。拿枚举规则当"合法分类的全集"用，
+        库里就会有一整类内容既不出现在能力清单里、传进来还被当成拼错拒掉——
+        AI 按手册"知道分类就传 category"照做，反而把最相关的那一页滤掉了。
+        """
+        referenced = str(self.inventory.get("referenced_category") or "")
+        if not referenced or referenced in self.categories:
+            return tuple(self.categories)
+        return (*self.categories, referenced)
+
 
 def dataset_path(dataset_id: str, config_dir: Path) -> Path:
     return config_dir / f"{dataset_id}.toml"

@@ -41,7 +41,7 @@ def sample_quota(
     已经抓成功的算进这一类的额度里，所以重复运行不会越抓越多。
     """
     quota: dict[str, int] = {}
-    for key in active().dataset.categories:
+    for key in active().dataset.query_categories:
         if category and key != category:
             continue
         available, done = connection.execute(

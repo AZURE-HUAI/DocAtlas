@@ -72,6 +72,12 @@ node_editors = ["editors/shader_editor", "editors/geometry_node"]
 改完范围必须 `crawl --discovery-only --refresh-sitemaps`——不加这个参数，
 已成功的清单入口不会重读，新目录进不来。
 
+`referenced_category` 声明的那一类**不要**也写进 `[categories]`：那张表是
+"分类 → 路径前缀"的枚举规则，而引用闭包收的正是声明目录之外的页面，没有前缀
+可写；写个空串会让 `startswith` 恒真，整个库都判成这一类。它照样是一个能过滤、
+能抽样、能导出的正式分类（`Dataset.query_categories`），只要在
+`[category_labels]` 里给它一个显示名就行（BUG-015）。
+
 ## 领域关系
 
 先使用通用官方链接和页面归属关系。只有关系依赖产品专属语义时，才新增

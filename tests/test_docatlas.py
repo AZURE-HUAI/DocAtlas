@@ -34,9 +34,9 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ.pop("DOCATLAS_DATASET", None)
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, coverage, crawl, dataset, db, discover, members,
-    net, ondemand, constants, relations, runtime, search, store, text, validate,
-    versions,
+    chunking, config, context, coverage, crawl, dataset, db, discover, htmlmd,
+    members, net, ondemand, constants, relations, runtime, search, store, text,
+    validate, versions,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.knowledge import unreal  # noqa: E402
@@ -625,16 +625,67 @@ class EndToEndTests(unittest.TestCase):
                 f"预算 {budget} 被突破了",
             )
 
-    def test_context_pack_caps_chunks_per_page(self):
-        self.seed()
-        pack = context.build_context_pack(
-            self.connection, "Nanite", token_budget=100000, category=None
+    @staticmethod
+    def _candidates() -> list[dict]:
+        """一页有 5 条高分候选，另外三页各 1 条低分候选。
+
+        BUG-018 的原始形状：问 co_yield 时协程页有 9 条 33～37 分的候选，
+        硬上限只放行 2 条，剩下的预算拿 24～33 分的缩略语词表来凑。
+        """
+        def chunk(chunk_id: int, page_id: int) -> dict:
+            return {
+                "id": chunk_id, "page_id": page_id, "token_estimate": 100,
+                "content_md": "x" * 40, "content_hash": f"h{chunk_id}",
+            }
+
+        return [chunk(index, 1) for index in range(5)] + [
+            chunk(10 + index, 10 + index) for index in range(3)
+        ]
+
+    def test_预算够用时同页更优内容不被跳过(self):
+        """跳过它们等于用分数更低的跨页内容顶替，那是更差的答案。"""
+        selected, _used = context._select_primary(self._candidates(), 800)
+        from_best = [row for row in selected if row["page_id"] == 1]
+        self.assertGreater(
+            len(from_best),
+            context.MIN_CHUNKS_PER_PAGE,
+            "预算装得下，最相关那一页却仍然只给保底的几块",
         )
-        per_page: dict[int, int] = {}
-        for item in pack["primary_knowledge"]:
-            per_page[item["page_id"]] = per_page.get(item["page_id"], 0) + 1
-        for count in per_page.values():
-            self.assertLessEqual(count, context.MAX_CHUNKS_PER_PAGE)
+
+    def test_一页仍然吃不掉整个预算(self):
+        selected, _used = context._select_primary(self._candidates(), 800)
+        pages = {row["page_id"] for row in selected}
+        self.assertGreater(len(pages), 1, "只剩一页说明占比上限没起作用")
+
+    def test_预算小的时候保底那几块照给(self):
+        """按占比算装不下第二块时仍要给，否则比原来更差。"""
+        selected, _used = context._select_primary(self._candidates(), 250)
+        from_best = [row for row in selected if row["page_id"] == 1]
+        self.assertEqual(len(from_best), context.MIN_CHUNKS_PER_PAGE)
+
+    def test_no_single_page_eats_the_budget(self):
+        """真实数据上再走一遍：限的是预算占比，不是块数。"""
+        self.seed()
+        for budget in (1500, 3000, 100000):
+            pack = context.build_context_pack(
+                self.connection, "Nanite", token_budget=budget, category=None
+            )
+            per_page: dict[int, list[int]] = {}
+            for item in pack["primary_knowledge"]:
+                per_page.setdefault(item["page_id"], []).append(
+                    int(item["token_estimate"] or 1)
+                )
+            allowance = int(
+                budget * context.PRIMARY_BUDGET_RATIO * context.MAX_PAGE_BUDGET_RATIO
+            )
+            for tokens in per_page.values():
+                if len(tokens) <= context.MIN_CHUNKS_PER_PAGE:
+                    continue  # 保底的块不受占比约束
+                self.assertLessEqual(
+                    sum(tokens[:-1]),
+                    allowance,
+                    f"预算 {budget} 时有一页超出了它的占比额度",
+                )
 
     def test_context_markdown_is_cheaper_than_json(self):
         self.seed()
@@ -2638,7 +2689,7 @@ class BreadcrumbNoiseTests(unittest.TestCase):
 
     def test_changing_the_rule_bumps_the_chunker_version(self):
         """切分规则变了不改版本号，旧块会和新块混在同一个库里。"""
-        self.assertEqual(constants.CHUNKER_VERSION, "v5")
+        self.assertEqual(constants.CHUNKER_VERSION, "v6")
 
 
 class CrossLanguageDiagnosisTests(unittest.TestCase):
@@ -4172,6 +4223,182 @@ class ImportingThePackageHasNoSideEffects(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "['docatlas']")
+
+
+class ReferencedCategoryTests(unittest.TestCase):
+    """BUG-015：引用闭包收进来的那一类，也是一个能拿来过滤的分类。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.blender = dataset.load_dataset(
+            "blender-manual-5.2", runtime.DATASET_CONFIG_DIR
+        )
+        cls.ue = dataset.load_dataset("epic-ue-5.8", runtime.DATASET_CONFIG_DIR)
+
+    def test_枚举规则里没有它是对的(self):
+        """`categories` 是"分类 → 路径前缀"，引用闭包那一类本来就没有前缀。
+
+        合并进去会污染四处按前缀分类的判断——尤其是空前缀，
+        `path.startswith("")` 恒真，整个库都会被判成这一类。
+        """
+        self.assertNotIn("referenced", self.blender.categories)
+
+    def test_可过滤的分类全集里必须有它(self):
+        self.assertIn("referenced", self.blender.query_categories)
+        for key in self.blender.categories:
+            self.assertIn(key, self.blender.query_categories)
+
+    def test_没声明这一项的数据集一点没变(self):
+        self.assertEqual(self.ue.query_categories, tuple(self.ue.categories))
+
+    def test_mcp_不再把它当拼错拒掉(self):
+        workspace = runtime.workspace("blender-manual-5.2")
+        mcpserver._check_category(workspace, "referenced")
+        with self.assertRaises(mcpserver.ToolError):
+            mcpserver._check_category(workspace, "根本没有这一类")
+
+    def test_抽样配额认得它(self):
+        """26 页 pending 的引用页，原来永远抽不到样。"""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        connection = connect_db(Path(directory.name) / "t.sqlite3")
+        initialize_db(connection)
+        now = "2026-07-27T00:00:00Z"
+        for index, category in enumerate(("shader_nodes", "referenced")):
+            connection.execute(
+                "INSERT INTO pages(url, path, category, status, attempts,"
+                " discovered_at, last_seen_at) VALUES(?, ?, ?, 'pending', 0, ?, ?)",
+                (f"https://x/{index}", f"/p{index}", category, now, now),
+            )
+        connection.commit()
+        with runtime.use(runtime.workspace("blender-manual-5.2")):
+            quota = crawl.sample_quota(connection, 20)
+        self.assertEqual(quota.get("referenced"), 1)
+        connection.close()
+
+
+class HeadingRecognitionTests(unittest.TestCase):
+    """BUG-016：标题没被认出来，整段正文就挂到上一节名下。"""
+
+    def test_围栏里的注释不是标题(self):
+        """一段 bash 示例会被拆成好几节，`heading_path` 挂着代码注释。"""
+        lines = ["## Real", "```bash", "# Optional: send the hash", "curl -X POST", "```", "## Next"]
+        self.assertEqual(chunking.fenced_line_numbers(lines), {2, 3})
+
+    def test_落单的围栏不算数(self):
+        """真实文档里确实有（三份 Roblox 页面）。
+
+        按"从它开始到文末都是代码"处理，后面所有真标题会一起被吞掉。
+        """
+        self.assertEqual(chunking.fenced_line_numbers(["```", "x = 1", "## Still A Heading"]), set())
+
+    def test_标题挤在图片后面也要认出来(self):
+        """官方 Markdown 导出少一个换行就长这样（Roblox 地形编辑器）。"""
+        line = "![Clear tool](../assets/Create-Tab-Clear.png) ## Edit tab"
+        self.assertEqual(
+            chunking.heading_at(line),
+            ("![Clear tool](../assets/Create-Tab-Clear.png)", 2, "Edit tab"),
+        )
+
+    def test_行尾的井号不都是标题(self):
+        for line in (
+            "        movl    input(%rip), %eax   # eax = input",
+            "见 [指南](https://x.dev/g) 了解更多",
+            "&#160;! &quot; # $&#160;%",
+        ):
+            self.assertIsNone(chunking.heading_at(line), line)
+
+    def test_后面的小节不再继承上一节的名字(self):
+        markdown = "\n".join([
+            "## Create tab", "建的东西。",
+            "![Clear](../a/Clear.png) ## Edit tab", "改的东西。",
+            "```bash", "# 这不是标题", "```", "## Publish", "发布的东西。",
+        ])
+        with runtime.use(runtime.workspace("roblox-creator-2026-07-26")):
+            sections = chunking.split_sections(
+                title="Terrain Editor", description="", markdown=markdown,
+                source_url="https://x/t", category="studio",
+            )
+        self.assertEqual(
+            [item["title"] for item in sections],
+            ["Create tab", "Edit tab", "Publish"],
+        )
+        # 前半行是上一节的正文，不能跟着标题一起走。
+        self.assertIn("Clear.png", sections[0]["body"] if "body" in sections[0] else sections[0]["content_md"])
+
+    def test_布局表格里的小节要还原成块(self):
+        """cppreference 拿 `<table>` 包住整个"自 C++20 起"的小节。
+
+        照着表格压成一行，标题、段落和代码块一起没了（BUG-016）。
+        """
+        markdown, _assets = htmlmd.html_to_markdown(
+            "<table><tbody><tr><td><h3>Designated initializers</h3>"
+            "<p>The syntax forms are known as designated initializers.</p>"
+            "<pre>A a{.y = 2};</pre></td><td>(since C++20)</td></tr></tbody></table>"
+        )
+        self.assertIn("### Designated initializers", markdown.splitlines())
+        self.assertIn("(since C++20)", markdown)
+
+    def test_普通数据表还是表(self):
+        markdown, _assets = htmlmd.html_to_markdown(
+            "<table><tr><th>Member</th><th>Meaning</th></tr>"
+            "<tr><td>size</td><td>element count</td></tr></table>"
+        )
+        self.assertIn("| Member | Meaning |", markdown)
+        self.assertIn("| size | element count |", markdown)
+
+
+class QualifierMatchTests(unittest.TestCase):
+    """BUG-017：用户打出来的限定符是位置信息，不是装饰。"""
+
+    def test_后缀写法(self):
+        self.assertEqual(
+            text.qualifier_suffixes("std::ranges::views::transform"),
+            ["ranges::views::transform", "views::transform"],
+        )
+        self.assertEqual(text.qualifier_suffixes("std::views::transform"), ["views::transform"])
+
+    def test_只剩末段的那一档不算后缀(self):
+        """`transform` 正是"八个都叫 transform"的歧义来源，单独当最后一档。"""
+        self.assertEqual(text.qualifier_suffixes("std::sort"), [])
+        for suffixes in (text.qualifier_suffixes("a::b::c"), text.qualifier_suffixes("x::y")):
+            self.assertNotIn("c", suffixes)
+            self.assertNotIn("y", suffixes)
+
+    def test_普通句子里的句点不是限定符(self):
+        self.assertEqual(text.qualifier_suffixes("how do I do this. thanks"), [])
+
+    def test_查询按从准到宽的顺序试名字(self):
+        with runtime.use(runtime.workspace("cppreference-2026-07-26")):
+            names = search.query_names("std::views::transform")
+        self.assertEqual(names[0], chunking.normalize_name("std::views::transform"))
+        self.assertLess(
+            names.index(chunking.normalize_name("views::transform")),
+            names.index(chunking.normalize_name("transform")),
+            "末段最容易撞名，必须排在后缀写法后面",
+        )
+
+    def test_cppreference_的并列标题是几个名字(self):
+        aliases = dict(
+            (alias, kind)
+            for alias, kind in cppreference.extra_entity_aliases(
+                title="std::ranges::views::transform, std::ranges::transform_view",
+                category="standard_library",
+                segments=["cpp", "ranges", "transform_view"],
+            )
+        )
+        self.assertIn("std::ranges::views::transform", aliases)
+        self.assertIn("std::ranges::transform_view", aliases)
+
+    def test_行文里的逗号不拆(self):
+        """"Lighting, Shadows and Reflections" 拆开只会拼出两个假名字。"""
+        self.assertEqual(
+            cppreference.extra_entity_aliases(
+                title="Lighting, Shadows and Reflections",
+                category="language", segments=["cpp", "x"],
+            ),
+            set(),
+        )
 
 
 if __name__ == "__main__":

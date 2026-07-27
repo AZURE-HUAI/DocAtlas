@@ -268,10 +268,11 @@ def _open(workspace: runtime.Workspace):
 
 
 def _check_category(workspace: runtime.Workspace, category: str | None) -> None:
-    if category and category not in workspace.dataset.categories:
+    known = workspace.dataset.query_categories
+    if category and category not in known:
         raise ToolError(
             f"{workspace.id} 没有分类 {category!r}。"
-            f"可选：{'、'.join(sorted(workspace.dataset.categories)) or '（没有声明分类）'}"
+            f"可选：{'、'.join(sorted(known)) or '（没有声明分类）'}"
         )
 
 
@@ -555,7 +556,7 @@ def _dataset_report(workspace: runtime.Workspace) -> dict[str, Any]:
         **_identity(workspace),
         "categories": {
             key: workspace.category_labels.get(key, key)
-            for key in sorted(workspace.dataset.categories)
+            for key in sorted(workspace.dataset.query_categories)
         },
         "knowledge_pack": workspace.dataset.knowledge,
         "source_adapter": workspace.dataset.source,

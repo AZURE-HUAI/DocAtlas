@@ -49,6 +49,27 @@ def qualifier_segments(value: str) -> list[str]:
     return parts[:-1]
 
 
+def qualifier_suffixes(value: str, *, limit: int = 2) -> list[str]:
+    """限定名逐段去掉开头，剩下的那几个后缀写法，长的在前。
+
+    `std::ranges::views::transform` → `['ranges::views::transform',
+    'views::transform']`。名字的后缀仍然指着同一个东西：C++ 的命名空间别名
+    （标准里 `std::views` 就是 `std::ranges::views`）、Python 的重导出、
+    Java 的包名简写都是这一件事，所以规则在这里，不属于任何一个站点。
+
+    刻意不含只剩末段的那一档（`transform`）——那正是"八个都叫 transform"的
+    歧义来源，由 `qualifier_tail` 单独当最后一档处理。也刻意有上限：一个名字
+    派生出无穷多别名，索引白白变大，换不来更准。
+    """
+    parts = qualifier_segments(value)
+    if not parts:
+        return []
+    tail = re.split(r"::|\.", value.strip())[-1].strip()
+    return [
+        "::".join([*parts[index:], tail]) for index in range(1, len(parts))
+    ][:limit]
+
+
 def humanize_cpp_identifier(value: str) -> str:
     """把标识符拆成人话：`K2_SetTimer` → `K2 Set Timer`。"""
     value = value.split("::")[-1].replace("_", " ")

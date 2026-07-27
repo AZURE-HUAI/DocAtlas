@@ -6,7 +6,12 @@ import hashlib
 import re
 from typing import Any, Iterable
 
-from .constants import HEADING_RE, KNOWLEDGE_TYPE_RULES
+from .constants import (
+    CODE_FENCE_RE,
+    HEADING_RE,
+    KNOWLEDGE_TYPE_RULES,
+    TRAILING_HEADING_RE,
+)
 from .runtime import active
 from .htmlmd import plain_text
 # 这几个小工具搬到 text.py 了（适配器和知识包要用，不能绕回 config）；
@@ -455,6 +460,42 @@ def chunk_section(
     return chunks
 
 
+def fenced_line_numbers(lines: list[str]) -> set[int]:
+    """代码围栏内部的行号。只认成对出现的围栏。
+
+    围栏里的 `# 注释` 不是标题。不排除掉，一段 bash / Python 示例会被当场拆成
+    好几节，`heading_path` 上挂着 `# Use the draftHash from the previous step`
+    这种东西——代码块碎了，标题也是假的。
+
+    落单的围栏一律不算数：真实文档里确实存在（本地三份 Roblox 页面就是这样），
+    而按"从它开始到文末都是代码"处理，会把后面所有真标题一起吞掉，比不管更糟。
+    """
+    opened: int | None = None
+    inside: set[int] = set()
+    for index, line in enumerate(lines):
+        if not CODE_FENCE_RE.match(line):
+            continue
+        if opened is None:
+            opened = index
+        else:
+            inside.update(range(opened + 1, index))
+            opened = None
+    return inside
+
+
+def heading_at(line: str) -> tuple[str, int, str] | None:
+    """这一行是不是标题：返回（标题前面的正文, 层级, 标题文字），不是就 None。
+
+    整行都是标题时，前面的正文是空串；标题挤在行内元素后面时，前半行是正文，
+    后半截才是标题（见 `TRAILING_HEADING_RE`）。
+    """
+    if match := HEADING_RE.match(line):
+        return "", len(match["hashes"]), match["title"]
+    if match := TRAILING_HEADING_RE.match(line):
+        return match["lead"], len(match["hashes"]), match["title"]
+    return None
+
+
 def split_sections(
     *,
     title: str,
@@ -464,6 +505,7 @@ def split_sections(
     category: str,
 ) -> list[dict[str, Any]]:
     lines = markdown.splitlines()
+    fenced = fenced_line_numbers(lines)
     raw_sections: list[dict[str, Any]] = []
     heading_stack: list[tuple[int, str]] = []
     current = {
@@ -487,14 +529,17 @@ def split_sections(
                 }
             )
 
-    for line in lines:
-        match = HEADING_RE.match(line)
-        if not match:
+    for index, line in enumerate(lines):
+        found = heading_at(line) if index not in fenced else None
+        if found is None:
             current["lines"].append(line)
             continue
+        lead, level, heading = found
+        if lead:
+            # 标题前面那半行是上一节的正文，不能跟着标题一起走。
+            current["lines"].append(lead)
         finish()
-        level = len(match.group(1))
-        heading = match.group(2).strip()
+        heading = heading.strip()
         while heading_stack and heading_stack[-1][0] >= level:
             heading_stack.pop()
         heading_stack.append((level, heading))

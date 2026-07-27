@@ -24,6 +24,7 @@ from .runtime import active
 from .net import fetch_bytes
 from .htmlmd import plain_text
 from .chunking import chunk_sections, normalize_name, split_sections
+from .text import qualifier_suffixes
 from .text import humanize_cpp_identifier  # noqa: F401  （测试与外部调用方在用）
 
 
@@ -113,12 +114,23 @@ def entity_descriptor(
         (slug, "route_slug"),
         (qualified_name, "qualified_name"),
     }
-    extra_aliases = workspace.hook("extra_entity_aliases")
+    # 用 extension 而不是 hook：一个站点怎么给页面起标题，和"怎么解析这个站的
+    # 页面"是同一类知识，属于来源适配器；知识包仍然优先。
+    extra_aliases = workspace.extension("extra_entity_aliases")
     if extra_aliases:
         aliases |= extra_aliases(title=title, category=category, segments=segments)
     compact_title = re.sub(r"[^A-Za-z0-9_]+", "", title)
     if compact_title:
         aliases.add((compact_title, "compact_name"))
+    # 限定名的后缀指着同一个东西，也得登记，否则两边永远碰不上头：用户写
+    # `std::views::transform`（标准里 `std::views` 就是 `std::ranges::views`），
+    # 官方页面叫 `std::ranges::views::transform`，两个归一化后并不相等，只能
+    # 退到末段 `transform`——而这个库里叫 transform 的有八个（BUG-017）。
+    aliases |= {
+        (suffix, "qualifier_suffix")
+        for name, _kind in list(aliases)
+        for suffix in qualifier_suffixes(name)
+    }
     attributes = {
         "category": category,
         "path": path,

@@ -14,7 +14,7 @@ from typing import Any, Iterator
 
 from .config import (
     CATEGORY_LABELS,
-    CATEGORY_PATTERNS,
+    CATEGORY_IDS,
     DATA_DIR,
     DATA_ROOT,
     DATASET,
@@ -451,9 +451,11 @@ def skill_substitutions() -> dict[str, str]:
         "DATASET_NAME": DATASET.name,
         "DATASET_LANGUAGE": LANGUAGE,
         "DATASET_CATEGORIES": "、".join(
-            CATEGORY_LABELS.get(key, key) for key in DATASET.categories
+            CATEGORY_LABELS.get(key, key) for key in DATASET.query_categories
         ),
-        "DATASET_CATEGORY_IDS": " / ".join(f"`{key}`" for key in DATASET.categories),
+        "DATASET_CATEGORY_IDS": " / ".join(
+            f"`{key}`" for key in DATASET.query_categories
+        ),
         "DATASET_TRIGGERS": "、".join(DATASET.skill_triggers) or "（未配置）",
         "DATASET_EVIDENCE_KINDS": "、".join(
             f"`{kind}`" for kind in expected_evidence_kinds()
@@ -541,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     crawl.add_argument(
         "--category",
-        choices=list(CATEGORY_PATTERNS),
+        choices=list(CATEGORY_IDS),
         help="只抓这一类，例如只补齐 node_reference",
     )
     crawl.add_argument(
@@ -581,7 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search", help="全文查询总路由")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
-    search.add_argument("--category", choices=list(CATEGORY_PATTERNS))
+    search.add_argument("--category", choices=list(CATEGORY_IDS))
     search.add_argument("--json", action="store_true")
     search.set_defaults(func=command_search)
 
@@ -598,7 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument(
         "--token-budget", type=int, default=3000, help="上下文预算，默认 3000"
     )
-    ask.add_argument("--category", choices=list(CATEGORY_PATTERNS))
+    ask.add_argument("--category", choices=list(CATEGORY_IDS))
     ask.add_argument("--json", action="store_true", help="改输出结构化 JSON")
     ask.add_argument(
         "--no-fetch",
@@ -639,7 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
         + (f"，如 {'、'.join(DATASET.skill_triggers[:2])}" if DATASET.skill_triggers else ""),
     )
     get.add_argument("--limit", type=int, default=DEFAULT_FETCH_LIMIT)
-    get.add_argument("--category", choices=list(CATEGORY_PATTERNS))
+    get.add_argument("--category", choices=list(CATEGORY_IDS))
     get.set_defaults(func=command_get)
 
     context_parser = subparsers.add_parser(
@@ -647,7 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     context_parser.add_argument("query")
     context_parser.add_argument("--token-budget", type=int, default=3000)
-    context_parser.add_argument("--category", choices=list(CATEGORY_PATTERNS))
+    context_parser.add_argument("--category", choices=list(CATEGORY_IDS))
     context_parser.set_defaults(func=command_context)
 
     cross_index = subparsers.add_parser(
