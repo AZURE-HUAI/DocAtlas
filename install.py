@@ -234,7 +234,7 @@ def verify_skill(target: Path, rendered: dict[str, str]) -> None:
 # --------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="安装 DocAtlas 的技能与 MCP 服务器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -245,7 +245,7 @@ def main() -> int:
                         help="只打印 MCP 配置片段，不动任何文件")
     parser.add_argument("--skip-mcp", action="store_true", help="不注册 MCP")
     parser.add_argument("--skip-skill", action="store_true", help="不装技能")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if sys.version_info < MIN_PYTHON:
         version = ".".join(map(str, MIN_PYTHON))
@@ -283,14 +283,26 @@ def main() -> int:
             print(snippet)
 
         if not args.skip_skill:
-            installed = install_skill(render_skill())
-            if installed:
-                print("\n✓ 已装技能：")
-                for line in installed:
-                    print(f"    {line}")
-            else:
-                print(f"\n  没有检测到支持技能的客户端"
-                      f"（找过：{'、'.join(SKILL_CLIENTS)}）。")
+            from docatlas.runtime import DatasetNotChosen
+
+            try:
+                installed = install_skill(render_skill())
+                if installed:
+                    print("\n✓ 已装技能：")
+                    for line in installed:
+                        print(f"    {line}")
+                else:
+                    print(f"\n  没有检测到支持技能的客户端"
+                          f"（找过：{'、'.join(SKILL_CLIENTS)}）。")
+            except DatasetNotChosen:
+                # 技能文档要写"当前默认库是《X》"这种个性化的话，跟 MCP 不一样，
+                # 绕不开选一个。本机装了不止一个数据集又没选过默认时会走到这——
+                # 这不是故障，先 --dataset 定下来或先建好库，再重跑本脚本。
+                print(
+                    "\n  跳过装技能：本机不止一个数据集，还没定下默认查哪个。\n"
+                    "  先 `python install.py --dataset <id>` 定下来，或者先建好库"
+                    "再重跑本脚本。"
+                )
     except Failed as error:
         print(f"\n安装失败：{error}", file=sys.stderr)
         return 1

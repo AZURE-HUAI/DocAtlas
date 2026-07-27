@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import contextvars
 import dataclasses
 import io
 import json
@@ -204,6 +205,103 @@ def chunking_entity(*, title: str, path: str, category: str) -> dict:
         source_type=None,
         document_type=None,
     )
+
+
+class PageSummaryTests(unittest.TestCase):
+    """摘要只在正文没说过这句话时才补进正文（BUG-022）。
+
+    多数适配器的"摘要"就是正文第一句——cppreference 和 Blender 直接取
+    markdown 第一行，Roblox 取不到 front matter 时也这么退。原样再插回正文
+    前面，用户看到的就是同一句话连着出现两遍。真实库里 cppreference 的
+    C++20 页正是如此。
+
+    但摘要不能一律不要：Epic 的摘要来自页面 JSON、Roblox 的来自 front
+    matter，正文里根本没有这句话，去掉就等于把这一页的开场白删了——真实库
+    里 Roblox 有 102/106 页的 0 号小节除了摘要没有别的内容。
+    """
+
+    def first_body(self, *, title, description, markdown):
+        sections = chunking.split_sections(
+            title=title,
+            description=description,
+            markdown=markdown,
+            source_url="https://example.invalid/page",
+            category="guides",
+        )
+        return sections[0]["body_md"] if sections else ""
+
+    def test_a_summary_lifted_from_the_first_line_is_not_repeated(self):
+        """cppreference 的形状：摘要就是正文第一行，一字不差。"""
+        lead = "C++20 is a major version after C++17."
+        body = self.first_body(
+            title="C++20",
+            description=lead,
+            markdown=f"{lead}\n\n## New language features\n\n- Concepts\n",
+        )
+        self.assertEqual(body.count(lead), 1, f"同一句话出现了不止一次：{body!r}")
+
+    def test_a_truncated_summary_of_the_first_sentence_is_not_repeated(self):
+        """Epic 的形状：摘要是正文首句的截断版，正文那句还带着加粗和后半截。
+
+        比"相等"不够——两边只有前半截一样，按相等判断照样会重复一遍。
+        """
+        body = self.first_body(
+            title="Physics",
+            description="Chaos Physics is a light-weight physics simulation solution.",
+            markdown=(
+                "**Chaos Physics** is a light-weight physics simulation solution,"
+                " built from the ground up.\n\n## Destruction\n"
+            ),
+        )
+        self.assertNotIn("solution.\n", body.replace("\n\n", "\n")[:200])
+        self.assertEqual(body.count("light-weight"), 1, body)
+
+    def test_a_summary_sitting_behind_an_opening_table_is_not_repeated(self):
+        """摘要那句话未必排在最前面。
+
+        cppreference 的 `/cpp/compiler_support` 开头是一张"本页可能滞后"的
+        提示表格，正文首句排在表格后面——而适配器挑摘要时正好跳过表格行。
+        只比"正文是不是以摘要开头"会漏掉这一种。
+        """
+        lead = "The following tables present compiler support for new C++ features."
+        body = self.first_body(
+            title="Compiler support",
+            description=lead,
+            markdown=f"| Notice | This page may lag behind. |\n| --- | --- |\n\n{lead}\n",
+        )
+        self.assertEqual(body.count(lead), 1, f"同一句话出现了不止一次：{body!r}")
+
+    def test_a_summary_the_body_never_states_is_kept(self):
+        """反向控制组：摘要来自元数据时正文里没有这句话，必须留着。
+
+        这一条要是失守，Roblox 有一百来页的 0 号小节会直接变空。
+        """
+        summary = "Learn how to use the PCG framework."
+        body = self.first_body(
+            title="PCG Biome Core",
+            description=summary,
+            markdown="The PCG Biome plugins are examples of the framework.\n",
+        )
+        self.assertIn(summary, body)
+
+    def test_a_summary_is_kept_when_the_body_opens_with_a_heading(self):
+        """正文第一行就是标题时，0 号小节除了摘要什么都没有，更不能丢。"""
+        summary = "How to implement your character."
+        body = self.first_body(
+            title="Character",
+            description=summary,
+            markdown="## Goals\n\nMake a new character.\n",
+        )
+        self.assertEqual(body.strip(), summary)
+
+    def test_a_summary_that_merely_restates_the_title_is_still_dropped(self):
+        """原有的标题去重照旧生效，这次改动没有把它挤掉。"""
+        body = self.first_body(
+            title="Attribute Statistic node",
+            description="Attribute Statistic node.",
+            markdown="The node evaluates a field on a geometry.\n",
+        )
+        self.assertNotIn("Attribute Statistic node.", body)
 
 
 class SearchQueryTests(unittest.TestCase):
@@ -1300,6 +1398,38 @@ class TargetTypeResolutionTests(unittest.TestCase):
 class McpProtocolTests(unittest.TestCase):
     """MCP 是手写的（不引第三方 SDK），协议层必须有测试守着。"""
 
+    def test_list_datasets_survives_no_default_chosen(self):
+        """本机不止一个库又没选过默认时，`docatlas_list_datasets` 自己不能崩。
+
+        这个工具存在的意义就是让 AI 先摸清本机有什么、要不要传 dataset_id——
+        它偏偏是最不该在"没有默认库"这个状态下失败的那个。实测过的真实故障：
+        它无条件调用 `runtime.active().id` 去标出默认是哪个，`active()` 在没有
+        默认库时抛 `DatasetNotChosen`，最终回给客户端的是一段原始 Python 堆栈，
+        不是一句人话（BUG-021 同一类问题的第二个现场）。
+        """
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        original = runtime.LOCAL_SETTINGS
+        runtime.LOCAL_SETTINGS = Path(directory.name) / ".docatlas-local.toml"
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original)
+        previous = os.environ.pop("DOCATLAS_DATASET", None)
+        if previous is not None:
+            self.addCleanup(os.environ.__setitem__, "DOCATLAS_DATASET", previous)
+        self.assertGreater(len(runtime.available_dataset_ids()), 1)
+
+        def call():
+            return mcpserver.handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "docatlas_list_datasets",
+                          "arguments": {"format": "json"}},
+            })
+
+        reply = contextvars.Context().run(call)
+        self.assertFalse(reply["result"]["isError"], reply["result"])
+        payload = json.loads(reply["result"]["content"][0]["text"])
+        self.assertIsNone(payload["default_dataset_id"])
+        self.assertGreaterEqual(len(payload["datasets"]), 2)
+
     def test_handshake_echoes_the_client_protocol_version(self):
         # 硬报一个版本会让老客户端直接拒绝握手。
         reply = mcpserver.handle({
@@ -1592,6 +1722,91 @@ class DefaultDatasetTests(unittest.TestCase):
             runtime.default_dataset_id()
         for dataset_id in runtime.available_dataset_ids():
             self.assertIn(dataset_id, str(caught.exception), "报错里没列出可选项")
+
+    def test_a_single_configured_dataset_needs_no_choice(self):
+        """只有一个能装，没有歧义，不必逼用户多打一步。"""
+        only_one = Path(self.directory.name) / "only-one"
+        only_one.mkdir()
+        (only_one / "solo-dataset.toml").write_text("", encoding="utf-8")
+        original_dir = runtime.DATASET_CONFIG_DIR
+        runtime.DATASET_CONFIG_DIR = only_one
+        self.addCleanup(setattr, runtime, "DATASET_CONFIG_DIR", original_dir)
+        self.assertEqual(runtime.default_dataset_id(), "solo-dataset")
+
+
+class InstallerSkillStepTests(unittest.TestCase):
+    """本机不止一个数据集、又没定过默认时，`install.py` 装技能这一步不能崩。
+
+    实测过的真实故障：`skill_substitutions()` 要填 {{DATASET_NAME}} 这类占位符，
+    绕不开 `active()`；没选过默认库时它抛 `DatasetNotChosen`（`RuntimeError` 的
+    子类），而 `main()` 只接住了自己定义的 `Failed`——于是"跳过装技能"这句话
+    根本没机会打印，用户看到的是一段从 cli.py 导入链深处冒出来的原始堆栈，而且
+    是紧跟在"默认库：未指定（每次自己说……）"这句话后面出现的，前后自相矛盾。
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        settings = Path(self.directory.name) / ".docatlas-local.toml"
+        original = runtime.LOCAL_SETTINGS
+        runtime.LOCAL_SETTINGS = settings
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original)
+        self.addCleanup(self.directory.cleanup)
+        self.previous = os.environ.pop("DOCATLAS_DATASET", None)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        os.environ.pop("DOCATLAS_DATASET", None)
+        if self.previous is not None:
+            os.environ["DOCATLAS_DATASET"] = self.previous
+
+    def load_installer(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "docatlas_install_under_test", runtime.REPO_ROOT / "install.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def run_as_a_fresh_process_would(self, callable_):
+        """在一个空的 `contextvars.Context` 里跑，并逼相关模块重新执行顶层代码。
+
+        真实的"全新进程、还没选过默认库"要复现两层缓存才能测到：
+
+        1. `runtime.active()` 把结果存进模块级的 `ContextVar`。测试套件里成百个
+           用例都会直接或间接调用它（大多在 `DOCATLAS_DATASET=epic-ue-5.8` 的
+           引导环境下），这个 ContextVar 一旦被填过就不会再变——所以必须在一个
+           全新的空 `Context` 里跑，让它重新命中 `except LookupError`。
+        2. `cli.py` 顶层写的是 `from .config import DATASET_ID`，这在**首次**
+           import 时把值复制成 `cli.py` 自己的普通属性，同样只算一次。
+           `ImportSmokeTests` 之类的用例会把它导入一遍，所以还要把它和
+           `docatlas.config` 从 `sys.modules` 里清掉，逼下一次 import 重新执行。
+
+        两层都不清的话，这条测试在单独跑时通过、混进整个测试套件后却会静悄悄地
+        测不出问题——刚好复现过一次。
+        """
+        for name in ("docatlas.cli", "docatlas.config"):
+            sys.modules.pop(name, None)
+        self.addCleanup(lambda: (sys.modules.pop("docatlas.cli", None),
+                                  sys.modules.pop("docatlas.config", None)))
+        return contextvars.Context().run(callable_)
+
+    def test_skill_step_reports_instead_of_crashing_with_no_default_chosen(self):
+        self.assertGreater(
+            len(runtime.available_dataset_ids()), 1,
+            "这个仓库本身就装了不止一个数据集配置，这就是真实的首次运行状态",
+        )
+        installer = self.load_installer()
+        with self.assertRaises(runtime.DatasetNotChosen):
+            self.run_as_a_fresh_process_would(installer.render_skill)
+
+        # --skip-mcp：这条只查"装技能那一步会不会崩"，不该顺带去碰真实的
+        # claude/codex 注册。
+        exit_code = self.run_as_a_fresh_process_would(
+            lambda: installer.main(["--skip-mcp"])
+        )
+        self.assertEqual(exit_code, 0, "跳过装技能不该让整个安装失败")
 
 
 class RuntimeWorkspaceTests(unittest.TestCase):
@@ -2409,6 +2624,110 @@ class UrlFragmentTests(unittest.TestCase):
         )
 
 
+class ParentHeadingAnchorTests(unittest.TestCase):
+    """父标题自己没有正文时，它的锚点仍然要能用（BUG-023）。
+
+    切小节只保留有正文的那些，于是"光领着子标题、自己不写正文"的父标题
+    没有留下任何一条记录。真实库里 cppreference 的 C++20 页就是这个形状：
+
+        ## New library features     ← 底下直接就是子标题，自己一个字没有
+        ### New headers
+        ### Library features
+
+    官方页面上明明有 `#New_library_features` 这个锚点，用户贴过来却被告知
+    "本页没有对应的小节"，然后拿到整页内容。
+
+    但它并没有真的丢——子小节把它原样带在 `heading_path` 里，按锚点那条同样
+    的拍平规则比一遍路径就能还原，不必为一个空标题造一条没有正文的记录。
+    """
+
+    # 路径按测试数据集（UE）的形状写，页内标题层级照搬真实的 C++20 页——
+    # 这一条要验的是"父标题没有正文"这个结构，跟站点无关。
+    PAGE = "/documentation/unreal-engine/cpp-20-support"
+    ROOT = "C++20"
+    LANG = f"{ROOT} > New language features"
+    # 这一层在库里没有自己的小节，只作为子小节 heading_path 的一段存在。
+    LIB = f"{ROOT} > New library features"
+
+    CHUNKS = [
+        ("summary", ROOT, "", "C++20 is a major version after C++17."),
+        ("details", LANG, "newlanguagefeatures", "Concepts, modules, coroutines."),
+        ("details", f"{LIB} > New headers", "newheaders", "<bit>, <compare>, <format>."),
+        ("details", f"{LIB} > Library features", "libraryfeatures", "Formatting library."),
+        ("details", f"{ROOT} > Defect reports", "defectreports", "Applied retroactively."),
+    ]
+
+    def setUp(self):
+        self.connection = temp_db(self)
+        self.connection.execute(
+            "INSERT INTO sitemaps(url, category, status)"
+            " VALUES('https://example.invalid/s.xml', 'guides', 'success')"
+        )
+        page_url = f"https://example.invalid{self.PAGE}"
+        self.page_id = self.connection.execute(
+            "INSERT INTO pages(url, path, category, sitemap_url, status, title, route_depth)"
+            " VALUES(?, ?, 'guides', 'https://example.invalid/s.xml', 'success', ?, 3)",
+            (page_url, self.PAGE, self.ROOT),
+        ).lastrowid
+        now = "2026-07-28T00:00:00Z"
+        self.by_anchor: dict[str, int] = {}
+        for index, (kind, heading_path, anchor, body) in enumerate(self.CHUNKS):
+            section_id = self.connection.execute(
+                "INSERT INTO sections(page_id, position, heading_level, heading_path,"
+                " title, content_md, content_text, source_url, token_estimate)"
+                " VALUES(?, ?, 2, ?, ?, ?, ?, '', 10)",
+                (self.page_id, index, heading_path, heading_path.split(" > ")[-1],
+                 body, body),
+            ).lastrowid
+            anchored = f"{page_url}#{anchor}" if anchor else page_url
+            chunk_id = self.connection.execute(
+                "INSERT INTO chunks(section_id, page_id, chunk_index, chunk_count,"
+                " knowledge_type, title, heading_path, context_prefix, content_md,"
+                " content_text, source_url, source_anchor, token_estimate,"
+                " content_hash, quality_score, created_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 20, ?, 1.0, ?, ?)",
+                (section_id, self.page_id, index, len(self.CHUNKS), kind,
+                 heading_path.split(" > ")[-1], heading_path, body, body,
+                 page_url, anchored, f"hash{index}", now, now),
+            ).lastrowid
+            self.by_anchor[anchor or "(root)"] = chunk_id
+        self.connection.commit()
+
+    def ask(self, fragment):
+        url = f"https://dev.epicgames.com{self.PAGE}#{fragment}"
+        return context.build_context_pack(
+            self.connection, url, token_budget=3000, category=None
+        )
+
+    def test_a_body_less_parent_heading_still_resolves(self):
+        pack = self.ask("New_library_features")
+        intent = pack["fragment_intent"]
+        self.assertTrue(intent["matched"], "官方页面上有这个锚点，不能说找不到")
+        self.assertEqual(intent["section"], "New library features")
+
+    def test_it_selects_exactly_that_branch(self):
+        """还回来的是这一节底下的内容，不是退回整页。"""
+        ids = {item["id"] for item in self.ask("New_library_features")["primary_knowledge"]}
+        self.assertEqual(
+            ids, {self.by_anchor["newheaders"], self.by_anchor["libraryfeatures"]}
+        )
+
+    def test_a_heading_with_its_own_body_still_matches_by_anchor(self):
+        """反向控制组：自带锚点的小节走原来那条路，行为一个字不变。"""
+        pack = self.ask("New_language_features")
+        self.assertEqual(pack["fragment_intent"]["section"], "New language features")
+        self.assertEqual(
+            {item["id"] for item in pack["primary_knowledge"]},
+            {self.by_anchor["newlanguagefeatures"]},
+        )
+
+    def test_a_fragment_matching_no_heading_at_all_still_says_so(self):
+        """反向控制组：认不出来仍然要认账，不能靠新退路蒙混过去。"""
+        intent = self.ask("no-such-section")["fragment_intent"]
+        self.assertFalse(intent["matched"])
+        self.assertIsNone(intent["section"])
+
+
 class SampleQuotaTests(unittest.TestCase):
     """`--sample-per-category N` 是每类的上限，不是全局配额。
 
@@ -3007,8 +3326,11 @@ class BreadcrumbNoiseTests(unittest.TestCase):
         self.assertIn("In Field Of View", indexed)
 
     def test_changing_the_rule_bumps_the_chunker_version(self):
-        """切分规则变了不改版本号，旧块会和新块混在同一个库里。"""
-        self.assertEqual(constants.CHUNKER_VERSION, "v6")
+        """切分规则变了不改版本号，旧块会和新块混在同一个库里。
+
+        v7：摘要与正文重复时不再插入正文（BUG-022）。
+        """
+        self.assertEqual(constants.CHUNKER_VERSION, "v7")
 
 
 class CrossLanguageDiagnosisTests(unittest.TestCase):
