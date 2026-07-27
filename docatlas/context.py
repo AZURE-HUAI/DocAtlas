@@ -40,7 +40,7 @@ from .ondemand import (
 from .relations import page_link_status
 from .runtime import active
 from .search import page_chunks, query_names, search_chunks
-from .text import SCRIPT_NAMES, script_mismatch, script_of_language
+from .text import SCRIPT_NAMES, heading_anchor, script_mismatch, script_of_language
 from . import versions
 
 # 一个页面保底给几块，以及它最多能占预算的多少。
@@ -203,6 +203,27 @@ def _chunk_anchor(chunk: dict[str, Any]) -> str:
     return normalize_name(url.split("#", 1)[1]) if "#" in url else ""
 
 
+def _ancestor_scope(chunks: list[dict[str, Any]], fragment: str) -> str:
+    """fragment 指着一个自己没有正文的父标题时，用 `heading_path` 把它找回来。
+
+    切小节时只留下有正文的那些，光领着子标题、自己不写正文的父标题就没了。
+    cppreference 的 C++20 页正是这样：`## New library features` 底下直接是
+    `### New headers`，官方页面上明明有 `#New_library_features` 这个锚点，
+    库里却没有任何一块认领它，用户贴这个地址过来只会被告知"本页没有对应的
+    小节"（BUG-023）。
+
+    但它并没有真的丢——子小节把它原样带在 `heading_path` 里。按锚点那条同样
+    的拍平规则比一遍路径上的每一段，就能把这一节的范围还回来。这样既不必为
+    一个空标题造一条没有正文的记录，也不用重建已经建好的库。
+    """
+    for chunk in chunks:
+        segments = chunk["heading_path"].split(" > ")
+        for depth, segment in enumerate(segments, start=1):
+            if heading_anchor(segment) == fragment:
+                return " > ".join(segments[:depth])
+    return ""
+
+
 def _fragment_section(
     chunks: list[dict[str, Any]], fragment: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -211,15 +232,22 @@ def _fragment_section(
     两步缺一不可：
 
     - **锚点认出是哪一节。** 锚点由标题拍平而来，官方 href 拍平之后正好对上。
+      认不出来时再退一步，看这个锚点是不是某一段 `heading_path`——父标题自己
+      没有正文时，库里就只剩这一份记录（`_ancestor_scope`）。
     - **`heading_path` 划定这一节到哪儿为止。** 一节里可以有好几块，其中带
       自己小标题的那几块锚点并不等于这一节的锚点——Roblox 的
       `CoreUISafeInsets` 就挂在 `Screen insets` 底下，只按锚点匹配会只给一块，
       把用户点进这一节真正要读的内容留在外面。
     """
     roots = [chunk for chunk in chunks if _chunk_anchor(chunk) == fragment]
-    if not roots:
+    if roots:
+        scopes = {chunk["heading_path"] for chunk in roots}
+        name = roots[0]["heading_path"].split(" > ")[-1]
+    elif ancestor := _ancestor_scope(chunks, fragment):
+        scopes = {ancestor}
+        name = ancestor.split(" > ")[-1]
+    else:
         return [], ""
-    scopes = {chunk["heading_path"] for chunk in roots}
     selected = [
         chunk
         for chunk in chunks
@@ -229,7 +257,7 @@ def _fragment_section(
             for scope in scopes
         )
     ]
-    return selected, roots[0]["heading_path"].split(" > ")[-1]
+    return selected, name
 
 
 def build_context_pack(

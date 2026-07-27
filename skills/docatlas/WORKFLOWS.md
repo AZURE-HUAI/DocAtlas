@@ -123,6 +123,9 @@ python -m docatlas ask "<明确存在的官方术语>" --token-budget 1500
 python -m docatlas validate --phase content
 ```
 
+`validate` 报切分规则版本不符，说明程序更新过而本地库还是旧规则切的：跑一次
+`python -m docatlas reprocess`（用已存的原文重切，不联网，可续传）。
+
 项目移动或 Skill 内容变化后重新安装（技能与 MCP 一起更新，装完自己验一遍）：
 
 ```powershell

@@ -78,7 +78,14 @@ def _dataset_catalogue() -> list[tuple[str, str]]:
 
 def _dataset_hint() -> str:
     listing = "；".join(f"{key}（{name}）" for key, name in _dataset_catalogue())
-    return f"要查哪个文档库，不填就用默认的那个。本机有：{listing or '（一个都没有）'}"
+    listing = listing or "（一个都没有）"
+    try:
+        fallback = f"不填就用默认的那个（{runtime.active().id}）。"
+    except runtime.DatasetNotChosen:
+        # 程序不内置默认库，本机又不止一个可选时就是这样：这个字段变成必填，
+        # 工具 schema 里必须如实说，AI 才知道不能省。
+        fallback = "本机没有默认库，必填。"
+    return f"要查哪个文档库。{fallback}本机有：{listing}"
 
 
 _DATASET_PROPERTY = {"type": "string", "description": _dataset_hint()}
@@ -612,14 +619,23 @@ def tool_list_datasets(arguments: dict[str, Any]) -> Any:
             if only:
                 raise ToolError(str(exc)) from exc
             reports.append({"dataset_id": dataset_id, "state": "broken_config"})
+    # 这个工具存在的意义就是"先摸清本机有什么"，所以它自己不能要求默认库已经
+    # 选定——没选过默认恰恰是最需要靠这个工具搞清楚"要不要传 dataset_id"的时候。
+    try:
+        default = runtime.active().id
+    except runtime.DatasetNotChosen:
+        default = None
     if arguments.get("format") == "json":
         return {
             "contract_version": CONTRACT_VERSION,
-            "default_dataset_id": runtime.active().id,
+            "default_dataset_id": default,
             "datasets": reports,
         }
-    default = runtime.active().id
-    lines = [f"默认数据集：{default}（不填 dataset_id 时用它）", ""]
+    lines = (
+        [f"默认数据集：{default}（不填 dataset_id 时用它）", ""]
+        if default
+        else ["本机没有默认库，每次调用都要带 dataset_id。", ""]
+    )
     for report in reports:
         marker = "→" if report["dataset_id"] == default else " "
         state = {

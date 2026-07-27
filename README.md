@@ -56,4 +56,4 @@ cites its sources. Or run it yourself: `python -m docatlas ask "std::vector"`.
 
 - [Usage guide](docs/USAGE.md) — every command, crawling, data layout, new datasets
 - [Architecture](docs/ARCHITECTURE.md) · [Data contract](docs/DATA_CONTRACT.md) · [AI routing](docs/AI_ROUTING.md)
-- [Issue log](issues/README.md) · [Contributing](CONTRIBUTING.md)
+- [Issue log](issues/README.md)

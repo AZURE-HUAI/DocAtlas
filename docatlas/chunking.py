@@ -496,6 +496,41 @@ def heading_at(line: str) -> tuple[str, int, str] | None:
     return None
 
 
+def description_repeats_lead(
+    description: str, lines: list[str], fenced: set[int]
+) -> bool:
+    """正文开头是不是已经把摘要那句话说过了。
+
+    多数站点的"摘要"就是正文第一句：cppreference 和 Blender 直接取 markdown
+    的第一行，Roblox 取不到 front matter 时也这么退。把它原样再插回正文前面，
+    用户读到的就是同一句话连着出现两遍（BUG-022）。
+
+    比的是"这段开场白里有没有这句话"，既不是相等，也不是"开头就是它"：
+
+    - 摘要常常是正文首句的截断版，正文那句还带着 `**加粗**` 和后半截——
+      "…a light-weight physics simulation solution" 之后还接着 ", built from
+      the ground up…"，按相等判断照样重复。
+    - 摘要那句也未必排在最前面。cppreference 的 `/cpp/compiler_support`
+      开头是一张"本页可能滞后"的提示表格，正文首句排在表格后面，而适配器挑
+      摘要时跳过了表格行——按"开头就是它"判断同样会漏掉。
+
+    只看第一个标题之前的那几行：重复只可能发生在这里，摘要正是插在它们前面
+    的。这也保证了摘要被跳过时正文一定不空——匹配得上就说明这段正文里本来
+    就有这句话。Epic 和 Roblox 那种摘要来自元数据、正文里根本没有的页面，
+    走不到这一步，照旧补进去。
+    """
+    lead: list[str] = []
+    for index, line in enumerate(lines):
+        found = heading_at(line) if index not in fenced else None
+        if found is not None:
+            # 标题前面那半行仍是正文（`TRAILING_HEADING_RE`），要算进来。
+            lead.append(found[0])
+            break
+        lead.append(line)
+    wanted = normalize_name(description)
+    return bool(wanted) and wanted in normalize_name(plain_text("\n".join(lead)))
+
+
 def split_sections(
     *,
     title: str,
@@ -514,7 +549,11 @@ def split_sections(
         "path": title or "Untitled",
         "lines": [],
     }
-    if description and normalize_name(description) != normalize_name(title):
+    if (
+        description
+        and normalize_name(description) != normalize_name(title)
+        and not description_repeats_lead(description, lines, fenced)
+    ):
         current["lines"].append(description)
 
     def finish() -> None:

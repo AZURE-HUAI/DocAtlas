@@ -16,7 +16,24 @@ function Invoke-DocAtlas {
     & python.exe -m docatlas @DocArgs
 }
 
-$script:_paths = & python.exe -m docatlas paths | ConvertFrom-Json
+# `paths` 失败最常见的原因是本机装了不止一个数据集、还没定过默认查哪个——
+# `python` 把这句人话写去 stderr、退出码非零。stderr 重定向到**文件**而不是
+# `2>&1`：native exe 的 2>&1 会把每行 stderr 包成 ErrorRecord 自动打到控制台，
+# 再叠上下面这个 throw，同一条消息会显示两遍，还裹着 NativeCommandError 的
+# CategoryInfo / FullyQualifiedErrorId 噪音。重定向到文件是纯字节操作，不走
+# PowerShell 的错误对象模型，干净拿到原始文本。
+$errFile = [System.IO.Path]::GetTempFileName()
+try {
+    $stdout = & python.exe -m docatlas paths 2> $errFile
+    $exitCode = $LASTEXITCODE
+    $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+} finally {
+    Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+}
+if ($exitCode -ne 0) {
+    throw $(if ($stderr) { $stderr.Trim() } else { "python -m docatlas paths 失败（退出码 $exitCode），且没有错误信息。" })
+}
+$script:_paths = $stdout | ConvertFrom-Json
 if (-not $script:_paths) { throw '无法定位数据目录：python -m docatlas paths 没有输出。' }
 
 $DatasetId = $script:_paths.dataset
