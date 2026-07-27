@@ -37,11 +37,12 @@ python -m docatlas validate --phase inventory
 | 枚举页面 | sitemap 接口，或 `inventory_feeds` + `read_feed` |
 | URL 统一 | `normalize_location`、`canonical_url`、`document_request_url` |
 | 正文与链接 | `parse_document`、`normalize_link_target` |
-| 边界与分类 | `is_official_url`、`categorize_path` |
+| 边界 | `is_official_url` |
 | 实体归属 | `entity_placement` |
 
-按需实现 `document_locale`、`page_members`、`version_marks` 和
-`version_sort_key`。配置至少声明数据集身份、语言、来源、分类、实体类型和
+按需实现 `document_locale`、`page_members`、`version_marks`、`version_sort_key`
+和 `categorize_path`（只有要让引用闭包自动分类时才需要；cppreference 没有它
+也照常工作）。配置至少声明数据集身份、语言、来源、分类、实体类型和
 Skill 触发词。三条容易踩的：
 
 - "是否官方地址"和"是否纳入本数据集"是两件事，不能共用一个判断。

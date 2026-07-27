@@ -33,7 +33,7 @@ description: 查询和维护本机 DocAtlas 官方文档知识库。当前默认
 | 标题目录 | `docatlas_search` | `python -m docatlas search` |
 | 展开一条 | `docatlas_show` | `python -m docatlas show` |
 | 知识关系 | `docatlas_related` | `python -m docatlas related` |
-| 数据集与能力 | `docatlas_list_datasets` | `python -m docatlas paths` |
+| 数据集与能力 | `docatlas_list_datasets` | `python -m docatlas paths`（只列 id 和路径，不含能力与建库进度） |
 
 一个服务器服务所有数据集，每次调用可传 `dataset_id`；不确定查哪个先调
 `docatlas_list_datasets`。默认用 `docatlas_ask`：`token_budget` 简单问题 1500、
