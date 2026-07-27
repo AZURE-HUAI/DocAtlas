@@ -85,7 +85,10 @@ def export_markdown(
                     pieces.append(
                         "\n\n---\n\n"
                         f"# {row['title']}\n\n"
-                        f"- UE 版本：{VERSION}\n"
+                        # 产品名来自数据集。写死 "UE" 会让 Blender 导出的
+                        # 分片每一页都标着 "UE 版本：5.2"（BUG-009 同类，
+                        # 当时漏扫了导出层）。
+                        f"- {DATASET.product} 版本：{VERSION}\n"
                         f"- 分类：{CATEGORY_LABELS[category]}\n"
                         f"- 更新时间：{row['updated_at'] or '未知'}\n"
                         f"- DOC 原出处：[{row['url']}]({row['url']})\n"

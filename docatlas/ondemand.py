@@ -47,20 +47,6 @@ MIN_COVERAGE_TOKENS = 2
 MIN_CONTAINS_CHARS = 5
 
 
-def _priority_case(column: str = "category") -> str:
-    """把优先级表编译成一段 SQL CASE，省得同一份顺序在字典和 SQL 里各写一遍。
-
-    同名候选谁优先，由数据集配置说了算（没配就一视同仁）。
-    """
-    priority = active().category_priority
-    if not priority:
-        return "0"
-    branches = " ".join(
-        f"WHEN '{name}' THEN {rank}" for name, rank in priority.items()
-    )
-    return f"CASE {column} {branches} ELSE {max(priority.values()) + 1} END"
-
-
 def coverage_tokens(query: str) -> list[str]:
     """路径覆盖档要求全部出现的那几个实词。"""
     tokens = []
@@ -237,7 +223,7 @@ def _collect(
 ) -> list[sqlite3.Row]:
     category_clause = " AND category=?" if category else ""
     category_params: tuple[Any, ...] = (category,) if category else ()
-    order = f"ORDER BY {_priority_case()}, route_depth, id"
+    order = f"ORDER BY {active().category_priority_sql}, route_depth, id"
     qualifiers = query_qualifiers(query)
     rows: list[sqlite3.Row] = []
     seen: set[int] = set()

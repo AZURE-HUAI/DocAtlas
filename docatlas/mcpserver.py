@@ -39,7 +39,7 @@ from .context import (
 from .db import connect_db, initialize_db
 from .net import REQUEST_LIMITER
 from .ondemand import DEFAULT_FETCH_LIMIT, inventory_lookup
-from .search import search_docs
+from .search import chunk_or_section, knowledge_id, search_chunks
 from .text import script_mismatch
 from . import versions
 
@@ -60,12 +60,18 @@ class ToolError(Exception):
 
 
 def _dataset_catalogue() -> list[tuple[str, str]]:
-    """本机有哪些数据集，(id, 名字)。坏掉的配置跳过，不能让它拖垮整个服务器。"""
+    """本机有哪些数据集，(id, 名字)。坏掉的配置跳过，不能让它拖垮整个服务器。
+
+    要接住 `SystemExit` 是因为 `load_dataset` 用它报配置错（命令行的活法），
+    而它继承自 `BaseException`，`except Exception` 抓不到。但**只接这一个**：
+    原来写的是 `except BaseException`，连 Ctrl-C 一起吞了——服务器启动时列一遍
+    数据集，用户按 Ctrl-C 会被当成"这个配置读不出来"，然后接着列下一个。
+    """
     catalogue = []
     for dataset_id in runtime.available_dataset_ids():
         try:
             catalogue.append((dataset_id, runtime.workspace(dataset_id).name))
-        except BaseException:  # noqa: BLE001  配置错误会抛 SystemExit
+        except (Exception, SystemExit):  # noqa: BLE001  配置错误会抛 SystemExit
             catalogue.append((dataset_id, "（配置读不出来）"))
     return catalogue
 
@@ -411,7 +417,7 @@ def tool_search(arguments: dict[str, Any]) -> Any:
     with runtime.use(workspace):
         connection = _open(workspace)
         try:
-            rows = search_docs(
+            rows = search_chunks(
                 connection,
                 query,
                 limit=int(arguments.get("limit") or 10),
@@ -469,20 +475,14 @@ def tool_search(arguments: dict[str, Any]) -> Any:
 
 def tool_show(arguments: dict[str, Any]) -> Any:
     raw_id = str(arguments.get("chunk_id") or "").strip()
-    digits = raw_id[1:] if raw_id[:1].casefold() == "k" else raw_id
-    if not digits.isdigit():
+    numeric_id = knowledge_id(raw_id)
+    if numeric_id is None:
         raise ToolError(f"看不懂的知识 ID：{raw_id!r}（应该长这样：K9290）")
     workspace = _workspace(arguments)
     with runtime.use(workspace):
         connection = _open(workspace)
         try:
-            row = connection.execute(
-                "SELECT content_md FROM chunks WHERE id=?", (int(digits),)
-            ).fetchone()
-            if row is None:
-                row = connection.execute(
-                    "SELECT content_md FROM sections WHERE id=?", (int(digits),)
-                ).fetchone()
+            row = chunk_or_section(connection, numeric_id)
             if row is None:
                 raise ToolError(
                     f"{workspace.id} 里没有知识 ID {raw_id}。编号只在同一个库、"

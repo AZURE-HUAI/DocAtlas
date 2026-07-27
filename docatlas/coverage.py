@@ -38,7 +38,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from .db import route_metadata
+from .db import resolve_link_targets, route_metadata
 from .runtime import active
 from .util import utc_now
 
@@ -68,20 +68,16 @@ def reclassify_links(connection: sqlite3.Connection) -> int:
         target_path = normalize(dataset, row["target_url"])
         if target_path == row["target_path"]:
             continue
+        # 目标路径变了，之前解析出来的页面 id 就是旧结论——必须一并清掉，
+        # 否则这条链接会一直指着重判之前认定的那一页。清空之后由下面的
+        # resolve_link_targets 按新路径重新解析。
         connection.execute(
-            "UPDATE page_links SET target_path=?, evidence_kind=? WHERE id=?",
+            "UPDATE page_links SET target_path=?, evidence_kind=?,"
+            " target_page_id=NULL WHERE id=?",
             (target_path, "official_link" if target_path else "external_link", row["id"]),
         )
         changed += 1
-    connection.execute(
-        """
-        UPDATE page_links
-        SET target_page_id=(
-            SELECT p.id FROM pages p WHERE p.path=page_links.target_path
-        )
-        WHERE target_path IS NOT NULL
-        """
-    )
+    resolve_link_targets(connection)
     connection.execute(
         "INSERT OR REPLACE INTO metadata(key, value) VALUES('link_targets', ?)",
         (LINK_TARGET_VERSION,),

@@ -195,17 +195,6 @@ def _drop_connection(scheme: str, host: str) -> None:
             connection.close()
 
 
-def close_connections() -> None:
-    """线程收尾时主动关闭连接，避免留下大量 CLOSE_WAIT。"""
-    pool = getattr(_thread_local, "pool", None)
-    if not pool:
-        return
-    for connection in pool.values():
-        with contextlib.suppress(Exception):
-            connection.close()
-    pool.clear()
-
-
 def _decode_body(raw: bytes, encoding: str) -> bytes:
     encoding = (encoding or "").lower()
     if "gzip" in encoding:

@@ -9,6 +9,10 @@ import urllib.parse
 from .runtime import active
 from .util import utc_now
 
+# 表结构版本。加表、加列、改索引都在 initialize_db 里就地迁移，这个号只是
+# 写进库里备查，方便拿到一个陌生库时知道它是哪一代的。
+SCHEMA_VERSION = "3"
+
 
 def inventory_index_url() -> str:
     """清单入口的总地址，纯粹是溯源信息，没有任何代码依赖它。
@@ -323,6 +327,11 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(normalized_slug)"
     )
+    # 部分索引，只收录还缺派生元数据的页面——见 backfill_page_metadata。
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pages_metadata_pending ON pages(id)"
+        f" WHERE {PENDING_METADATA_CONDITION}"
+    )
     add_column_if_missing(
         connection, "sections", "knowledge_type", "TEXT NOT NULL DEFAULT 'overview'"
     )
@@ -354,89 +363,11 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_parser ON pages(parser_version)"
     )
-    try:
-        connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
-                title,
-                heading_path,
-                content_text,
-                source_url UNINDEXED,
-                category UNINDEXED,
-                tokenize='unicode61 remove_diacritics 2'
-            )
-            """
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES('fts', 'fts5')"
-        )
-    except sqlite3.OperationalError:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sections_fts (
-                rowid INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                heading_path TEXT NOT NULL,
-                content_text TEXT NOT NULL,
-                source_url TEXT NOT NULL,
-                category TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES('fts', 'fallback')"
-        )
-    try:
-        connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-                title,
-                heading_path,
-                context_prefix,
-                content_text,
-                source_url UNINDEXED,
-                category UNINDEXED,
-                knowledge_type UNINDEXED,
-                tokenize='unicode61 remove_diacritics 2'
-            )
-            """
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES('chunk_fts', 'fts5')"
-        )
-    except sqlite3.OperationalError:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chunks_fts (
-                rowid INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                heading_path TEXT NOT NULL,
-                context_prefix TEXT NOT NULL,
-                content_text TEXT NOT NULL,
-                source_url TEXT NOT NULL,
-                category TEXT NOT NULL,
-                knowledge_type TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES('chunk_fts', 'fallback')"
-        )
-    dataset = active().dataset
-    connection.executemany(
-        "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
-        [
-            ("dataset", dataset.id),
-            ("product", dataset.product),
-            ("doc_version", dataset.version),
-            ("language", dataset.language),
-            ("source", dataset.name),
-            ("source_adapter", dataset.source),
-            ("knowledge_pack", dataset.knowledge or ""),
-            ("inventory_index", inventory_index_url()),
-            ("schema_version", "3"),
-        ],
-    )
+    fts_modes = {
+        key: _create_fts(connection, table, columns)
+        for key, table, columns in FTS_TABLES
+    }
+    write_metadata(connection, fts_modes)
     backfill_page_metadata(connection)
     backfill_page_slugs(connection)
     # 版本适用信息是纯本地计算（对已有正文跑一遍领域层的识别规则），不联网。
@@ -454,6 +385,110 @@ def initialize_db(connection: sqlite3.Connection) -> None:
 
     reclassify_links(connection)
     connection.commit()
+
+
+# 全文索引表。`UNINDEXED` 的列只是跟着存，不参与匹配；末尾那列的标记按
+# fts5 语法写在列名后面，退回普通表时统一当 TEXT。
+# (metadata 里记模式用的 key, 表名, 列定义)
+FTS_TABLES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "fts",
+        "sections_fts",
+        ("title", "heading_path", "content_text", "source_url UNINDEXED",
+         "category UNINDEXED"),
+    ),
+    (
+        "chunk_fts",
+        "chunks_fts",
+        ("title", "heading_path", "context_prefix", "content_text",
+         "source_url UNINDEXED", "category UNINDEXED",
+         "knowledge_type UNINDEXED"),
+    ),
+)
+
+
+def _create_fts(
+    connection: sqlite3.Connection, table: str, columns: tuple[str, ...]
+) -> str:
+    """建全文索引表，返回实际用上的模式（`fts5` 或 `fallback`）。
+
+    fts5 是编译选项，不是所有 Python 自带的 SQLite 都有。没有就退回普通表，
+    检索层据此改走 LIKE——功能差一截，但装不上 fts5 的机器仍然能用。
+    """
+    try:
+        connection.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING fts5("
+            + ", ".join(columns)
+            + ", tokenize='unicode61 remove_diacritics 2')"
+        )
+        return "fts5"
+    except sqlite3.OperationalError:
+        plain = ", ".join(
+            f"{column.split()[0]} TEXT NOT NULL" for column in columns
+        )
+        connection.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} "
+            f"(rowid INTEGER PRIMARY KEY, {plain})"
+        )
+        return "fallback"
+
+
+def write_metadata(
+    connection: sqlite3.Connection, fts_modes: dict[str, str] | None = None
+) -> None:
+    """把数据集身份写进库，只在真的变了的时候写。
+
+    这些值一次建库之后基本不会再动，而 `initialize_db` 每次开库都会跑到这里，
+    包括纯查询。无条件 `INSERT OR REPLACE` 九行意味着**每次查询都要拿一次写
+    锁**：库文件只读时直接查不了，边爬边查时两个进程还要互相等。先读一遍再
+    比对，代价是一条 SELECT，换来读路径真的只读。
+    """
+    dataset = active().dataset
+    wanted = {
+        "dataset": dataset.id,
+        "product": dataset.product,
+        "doc_version": dataset.version,
+        "language": dataset.language,
+        "source": dataset.name,
+        "source_adapter": dataset.source,
+        "knowledge_pack": dataset.knowledge or "",
+        "schema_version": SCHEMA_VERSION,
+        **(fts_modes or {}),
+    }
+    stored = {
+        row["key"]: row["value"]
+        for row in connection.execute("SELECT key, value FROM metadata")
+    }
+    # 清单入口要问来源适配器，可能挺贵；已经存过就不再问一遍。
+    if "inventory_index" not in stored:
+        wanted["inventory_index"] = inventory_index_url()
+    changed = [(key, value) for key, value in wanted.items() if stored.get(key) != value]
+    if changed:
+        connection.executemany(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", changed
+        )
+
+
+def resolve_link_targets(connection: sqlite3.Connection) -> None:
+    """把链接的目标路径解析成页面 id。
+
+    只处理还没解析出来的行。已经解析出来的行再算一遍必然得到同一个答案：
+    `pages.path` 有 UNIQUE 约束，写入之后全程没有任何代码改过它，而页面被
+    删掉时外键的 `ON DELETE SET NULL` 会自己把这一列清空。
+
+    这不是微优化。UE 库里 43,472 条带路径的链接中 43,430 条早就解析好了，
+    每次按需抓取都把它们重写成原值——实测 0.086 秒，且随着抓取进度线性增长
+    （目前才抓了全站的 5%）。加上这个条件之后是 0.020 秒，而且不再随库变大。
+    """
+    connection.execute(
+        """
+        UPDATE page_links
+        SET target_page_id=(
+            SELECT p.id FROM pages p WHERE p.path=page_links.target_path
+        )
+        WHERE target_path IS NOT NULL AND target_page_id IS NULL
+        """
+    )
 
 
 def add_column_if_missing(
@@ -542,14 +577,25 @@ def route_metadata(path: str) -> tuple[int, str | None]:
     return len(segments), parent
 
 
+# 哪些页面还缺派生元数据。写成常量，是因为下面的部分索引必须和查询**逐字**
+# 一致，SQLite 才认得出可以用它——分开写两份，改了一处就会静默退回全表扫描。
+PENDING_METADATA_CONDITION = (
+    "doc_version IS NULL OR locale IS NULL OR route_depth IS NULL"
+    " OR discovered_at IS NULL OR last_seen_at IS NULL"
+)
+
+
 def backfill_page_metadata(connection: sqlite3.Connection) -> None:
+    """给缺派生元数据的页面补上。绝大多数时候一行都不缺，必须廉价。
+
+    这个函数在**每次**打开库时都会跑一遍，包括纯查询。没有上面那个部分索引
+    时，它对整张 pages 表做一次扫描才能确认"没有要补的"——UE 库 20 万页，
+    实测每次查询白付 0.105 秒，而 `ask` 本身也就这个量级。部分索引只收录
+    真正缺字段的行（通常 0 行），于是这次确认变成读一个空索引。
+    """
     rows = list(
         connection.execute(
-            """
-            SELECT id, path FROM pages
-            WHERE doc_version IS NULL OR locale IS NULL OR route_depth IS NULL
-               OR discovered_at IS NULL OR last_seen_at IS NULL
-            """
+            f"SELECT id, path FROM pages WHERE {PENDING_METADATA_CONDITION}"
         )
     )
     if not rows:

@@ -6,15 +6,10 @@
 
 from __future__ import annotations
 
-import html
 from html.parser import HTMLParser
-import json
-from pathlib import Path
 import re
 from typing import Any
-import urllib.error
 import urllib.parse
-import urllib.request
 
 from .constants import MARKDOWN_LINK_RE, MARKDOWN_MARKUP_RE, WHITESPACE_RE
 

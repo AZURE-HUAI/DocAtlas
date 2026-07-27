@@ -18,8 +18,10 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import zlib
 
@@ -3975,6 +3977,201 @@ class AdapterScopeTests(unittest.TestCase):
             self.blender.inventory_option("referenced_category"), "referenced"
         )
         self.assertIsNone(self.ue.inventory_option("referenced_category"))
+
+
+class OpeningTheLibraryIsCheapAndReadOnly(unittest.TestCase):
+    """开库这件事发生在每一次查询上，所以它既不能慢，也不能写库。"""
+
+    def setUp(self):
+        self.connection = temp_db(self)
+
+    def _statements(self):
+        """再开一次库，记录它发出的所有 SQL。"""
+        seen: list[str] = []
+        self.connection.set_trace_callback(
+            lambda sql: seen.append(sql.strip().split()[0].upper())
+        )
+        try:
+            initialize_db(self.connection)
+        finally:
+            self.connection.set_trace_callback(None)
+        return seen
+
+    def test_reopening_an_unchanged_library_writes_nothing(self):
+        """纯查询不该拿写锁。
+
+        以前每次开库都无条件重写九行 metadata 再 commit。库文件只读时直接查
+        不了；边爬边查时两个进程还要互相等。
+        """
+        written = [s for s in self._statements() if s in {"INSERT", "UPDATE", "DELETE"}]
+        self.assertEqual(written, [], f"开库不该写库，实际写了：{written}")
+
+    def test_pending_metadata_lookup_uses_the_partial_index(self):
+        """找"还缺派生元数据的页面"必须走索引，不能扫全表。
+
+        没有这个部分索引时，UE 那个 20 万页的库每次查询要白扫一遍整张
+        pages 表——实测 0.105 秒，和查询本身一个量级。
+        """
+        plan = " ".join(
+            row[3]
+            for row in self.connection.execute(
+                "EXPLAIN QUERY PLAN SELECT id, path FROM pages WHERE "
+                + db.PENDING_METADATA_CONDITION
+            )
+        )
+        self.assertIn("idx_pages_metadata_pending", plan)
+
+    def test_backfill_still_catches_pages_added_later(self):
+        """加了索引之后，后来插入的页面依然要被补上元数据。
+
+        性能修复最容易带来的回归就是"快了，但漏了"。
+        """
+        self.connection.execute(
+            "INSERT INTO pages(url, path, category, status)"
+            " VALUES('https://example.invalid/late', '/late', 'guides', 'pending')"
+        )
+        initialize_db(self.connection)
+        row = self.connection.execute(
+            "SELECT route_depth, doc_version, normalized_slug FROM pages"
+            " WHERE path='/late'"
+        ).fetchone()
+        self.assertIsNotNone(row["route_depth"])
+        self.assertIsNotNone(row["doc_version"])
+        self.assertEqual(row["normalized_slug"], "late")
+
+
+class DatasetNamesNeverReachSqlUnescaped(unittest.TestCase):
+    """排序片段是拼进 SQL 的，而名字来自第三方写的 datasets/*.toml。"""
+
+    def test_quotes_in_a_category_name_cannot_break_out(self):
+        evil = "x' THEN 1 END); DROP TABLE pages; --"
+        clause = runtime.sql_priority_case("category", {evil: 1, "guides": 2})
+        connection = temp_db(self)
+        connection.execute(
+            "INSERT INTO pages(url, path, category, status)"
+            " VALUES('https://example.invalid/a', '/a', 'guides', 'pending')"
+        )
+        # 拼进真实查询里跑一遍：语法要合法，而且不能执行掉那句 DROP。
+        rows = list(connection.execute(f"SELECT id FROM pages ORDER BY {clause}"))
+        self.assertEqual(len(rows), 1)
+        self.assertIsNotNone(
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pages'"
+            ).fetchone()
+        )
+
+    def test_empty_priority_is_a_constant(self):
+        self.assertEqual(runtime.sql_priority_case("category", {}), "0")
+
+
+class KnowledgeIdParsing(unittest.TestCase):
+    """K 编号的写法只有一份规则，命令行、MCP 和 related 共用。"""
+
+    def test_accepts_both_written_forms(self):
+        self.assertEqual(search.knowledge_id("K9290"), 9290)
+        self.assertEqual(search.knowledge_id("k9290"), 9290)
+        self.assertEqual(search.knowledge_id("9290"), 9290)
+        self.assertEqual(search.knowledge_id("  K9290  "), 9290)
+
+    def test_rejects_anything_else_instead_of_raising(self):
+        """看不懂就返回 None，由调用方说人话——不是抛 ValueError 堆栈。"""
+        for junk in ("abc", "", "K", "K9a", "垃圾", "-1"):
+            self.assertIsNone(search.knowledge_id(junk), junk)
+
+
+class LinkTargetResolution(unittest.TestCase):
+    """链接目标解析只处理没解析过的行，但不能因此漏掉重判过的行。"""
+
+    def setUp(self):
+        self.connection = temp_db(self)
+        for path in ("/a", "/b"):
+            self.connection.execute(
+                "INSERT INTO pages(url, path, category, status)"
+                f" VALUES('https://example.invalid{path}', '{path}',"
+                " 'guides', 'success')"
+            )
+
+    def _link(self, target_path, target_page_id=None):
+        self.connection.execute(
+            "INSERT INTO page_links(from_page_id, target_url, target_path,"
+            " target_page_id, anchor_text, link_kind, evidence_kind,"
+            " source_url, created_at)"
+            " VALUES(1, 'https://example.invalid/x', ?, ?, 'x', 'official_reference',"
+            " 'official_link', 'https://example.invalid/a', '2026-01-01')",
+            (target_path, target_page_id),
+        )
+        return self.connection.execute(
+            "SELECT id FROM page_links ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+
+    def test_resolves_rows_that_have_no_page_yet(self):
+        link_id = self._link("/b")
+        db.resolve_link_targets(self.connection)
+        resolved = self.connection.execute(
+            "SELECT target_page_id FROM page_links WHERE id=?", (link_id,)
+        ).fetchone()["target_page_id"]
+        self.assertEqual(
+            resolved,
+            self.connection.execute(
+                "SELECT id FROM pages WHERE path='/b'"
+            ).fetchone()["id"],
+        )
+
+    def test_reclassifying_a_link_clears_the_stale_page_id(self):
+        """目标路径被重判之后，旧的 page_id 是上一轮的结论，必须重算。
+
+        不清掉的话这条链接会永远指着重判之前认定的那一页——而
+        resolve_link_targets 只看 target_page_id IS NULL，它自己发现不了。
+        """
+        page_a = self.connection.execute(
+            "SELECT id FROM pages WHERE path='/a'"
+        ).fetchone()["id"]
+        link_id = self._link("/a", page_a)
+        with using(source=types.SimpleNamespace(
+            normalize_link_target=lambda dataset, url: "/b"
+        )):
+            self.connection.execute("DELETE FROM metadata WHERE key='link_targets'")
+            coverage.reclassify_links(self.connection)
+        row = self.connection.execute(
+            "SELECT target_path, target_page_id FROM page_links WHERE id=?",
+            (link_id,),
+        ).fetchone()
+        self.assertEqual(row["target_path"], "/b")
+        self.assertEqual(
+            row["target_page_id"],
+            self.connection.execute(
+                "SELECT id FROM pages WHERE path='/b'"
+            ).fetchone()["id"],
+        )
+
+
+class ImportingThePackageHasNoSideEffects(unittest.TestCase):
+    """`import docatlas` 不该读配置、不该 import 适配器。
+
+    以前它 `from .config import VERSION`，于是默认数据集配置一坏，整个包连
+    import 都失败——而 docatlas_list_datasets 的全部意义就是"配置坏了也要能
+    列出来告诉你哪一个坏了"。
+    """
+
+    def test_package_namespace_stays_lazy(self):
+        import docatlas
+
+        self.assertEqual(docatlas.__all__, ["main"])
+        self.assertFalse(hasattr(docatlas, "VERSION"))
+
+    def test_importing_it_in_a_fresh_process_loads_nothing_else(self):
+        probe = (
+            "import sys; import docatlas;"
+            "print(sorted(m for m in sys.modules if m.startswith('docatlas')))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            env={**os.environ, "DOCATLAS_DATASET": "根本不存在的数据集"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "['docatlas']")
 
 
 if __name__ == "__main__":

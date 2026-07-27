@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 from pathlib import Path
 import re
 import sqlite3
 import sys
-from typing import Any
+from typing import Any, Iterator
 
 from .config import (
     CATEGORY_LABELS,
@@ -33,7 +34,7 @@ from .crawl import crawl_documents, reprocess_stored_documents
 from .assets import download_assets
 from .coverage import admit_linked_targets
 from .relations import build_cross_index, link_new_pages
-from .search import search_docs
+from .search import chunk_or_section, knowledge_id, search_chunks
 from .export import export_markdown
 from .reports import write_reports, write_site_inventory
 from .context import (
@@ -67,261 +68,228 @@ def require_inventory(connection: sqlite3.Connection) -> None:
     )
 
 
-def print_stats(stats: dict[str, Any]) -> None:
-    print(json.dumps(stats, ensure_ascii=False, indent=2))
+def require_complete_inventory(connection: sqlite3.Connection, refusal: str) -> None:
+    """清单没冻结成 complete 就不许进正文阶段。
+
+    半份清单抓出来的库分不清"这一页官方没有"和"这一页我们还没枚举到"，而这
+    两者的下一步完全相反——所以宁可在这里停住。
+    """
+    row = connection.execute(
+        "SELECT value FROM metadata WHERE key='inventory_status'"
+    ).fetchone()
+    if not row or row[0] != "complete":
+        raise SystemExit(
+            f"完整页面清单尚未冻结为 complete，{refusal}。\n"
+            "请先运行 crawl --discovery-only 并确认失败站点地图为 0。"
+        )
 
 
+def print_json(payload: Any) -> None:
+    """所有子命令的 JSON 输出走这一个口子，格式不会各写各的。"""
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@contextlib.contextmanager
+def opened(*, needs_inventory: bool = False) -> Iterator[sqlite3.Connection]:
+    """打开当前数据集的库，出什么事都保证关掉。
+
+    每个子命令原本各写一遍 connect / initialize / …… / close，而中间任何一步
+    抛异常都会跳过最后那句 close。命令行进程退出时操作系统会收尾，所以看不出
+    毛病；但同一段代码被 `--json` 之类的早退分支复制了十几份，只要有一份漏写
+    就是一条静默泄漏。收成一个上下文管理器之后，close 只写一次，而且写在
+    finally 里。
+    """
+    connection = connect_db()
+    try:
+        initialize_db(connection)
+        if needs_inventory:
+            require_inventory(connection)
+        yield connection
+    finally:
+        connection.close()
 
 
 def command_crawl(args: argparse.Namespace) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     set_log_file(args.log_file)
     REQUEST_LIMITER.configure(args.requests_per_second)
-    connection = connect_db()
-    initialize_db(connection)
-    if not args.skip_discovery:
-        discover_inventory(
-            connection,
-            workers=args.sitemap_workers,
-            refresh=args.refresh_sitemaps,
-        )
-    else:
-        existing = connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-        if not existing:
-            raise SystemExit("数据库还没有页面清单，不能使用 --skip-discovery")
-        inventory_row = connection.execute(
-            "SELECT value FROM metadata WHERE key='inventory_status'"
-        ).fetchone()
-        if not inventory_row or inventory_row[0] != "complete":
-            raise SystemExit(
-                "完整页面清单尚未冻结为 complete，拒绝启动正文阶段。"
-                "请先运行 inventory 并确认失败站点地图为 0。"
+    with opened() as connection:
+        if args.skip_discovery:
+            if not connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]:
+                raise SystemExit("数据库还没有页面清单，不能使用 --skip-discovery")
+            require_complete_inventory(connection, "拒绝启动正文阶段")
+        else:
+            discover_inventory(
+                connection,
+                workers=args.sitemap_workers,
+                refresh=args.refresh_sitemaps,
             )
-    if args.discovery_only:
-        inventory = write_site_inventory(connection)
-        print(json.dumps(inventory, ensure_ascii=False, indent=2))
-        stats = write_reports(connection)
-        print_stats(stats)
-        connection.close()
-        return 0
-    if not args.skip_discovery:
-        inventory = write_site_inventory(connection)
-        if inventory["status"] != "complete":
-            raise SystemExit(
-                "页面清单仍不完整，正文阶段未启动。"
-                "请稍后重跑 discover 阶段补齐失败站点地图。"
-            )
-    crawl_documents(
-        connection,
-        workers=args.workers,
-        delay=args.delay,
-        max_pages=args.max_pages,
-        sample_per_category=args.sample_per_category,
-        refresh=args.refresh_pages,
-        category=args.category,
-    )
-    relation_stats = build_cross_index(connection)
-    log(
-        "交叉索引："
-        f"实体 {relation_stats['entities']:,}；"
-        f"关系 {relation_stats['relations']:,}"
-    )
-    if args.download_assets:
-        download_assets(
+        if args.discovery_only:
+            print_json(write_site_inventory(connection))
+            print_json(write_reports(connection))
+            return 0
+        if not args.skip_discovery:
+            if write_site_inventory(connection)["status"] != "complete":
+                raise SystemExit(
+                    "页面清单仍不完整，正文阶段未启动。"
+                    "请稍后重跑 discover 阶段补齐失败站点地图。"
+                )
+        crawl_documents(
             connection,
-            workers=args.asset_workers,
-            max_assets=args.max_assets,
+            workers=args.workers,
+            delay=args.delay,
+            max_pages=args.max_pages,
+            sample_per_category=args.sample_per_category,
+            refresh=args.refresh_pages,
+            category=args.category,
         )
-    stats = write_reports(connection, manifest=True)
-    if args.export:
-        export_markdown(connection, shard_mb=args.shard_mb)
-        stats = write_reports(connection, manifest=True)
-    print_stats(stats)
-    connection.close()
+        relation_stats = build_cross_index(connection)
+        log(
+            "交叉索引："
+            f"实体 {relation_stats['entities']:,}；"
+            f"关系 {relation_stats['relations']:,}"
+        )
+        if args.download_assets:
+            download_assets(
+                connection,
+                workers=args.asset_workers,
+                max_assets=args.max_assets,
+            )
+        if args.export:
+            export_markdown(connection, shard_mb=args.shard_mb)
+        print_json(write_reports(connection, manifest=True))
     return 0
 
 
 def command_assets(args: argparse.Namespace) -> int:
     REQUEST_LIMITER.configure(args.requests_per_second)
-    connection = connect_db()
-    initialize_db(connection)
-    download_assets(
-        connection, workers=args.workers, max_assets=args.max_assets
-    )
-    print_stats(write_reports(connection))
-    connection.close()
+    with opened() as connection:
+        download_assets(
+            connection, workers=args.workers, max_assets=args.max_assets
+        )
+        print_json(write_reports(connection))
     return 0
 
 
 def command_reprocess(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    processed = reprocess_stored_documents(
-        connection, limit=args.limit, force=args.force
-    )
-    stats = write_reports(connection)
-    print(
-        json.dumps(
-            {"reprocessed_pages": processed, "stats": stats},
-            ensure_ascii=False,
-            indent=2,
+    with opened(needs_inventory=True) as connection:
+        processed = reprocess_stored_documents(
+            connection, limit=args.limit, force=args.force
         )
-    )
-    connection.close()
+        print_json(
+            {"reprocessed_pages": processed, "stats": write_reports(connection)}
+        )
     return 0
 
 
 def command_fetch_pages(args: argparse.Namespace) -> int:
     REQUEST_LIMITER.configure(args.requests_per_second)
-    connection = connect_db()
-    initialize_db(connection)
-    inventory_row = connection.execute(
-        "SELECT value FROM metadata WHERE key='inventory_status'"
-    ).fetchone()
-    if not inventory_row or inventory_row[0] != "complete":
-        raise SystemExit("页面清单未达到 complete，拒绝抓取定向正文。")
-    placeholders = ",".join("?" for _ in args.page_ids)
-    rows = list(
-        connection.execute(
-            f"""
-            SELECT id, url, path, category FROM pages
-            WHERE id IN ({placeholders})
-            ORDER BY id
-            """,
-            args.page_ids,
-        )
-    )
-    if len(rows) != len(set(args.page_ids)):
-        found = {row["id"] for row in rows}
-        missing = sorted(set(args.page_ids) - found)
-        raise SystemExit(f"找不到页面 ID：{missing}")
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=args.workers
-    ) as executor:
-        future_to_row = {
-            executor.submit(bind(fetch_document), row, 0.05): row for row in rows
-        }
-        for future in concurrent.futures.as_completed(future_to_row):
-            row = future_to_row[future]
-            result = future.result()
-            store_document_result(connection, result, row["category"])
-            connection.commit()
-            log(
-                f"定向页面 {row['id']}："
-                f"{'成功' if result['ok'] else result['error']}"
+    with opened() as connection:
+        require_complete_inventory(connection, "拒绝抓取定向正文")
+        placeholders = ",".join("?" for _ in args.page_ids)
+        rows = list(
+            connection.execute(
+                f"""
+                SELECT id, url, path, category FROM pages
+                WHERE id IN ({placeholders})
+                ORDER BY id
+                """,
+                args.page_ids,
             )
-    graph = build_cross_index(connection)
-    print(json.dumps(graph, ensure_ascii=False, indent=2))
-    connection.close()
+        )
+        if len(rows) != len(set(args.page_ids)):
+            missing = sorted(set(args.page_ids) - {row["id"] for row in rows})
+            raise SystemExit(f"找不到页面 ID：{missing}")
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.workers
+        ) as executor:
+            future_to_row = {
+                executor.submit(bind(fetch_document), row, 0.05): row for row in rows
+            }
+            for future in concurrent.futures.as_completed(future_to_row):
+                row = future_to_row[future]
+                result = future.result()
+                store_document_result(connection, result, row["category"])
+                connection.commit()
+                log(
+                    f"定向页面 {row['id']}："
+                    f"{'成功' if result['ok'] else result['error']}"
+                )
+        print_json(build_cross_index(connection))
     return 0
 
 
 def command_export(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    export_markdown(connection, shard_mb=args.shard_mb)
-    print_stats(write_reports(connection))
-    connection.close()
+    with opened() as connection:
+        export_markdown(connection, shard_mb=args.shard_mb)
+        print_json(write_reports(connection))
     return 0
 
 
 def command_search(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    rows = search_docs(
-        connection, args.query, limit=args.limit, category=args.category
-    )
-    hint = exact_page_hint(connection, args.query, args.category)
-    if args.json:
-        # 空结果和非空结果用同一种形状：调用方不该为了"这次有没有命中"
-        # 写两套解析。空的时候多给一个 lookup 说明是哪一种"没有"。
-        payload: dict[str, Any] = {"results": [dict(row) for row in rows]}
-        if hint:
-            payload["exact_page_pending"] = True
-        if not rows:
-            payload["lookup"] = inventory_lookup(
-                connection, args.query, category=args.category
-            )
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        connection.close()
-        return 0 if rows else 1
-    if not rows:
-        for line in describe_lookup(
-            inventory_lookup(connection, args.query, category=args.category)
-        ):
-            print(line)
-        connection.close()
-        return 1
-    for index, row in enumerate(rows, 1):
-        label = CATEGORY_LABELS.get(row["category"], row["category"])
-        print(
-            f"\n[{index}] 知识 ID K{row['id']} | "
-            f"{row['page_title']} — {row['heading_path']}"
+    with opened(needs_inventory=True) as connection:
+        rows = search_chunks(
+            connection, args.query, limit=args.limit, category=args.category
         )
-        print(f"分类：{label}　匹配：{row['match_stage']}　得分：{row['score']}")
-        print(f"知识类型：{row['knowledge_type']}")
-        print(f"摘要：{row['snippet']}")
-        print(f"DOC 原出处：{row['source_url']}")
-    for line in hint:
-        print(f"\n{line}" if line.startswith("提示") else line)
-    connection.close()
+        hint = exact_page_hint(connection, args.query, args.category)
+        if args.json:
+            # 空结果和非空结果用同一种形状：调用方不该为了"这次有没有命中"
+            # 写两套解析。空的时候多给一个 lookup 说明是哪一种"没有"。
+            payload: dict[str, Any] = {"results": [dict(row) for row in rows]}
+            if hint:
+                payload["exact_page_pending"] = True
+            if not rows:
+                payload["lookup"] = inventory_lookup(
+                    connection, args.query, category=args.category
+                )
+            print_json(payload)
+            return 0 if rows else 1
+        if not rows:
+            for line in describe_lookup(
+                inventory_lookup(connection, args.query, category=args.category)
+            ):
+                print(line)
+            return 1
+        for index, row in enumerate(rows, 1):
+            label = CATEGORY_LABELS.get(row["category"], row["category"])
+            print(
+                f"\n[{index}] 知识 ID K{row['id']} | "
+                f"{row['page_title']} — {row['heading_path']}"
+            )
+            print(f"分类：{label}　匹配：{row['match_stage']}　得分：{row['score']}")
+            print(f"知识类型：{row['knowledge_type']}")
+            print(f"摘要：{row['snippet']}")
+            print(f"DOC 原出处：{row['source_url']}")
+        for line in hint:
+            print(f"\n{line}" if line.startswith("提示") else line)
     return 0
 
 
 def command_show(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    raw_id = str(args.section_id)
-    numeric_id = int(raw_id[1:] if raw_id[:1].casefold() == "k" else raw_id)
-    row = connection.execute(
-        """
-        SELECT c.id, p.title AS page_title, p.category, c.heading_path,
-               c.content_md, c.source_anchor AS source_url,
-               c.knowledge_type, c.context_prefix
-        FROM chunks c JOIN pages p ON p.id=c.page_id
-        WHERE c.id=?
-        """,
-        (numeric_id,),
-    ).fetchone()
-    if not row:
-        row = connection.execute(
-        """
-        SELECT s.id, p.title AS page_title, p.category, s.heading_path,
-               s.content_md, s.source_url, s.knowledge_type,
-               '' AS context_prefix
-        FROM sections s JOIN pages p ON p.id=s.page_id
-        WHERE s.id=?
-        """,
-            (numeric_id,),
-        ).fetchone()
-    if not row:
-        print(f"没有找到知识 ID {args.section_id}。")
-        connection.close()
-        return 1
-    if args.json:
-        print(json.dumps(dict(row), ensure_ascii=False, indent=2))
-    else:
-        print(row["content_md"])
-    connection.close()
+    numeric_id = knowledge_id(str(args.section_id))
+    if numeric_id is None:
+        print(f"看不懂的知识 ID：{args.section_id!r}（应该长这样：K9290）")
+        return 2
+    with opened(needs_inventory=True) as connection:
+        row = chunk_or_section(connection, numeric_id)
+        if not row:
+            print(f"没有找到知识 ID {args.section_id}。")
+            return 1
+        print_json(dict(row)) if args.json else print(row["content_md"])
     return 0
 
 
 def command_context(args: argparse.Namespace) -> int:
     """机器可读的上下文包（JSON）。给程序用。"""
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    payload = build_context_pack(
-        connection,
-        args.query,
-        token_budget=args.token_budget,
-        category=args.category,
-    )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    connection.close()
+    with opened(needs_inventory=True) as connection:
+        print_json(
+            build_context_pack(
+                connection,
+                args.query,
+                token_budget=args.token_budget,
+                category=args.category,
+            )
+        )
     return 0
 
 
@@ -330,132 +298,106 @@ def command_ask(args: argparse.Namespace) -> int:
 
     本地没有时会自动补抓那几页——不需要提前把全站抓下来。
     """
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    REQUEST_LIMITER.configure(0)
     try:
         version_intent = parse_version_intent(
             args.version_mode, args.version_target
         )
     except ValueError as exc:
         print(exc)
-        connection.close()
         return 2
-    payload = answer(
-        connection,
-        args.query,
-        token_budget=args.token_budget,
-        category=args.category,
-        allow_fetch=not args.no_fetch,
-        fetch_limit=args.fetch_limit,
-        quiet=args.json,
-        version_intent=version_intent,
-    )
-    if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        print(render_context_markdown(payload))
-    connection.close()
+    with opened(needs_inventory=True) as connection:
+        REQUEST_LIMITER.configure(0)
+        payload = answer(
+            connection,
+            args.query,
+            token_budget=args.token_budget,
+            category=args.category,
+            allow_fetch=not args.no_fetch,
+            fetch_limit=args.fetch_limit,
+            quiet=args.json,
+            version_intent=version_intent,
+        )
+        print_json(payload) if args.json else print(render_context_markdown(payload))
     return 0 if payload["primary_knowledge"] else 1
 
 
 def command_get(args: argparse.Namespace) -> int:
     """按需抓取：只把用得上的那几页取回本地。"""
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    REQUEST_LIMITER.configure(0)
-    candidates = find_uncrawled_candidates(
-        connection, args.query, limit=args.limit, category=args.category
-    )
-    if not candidates:
-        lookup = inventory_lookup(connection, args.query, category=args.category)
-        if lookup["crawled_pages"]:
-            print(f'这一页本地已经有了，直接查即可：ask "{args.query}"')
-            for page in lookup["crawled_pages"]:
-                print(f"  {page['path']}")
-        else:
-            for line in describe_lookup(lookup):
-                print(line)
-        connection.close()
-        return 1
-    print(f"准备抓取 {len(candidates)} 页：")
-    for row in candidates:
-        label = CATEGORY_LABELS.get(row["category"], row["category"])
-        print(f"  [{label}] {row['path']}")
-    outcome = fetch_now(connection, candidates)
-    outcome["relations"] = link_new_pages(
-        connection, [page["page_id"] for page in outcome["pages"]]
-    )
-    print(
-        f"\n完成：成功 {outcome['succeeded']}；失败 {outcome['failed']}；"
-        f"新建关系 {outcome['relations']}"
-    )
-    for page in outcome["pages"]:
-        print(f"  ✓ {page['title'] or page['path']}")
-    if outcome["succeeded"]:
-        print(f'\n现在可以查了：ask "{args.query}"')
-    connection.close()
+    with opened(needs_inventory=True) as connection:
+        REQUEST_LIMITER.configure(0)
+        candidates = find_uncrawled_candidates(
+            connection, args.query, limit=args.limit, category=args.category
+        )
+        if not candidates:
+            lookup = inventory_lookup(connection, args.query, category=args.category)
+            if lookup["crawled_pages"]:
+                print(f'这一页本地已经有了，直接查即可：ask "{args.query}"')
+                for page in lookup["crawled_pages"]:
+                    print(f"  {page['path']}")
+            else:
+                for line in describe_lookup(lookup):
+                    print(line)
+            return 1
+        print(f"准备抓取 {len(candidates)} 页：")
+        for row in candidates:
+            label = CATEGORY_LABELS.get(row["category"], row["category"])
+            print(f"  [{label}] {row['path']}")
+        outcome = fetch_now(connection, candidates)
+        outcome["relations"] = link_new_pages(
+            connection, [page["page_id"] for page in outcome["pages"]]
+        )
+        print(
+            f"\n完成：成功 {outcome['succeeded']}；失败 {outcome['failed']}；"
+            f"新建关系 {outcome['relations']}"
+        )
+        for page in outcome["pages"]:
+            print(f"  ✓ {page['title'] or page['path']}")
+        if outcome["succeeded"]:
+            print(f'\n现在可以查了：ask "{args.query}"')
     return 0 if outcome["succeeded"] else 1
 
 
 def command_cross_index(_: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    print(json.dumps(build_cross_index(connection), ensure_ascii=False, indent=2))
-    connection.close()
+    with opened() as connection:
+        print_json(build_cross_index(connection))
     return 0
 
 
 def command_related(args: argparse.Namespace) -> int:
     """一跳交叉关系。实现在 context.related_payload，MCP 用的是同一个。"""
-    connection = connect_db()
-    initialize_db(connection)
-    require_inventory(connection)
-    result = related_payload(connection, str(args.subject).strip())
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    connection.close()
+    with opened(needs_inventory=True) as connection:
+        result = related_payload(connection, str(args.subject).strip())
+        print_json(result)
     return 0 if result["status"] == "ok" else 1
 
 
 def command_inventory(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    if args.admit_linked or args.show_linked:
-        outcome = admit_linked_targets(
-            connection, limit=args.limit, min_links=args.min_links,
-            dry_run=args.show_linked,
-        )
-        print(json.dumps(outcome, ensure_ascii=False, indent=2))
-        if args.show_linked:
-            connection.close()
-            return 0
-    print(
-        json.dumps(
-            write_site_inventory(connection),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    connection.close()
+    with opened() as connection:
+        if args.admit_linked or args.show_linked:
+            print_json(
+                admit_linked_targets(
+                    connection,
+                    limit=args.limit,
+                    min_links=args.min_links,
+                    dry_run=args.show_linked,
+                )
+            )
+            if args.show_linked:
+                return 0
+        print_json(write_site_inventory(connection))
     return 0
 
 
 def command_validate(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    payload = validate_contract(connection, args.phase)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    connection.close()
+    with opened() as connection:
+        payload = validate_contract(connection, args.phase)
+        print_json(payload)
     return 0 if payload["status"] == "pass" else 1
 
 
 def command_stats(args: argparse.Namespace) -> int:
-    connection = connect_db()
-    initialize_db(connection)
-    print_stats(write_reports(connection, manifest=getattr(args, "manifest", False)))
-    connection.close()
+    with opened() as connection:
+        print_json(write_reports(connection, manifest=args.manifest))
     return 0
 
 
@@ -688,7 +630,13 @@ def build_parser() -> argparse.ArgumentParser:
     get = subparsers.add_parser(
         "get", help="按需抓取：只把用得上的那几页取回本地"
     )
-    get.add_argument("query", help="页面名称，如 K2_SetTimer、Nanite")
+    # 例子从数据集的触发词里取。写死 Unreal 的符号名，装了 Blender 库的人
+    # 看到的帮助会指向一个本库根本不存在的东西。
+    get.add_argument(
+        "query",
+        help="页面名称或官方地址"
+        + (f"，如 {'、'.join(DATASET.skill_triggers[:2])}" if DATASET.skill_triggers else ""),
+    )
     get.add_argument("--limit", type=int, default=DEFAULT_FETCH_LIMIT)
     get.add_argument("--category", choices=list(CATEGORY_PATTERNS))
     get.set_defaults(func=command_get)
