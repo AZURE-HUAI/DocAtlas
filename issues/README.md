@@ -40,6 +40,8 @@
 | <a id="bug-017"></a>[BUG-017](bugs/resolved/0017-namespace-alias-qualifier-not-used-in-ranking.md) | 带命名空间限定符的查询找不到官方页面（并列标题未拆名，限定名后缀不参与匹配） | resolved | medium |
 | <a id="bug-018"></a>[BUG-018](bugs/resolved/0018-per-page-chunk-cap-forces-irrelevant-cross-page-filler.md) | 每页最多 2 块的硬上限，会在预算充足时用不相关的跨页内容顶替同页更优候选 | resolved | medium |
 | <a id="bug-019"></a>[BUG-019](bugs/resolved/0019-code-fence-comments-parsed-as-headings.md) | 代码块里的注释被当成标题，代码被切碎且小节名是半句代码 | resolved | high |
+| <a id="bug-020"></a>[BUG-020](bugs/resolved/0020-stage-base-outweighs-bm25-relevance.md) | 多打一个常见词就把正确页面挤出前十：档位起评分压过了 bm25 相关度 | resolved | high |
+| <a id="bug-021"></a>[BUG-021](bugs/resolved/0021-mcp-config-depends-on-working-directory.md) | MCP 启动方式依赖工作目录，README 给的 cwd 写法在 Claude Code 上静默失效 | resolved | high |
 
 ## 未解决增强建议
 

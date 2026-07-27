@@ -22,3 +22,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 安装时选定的数据位置，一机一份，不入库。
+.docatlas-home

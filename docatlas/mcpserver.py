@@ -751,12 +751,21 @@ def serve(stdin=None, stdout=None) -> int:
         flush=True,
     )
     for line in stdin:
-        line = line.strip()
+        # 顺手去掉 BOM：Windows 客户端很容易在管道开头多写一个 ﻿（.NET 一取
+        # StandardInput 就会把 UTF-8 preamble 冲出去），带着它 json 解不开。
+        line = line.strip().lstrip("﻿").strip()
         if not line:
             continue
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
+            # 丢掉坏行是对的，但不能一声不吭——客户端那头看到的是"服务器起来了
+            # 却永远不回话"，没有任何线索可查（BUG-021）。
+            print(
+                f"[docatlas] 跳过一行无法解析的请求：{line[:120]}",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
         response = handle(message)
         if response is None:
