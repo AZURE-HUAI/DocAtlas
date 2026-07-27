@@ -65,8 +65,14 @@ CONCEPT_TYPE_BONUS = {
     "navigation": -4.0,
 }
 
-# 旧名称，保留给外部调用方。
-KNOWLEDGE_TYPE_BONUS = API_TYPE_BONUS
+# 各档位的起评分。小节回退档不在这里：它建库初期才走，结果不参与打分排序。
+STAGE_BASE = {
+    "entity": 100.0,
+    "phrase": 70.0,
+    "all_terms": 50.0,
+    "any_term": 30.0,
+    "prefix": 20.0,
+}
 
 
 def query_profile(query: str, *, entity_hit: bool) -> str:
@@ -75,15 +81,6 @@ def query_profile(query: str, *, entity_hit: bool) -> str:
         return "api"
     identifier_re = active().identifier_re
     return "api" if any(identifier_re.search(t) for t in tokenize(query)) else "concept"
-
-STAGE_BASE = {
-    "entity": 100.0,
-    "phrase": 70.0,
-    "all_terms": 50.0,
-    "any_term": 30.0,
-    "prefix": 20.0,
-    "section_fallback": 10.0,
-}
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_.+#:]+|[一-鿿]+")
 
@@ -99,12 +96,24 @@ def tokenize(query: str) -> list[str]:
     return [token for token in _TOKEN_RE.findall(query) if token]
 
 
+def knowledge_id(value: str) -> int | None:
+    """`K9290` / `9290` → 9290；不是知识编号则返回 None。
+
+    命令行、MCP 和关系查询原本各写了一遍"去掉开头的 K 再转整数"，其中命令行
+    那份直接 `int()`，输入不是数字时抛的是 ValueError 堆栈而不是一句人话。
+    编号长什么样是检索层的事，所以规则收在这里，三处共用。
+    """
+    text = value.strip()
+    digits = text[1:] if text[:1].casefold() == "k" else text
+    return int(digits) if digits.isdigit() else None
+
+
 def _quote(token: str) -> str:
     return '"' + token.replace('"', "") + '"'
 
 
 def quote_fts_query(query: str) -> str:
-    """所有关键词都必须出现（保留给旧调用方）。"""
+    """所有关键词都必须出现。小节回退档用它。"""
     return " AND ".join(_quote(token) for token in tokenize(query))
 
 
@@ -348,6 +357,39 @@ def search_chunks(
     return ranked
 
 
+def chunk_or_section(
+    connection: sqlite3.Connection, numeric_id: int
+) -> sqlite3.Row | None:
+    """按编号读一条知识块；找不到再退回小节表。
+
+    刚建完库、还没切分知识块的时候，编号指的是小节（见 `_legacy_section_search`），
+    所以两张表都要查。命令行和 MCP 的 `show` 用的是同一份查询——两边的 K 编号
+    必须指向同一条内容，各写一份 SQL 迟早会分岔。
+    """
+    row = connection.execute(
+        """
+        SELECT c.id, p.title AS page_title, p.category, c.heading_path,
+               c.content_md, c.source_anchor AS source_url,
+               c.knowledge_type, c.context_prefix
+        FROM chunks c JOIN pages p ON p.id=c.page_id
+        WHERE c.id=?
+        """,
+        (numeric_id,),
+    ).fetchone()
+    if row:
+        return row
+    return connection.execute(
+        """
+        SELECT s.id, p.title AS page_title, p.category, s.heading_path,
+               s.content_md, s.source_url, s.knowledge_type,
+               '' AS context_prefix
+        FROM sections s JOIN pages p ON p.id=s.page_id
+        WHERE s.id=?
+        """,
+        (numeric_id,),
+    ).fetchone()
+
+
 def page_chunks(
     connection: sqlite3.Connection, page_ids: list[int], *, limit: int
 ) -> list[dict[str, Any]]:
@@ -443,14 +485,3 @@ def _legacy_section_search(
         item["snippet"] = _snippet(item["content_md"], terms)
         results.append(item)
     return results
-
-
-def search_docs(
-    connection: sqlite3.Connection,
-    query: str,
-    *,
-    limit: int,
-    category: str | None,
-) -> list[dict[str, Any]]:
-    """旧名称，等价于 :func:`search_chunks`。"""
-    return search_chunks(connection, query, limit=limit, category=category)

@@ -79,6 +79,27 @@ CORE_RELATION_PRIORITY = {
 }
 
 
+def sql_priority_case(column: str, ranks: dict[str, int], default: int | None = None) -> str:
+    """把"谁排前面"的映射编译成一段 SQL CASE。数字越小越靠前。
+
+    名字来自数据集配置和领域知识包，也就是**第三方文件**——DocAtlas 是要给
+    陌生人装的，别人写的 `datasets/*.toml` 不能当可信输入。直接拼进 SQL 的话，
+    一个带引号的分类名轻则让所有查询报语法错，重则改写整条语句。所以这里按
+    SQL 标准把单引号翻倍转义，档位一律过 `int()`。
+
+    转义只在这一处做：以前 ondemand 和 runtime 各写了一份一模一样的拼接，
+    两份都要记得转义，而只要漏一份就等于没做。
+    """
+    if not ranks:
+        return "0"
+    branches = " ".join(
+        "WHEN '{}' THEN {:d}".format(name.replace("'", "''"), int(rank))
+        for name, rank in sorted(ranks.items(), key=lambda item: item[1])
+    )
+    fallback = max(ranks.values()) + 1 if default is None else default
+    return f"CASE {column} {branches} ELSE {int(fallback):d} END"
+
+
 @dataclass(frozen=True)
 class Workspace:
     """一个数据集的完整运行时。不可变——要换数据集就换整个对象。"""
@@ -179,14 +200,13 @@ class Workspace:
 
     @cached_property
     def relation_priority_sql(self) -> str:
-        """把优先级表编译成一段 SQL CASE，省得同一份顺序在字典和 SQL 里各写一遍。"""
-        if not self.relation_priority:
-            return "0"
-        branches = " ".join(
-            f"WHEN '{name}' THEN {rank}"
-            for name, rank in sorted(self.relation_priority.items(), key=lambda kv: kv[1])
-        )
-        return f"CASE r.relation_type {branches} ELSE 8 END"
+        """关系排序的 SQL 片段。领域关系（有实锤对应）排在通用关系前面。"""
+        return sql_priority_case("r.relation_type", self.relation_priority, default=8)
+
+    @cached_property
+    def category_priority_sql(self) -> str:
+        """同名候选优先抓哪一类的 SQL 片段。"""
+        return sql_priority_case("category", self.category_priority)
 
 
 @lru_cache(maxsize=8)

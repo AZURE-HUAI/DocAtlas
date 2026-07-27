@@ -31,6 +31,7 @@ import json
 import sqlite3
 from typing import Any, Iterator
 
+from .db import resolve_link_targets
 from .runtime import active
 from .util import utc_now
 
@@ -391,15 +392,7 @@ def _official_links(
         )
         params = (*page_ids, *page_ids)
     # 先把链接的目标路径解析成页面 id：目标页可能是这一轮才抓回来的。
-    connection.execute(
-        """
-        UPDATE page_links
-        SET target_page_id=(
-            SELECT p.id FROM pages p WHERE p.path=page_links.target_path
-        )
-        WHERE target_path IS NOT NULL
-        """
-    )
+    resolve_link_targets(connection)
     created = 0
     for row in connection.execute(
         f"""

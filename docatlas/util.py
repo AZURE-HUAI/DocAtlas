@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-import time
 
 
 _LOG_FILE_PATH: Path | None = None
 
 
 def set_log_file(path: str | Path | None) -> None:
-    """Mirror every log line into a UTF-8 file (used by the background runner)."""
+    """把每行日志同时写进一个 UTF-8 文件（长时间抓取时用来事后翻查）。"""
     global _LOG_FILE_PATH
     _LOG_FILE_PATH = Path(path).resolve() if path else None
 
