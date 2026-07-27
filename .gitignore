@@ -28,3 +28,7 @@ desktop.ini
 
 # 内部测试流程，不发布。
 测试流.md
+
+# 改名前的一次性架构评估，里面还写着作者本机的绝对路径。结论该留的都已经
+# 落进 docs/ 和 issues/ 了，原件留在本地即可，不发布。
+ARCHITECTURE_REVIEW.md

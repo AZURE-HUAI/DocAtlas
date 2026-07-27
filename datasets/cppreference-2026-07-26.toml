@@ -13,25 +13,31 @@ inventory_api = "https://cppreference.com/api.php"
 doc_prefix = "/cpp/"
 home_path = "/cpp"
 
+# 本站的分类由适配器按页面标题判定（见 sources/cppreference.py），
+# 这里的值只是把那条规则写给人看；键才是"合法分类名"的全集。
 [categories]
 language = "cpp/language"
 standard_library = "cpp"
 compiler_support = "cpp/compiler_support"
+standard_versions = "cpp/<版本号>"
 
 [category_labels]
 language = "C++ Language"
 standard_library = "C++ Standard Library"
 compiler_support = "Compiler Support"
+standard_versions = "C++ Standard Versions"
 
 [entity_types]
 language = "cpp_language"
 standard_library = "cpp_symbol"
 compiler_support = "compatibility_reference"
+standard_versions = "cpp_standard"
 
 [category_priority]
 language = 1
 standard_library = 2
 compiler_support = 3
+standard_versions = 2
 
 [skill]
 triggers = [
@@ -45,4 +51,6 @@ verbose_categories = ["compiler_support"]
 [search.concept_category_bonus]
 language = 3.0
 standard_library = 2.0
+# 和标准库同档：这几页仍是正经的 C++ 参考，分出来是为了标签准，不是为了改排序。
+standard_versions = 2.0
 compiler_support = -1.0

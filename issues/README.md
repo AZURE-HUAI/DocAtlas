@@ -44,12 +44,13 @@
 | <a id="bug-021"></a>[BUG-021](bugs/resolved/0021-mcp-config-depends-on-working-directory.md) | MCP 启动方式依赖工作目录，README 给的 cwd 写法在 Claude Code 上静默失效 | resolved | high |
 | <a id="bug-022"></a>[BUG-022](bugs/resolved/0022-page-summary-duplicated-into-its-own-body.md) | 页面摘要被插回仍然包含原句的正文，同一句话连着出现两遍 | resolved | medium |
 | <a id="bug-023"></a>[BUG-023](bugs/resolved/0023-body-less-parent-heading-loses-its-anchor.md) | 父标题自己没有正文时整节消失，官方页面上存在的锚点在库里认不出来 | resolved | medium |
+| <a id="bug-024"></a>[BUG-024](bugs/resolved/0024-page-summary-picked-from-an-image-caption.md) | 页面摘要挑中了图注和参数标签，三个适配器各抄一份规则各漏一处 | resolved | medium |
 
 ## 未解决增强建议
 
 | 编号 | 标题 | 状态 | 优先级 |
 |---|---|---|---|
-| <a id="enh-011"></a>[ENH-011](enhancements/unresolved/0011-standard-version-pages-fall-into-a-catch-all-category.md) | 横跨语言与标准库的页面被兜底分类吞掉（cppreference 标准版本总览页） | discussion | low |
+| — | 暂无 | — | — |
 
 ## 已解决增强建议
 
@@ -65,6 +66,7 @@
 | <a id="enh-008"></a>[ENH-008](enhancements/resolved/0008-structured-version-intent-contract.md) | 版本意图的跨层结构化合同 | resolved | high |
 | <a id="enh-009"></a>[ENH-009](enhancements/resolved/0009-fourth-domain-generalisation-acceptance.md) | 用陌生领域验收分层架构：Roblox Creator Hub | resolved | high |
 | <a id="enh-010"></a>[ENH-010](enhancements/resolved/0010-related-safe-fetch-pending-targets.md) | `related` 安全补抓 pending 官方目标并增量建立关系 | closed | medium |
+| <a id="enh-011"></a>[ENH-011](enhancements/resolved/0011-standard-version-pages-fall-into-a-catch-all-category.md) | 横跨语言与标准库的页面被兜底分类吞掉（cppreference 标准版本总览页） | resolved | low |
 
 ## 维护
 

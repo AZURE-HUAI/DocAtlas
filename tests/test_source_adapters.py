@@ -35,6 +35,29 @@ class CppreferenceAdapterTests(unittest.TestCase):
         self.assertEqual(path, "/cpp/container/vector")
         self.assertEqual(url, "https://cppreference.com/cpp/container/vector")
 
+    def test_standard_version_pages_are_not_swept_into_the_catch_all(self):
+        """`cpp/20` 横跨语言和标准库，归到兜底的 standard_library 只是副产品。
+
+        兜底分支同时接住了"确实属于标准库"和"没被前面几条认领"两种页面，
+        分不出来（ENH-011）。
+        """
+        for title in ("cpp/20", "cpp/11", "cpp/29"):
+            self.assertEqual(
+                cppreference._category_for_title(title), "standard_versions", title
+            )
+        # 只认整串：这两个都带着后续路径，不是版本总览页。
+        self.assertEqual(
+            cppreference._category_for_title("cpp/compiler support/20"),
+            "compiler_support",
+        )
+        self.assertEqual(
+            cppreference._category_for_title("cpp/20/extra"), "standard_library"
+        )
+        # 分出来的分类必须能被当成过滤条件用，否则库里会有一整类内容
+        # 既不出现在能力清单里、传进来还被当成拼错拒掉（BUG-015）。
+        self.assertIn("standard_versions", self.dataset.query_categories)
+        self.assertIn("standard_versions", self.dataset.category_labels)
+
     def test_parse_document_keeps_body_and_absolutizes_links(self):
         body = b"""
         <html lang="en"><head><title>std::vector - cppreference.com</title></head>

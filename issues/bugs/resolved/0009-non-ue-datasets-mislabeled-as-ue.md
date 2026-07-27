@@ -126,7 +126,8 @@ python -m docatlas inventory        # product / version
 `constants.CHUNKER_VERSION` 从 `v3` 升到 `v4`，用 `reprocess` 就地重算
 （只读本地原文，不联网，可断点续传）。
 
-**关于改列名**：`ARCHITECTURE_REVIEW.md` 曾记下"不要改 `ue_version` 的名字，
+**关于改列名**：改名前的那份架构评估（`ARCHITECTURE_REVIEW.md`，内部文档，
+未随仓库发布）曾记下"不要改 `ue_version` 的名字，
 避免为了整洁而冒险"。本议题提供了新证据——在 cppreference 和 Blender 上它给出
 的是**错误信息**，不只是不整洁——因此该结论已被推翻，推翻的理由和实测迁移耗时
 一并写回了 `ARCHITECTURE_REVIEW.md`，不留"两个地方说法不一致"的坑。

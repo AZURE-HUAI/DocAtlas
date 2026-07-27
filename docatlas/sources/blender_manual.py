@@ -9,7 +9,7 @@ import re
 from typing import Any
 import urllib.parse
 
-from ..htmlmd import html_to_markdown, plain_text
+from ..htmlmd import html_to_markdown, lead_sentence, plain_text
 from ..net import fetch_bytes
 from ._html import (
     absolutize_html_urls,
@@ -153,18 +153,10 @@ def parse_document(dataset, path: str, body: bytes) -> dict[str, Any]:
     article = clean_active_content(article)
     article = absolutize_html_urls(article, page_url)
     markdown, assets = html_to_markdown(article, page_url)
-    description = next(
-        (
-            plain_text(line)
-            for line in markdown.splitlines()
-            if line.strip() and not line.lstrip().startswith(("#", "|", "-"))
-        ),
-        "",
-    )
     return {
         "kind": "document",
         "title": _title(document_html, path),
-        "description": description,
+        "description": lead_sentence(markdown),
         "markdown": markdown,
         "assets": assets,
         "block_types": {"html"},
