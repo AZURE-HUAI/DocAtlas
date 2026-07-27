@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import (
     CATEGORY_LABELS,
-    CATEGORY_PATTERNS,
+    CATEGORY_IDS,
     DATA_DIR,
     DATASET,
     EXPORT_DIR,
@@ -46,7 +46,7 @@ def export_markdown(
 ) -> None:
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     max_bytes = shard_mb * 1024 * 1024
-    for category in CATEGORY_PATTERNS:
+    for category in CATEGORY_IDS:
         category_dir = EXPORT_DIR / category
         category_dir.mkdir(parents=True, exist_ok=True)
         rows = connection.execute(

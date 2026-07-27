@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import (
     CATEGORY_LABELS,
-    CATEGORY_PATTERNS,
+    CATEGORY_IDS,
     DATA_DIR,
     DATASET,
     DB_PATH,
@@ -130,7 +130,7 @@ def write_reports(
         "| 分类 | 已发现 | 成功 | 失败 |",
         "|---|---:|---:|---:|",
     ]
-    for category in CATEGORY_PATTERNS:
+    for category in CATEGORY_IDS:
         values = stats["categories"].get(category, {})
         total = sum(values.values())
         router_lines.append(

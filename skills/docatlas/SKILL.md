@@ -37,8 +37,14 @@ description: 查询和维护本机 DocAtlas 官方文档知识库。当前默认
 
 一个服务器服务所有数据集，每次调用可传 `dataset_id`；不确定查哪个先调
 `docatlas_list_datasets`。默认用 `docatlas_ask`：`token_budget` 简单问题 1500、
-一般 3000、需要通读 6000；知道分类就传 `category`；只用本地内容传
-`no_fetch=true`；默认返回 Markdown，需要稳定字段才用 `format="json"`。
+一般 3000、需要通读 6000（预算越大，同一页给得越深，不是拿别的页面来凑）；
+只用本地内容传 `no_fetch=true`；默认返回 Markdown，需要稳定字段才用
+`format="json"`。
+
+`category` 是**过滤**，不是提示：传了就等于声明"其他分类一律不要"。分类值只能
+来自 `docatlas_list_datasets`，不能照着目录名猜。拿不准就别传——不过滤最多是
+结果多几条，滤错了最相关的那一页会直接消失，而返回里看不出它被滤掉了。传了之
+后首位不对，先去掉 `category` 重查一次再下结论。
 
 ### 已知确切页面时，直接传地址
 

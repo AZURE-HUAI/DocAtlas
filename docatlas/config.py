@@ -49,7 +49,10 @@ KNOWLEDGE = _DEFAULT.knowledge
 
 VERSION = _DEFAULT.version
 LANGUAGE = _DEFAULT.language
-CATEGORY_PATTERNS = _DEFAULT.dataset.categories
+# 页面可能带的分类全集。用的是 query_categories 而不是 categories：后者是
+# "分类 → 路径前缀"的枚举规则，引用闭包收进来的那一类没有前缀，写不进去，
+# 但它的页面照样落库。命令行选项、抽样配额、导出和报表要的都是"能落库的分类"。
+CATEGORY_IDS = _DEFAULT.dataset.query_categories
 CATEGORY_LABELS = _DEFAULT.category_labels
 ENTITY_TYPES = _DEFAULT.dataset.entity_types
 # 路径前缀：什么样的路径才算"这个数据集的一篇文档"。

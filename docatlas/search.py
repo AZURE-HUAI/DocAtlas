@@ -24,7 +24,7 @@ from typing import Any
 from .chunking import normalize_name
 from .db import chunk_fts_mode, fts_mode
 from .runtime import active
-from .text import qualifier_tail
+from .text import qualifier_segments, qualifier_suffixes, qualifier_tail
 
 # 只在"任含"档剔除，避免 how/what 这类词淹没真正的关键词。
 STOPWORDS = frozenset(
@@ -140,10 +140,12 @@ def fts_expressions(query: str) -> list[tuple[str, str]]:
 def query_names(query: str) -> list[str]:
     """这条查询该按哪几个名字去对实体表。
 
-    第一个永远是查询本身；后面是领域知识包补的说法（Unreal 的 `K2_` 前缀、
+    第一个永远是查询本身；接着是限定名的后缀写法（`std::views::transform`
+    对得上官方页面 `std::ranges::views::transform`）；末段单独放在最后一档，
+    它最宽也最容易撞名。再往后是领域知识包补的说法（Unreal 的 `K2_` 前缀、
     属性访问器脱 Get/Set 之类）。核心不知道这些规则，只负责按顺序试。
     """
-    names = [query, qualifier_tail(query)]
+    names = [query, *qualifier_suffixes(query), qualifier_tail(query)]
     expand = active().hook("query_aliases")
     if expand:
         names.extend(alias for alias in expand(query) if alias)
@@ -251,6 +253,8 @@ class _Scoring:
     workspace: Any
     terms: set[str]
     normalized_query: str
+    # 查询里末段之前的那几段（`std::views::transform` → std、views）。
+    qualifiers: tuple[str, ...] = ()
     profile: str = "api"
 
 
@@ -268,6 +272,15 @@ def _score(row: sqlite3.Row, stage: str, rank: int, ctx: _Scoring) -> float:
         heading = (row["heading_path"] or "").casefold()
         score += sum(1 for t in ctx.terms if t in title) / len(ctx.terms) * 6.0
         score += sum(1 for t in ctx.terms if t in heading) / len(ctx.terms) * 3.0
+    # 用户打出来的限定符是位置信息，不是可有可无的装饰。同为 entity 档时，
+    # 名字里带着 `views` 的那一页才是他要的——少了这一档，
+    # `std::views::transform` 和 `std::sort` 一样，只能退到末段去撞名，而
+    # 这个库里叫 transform 的有八个（BUG-017）。
+    if ctx.qualifiers:
+        where = normalize_name(f"{row['page_title'] or ''}{row['source_url'] or ''}")
+        matched = sum(1 for segment in ctx.qualifiers if segment in where)
+        score += matched / len(ctx.qualifiers) * 8.0
+
     # 标题本身就是（或以之开头）用户问的东西，几乎一定是对的那一页。
     normalized_title = normalize_name(row["page_title"] or "")
     if ctx.normalized_query and normalized_title:
@@ -325,6 +338,11 @@ def search_chunks(
         workspace=active(),
         terms=terms,
         normalized_query=normalize_name(query),
+        qualifiers=tuple(
+            normalized
+            for segment in qualifier_segments(query)
+            if (normalized := normalize_name(segment))
+        ),
     )
 
     def absorb(rows: list[sqlite3.Row], stage: str) -> None:

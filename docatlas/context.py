@@ -43,7 +43,17 @@ from .search import page_chunks, query_names, search_chunks
 from .text import SCRIPT_NAMES, script_mismatch, script_of_language
 from . import versions
 
-MAX_CHUNKS_PER_PAGE = 2
+# 一个页面保底给几块，以及它最多能占预算的多少。
+#
+# 要防的是"一篇长文吃掉整个预算"，而那是**预算占比**的事。原来写死"每页最多
+# 2 块"，预算一变大就反过来伤人：预算 6000 说的正是"我要通读这一页"，却仍然
+# 只给 2 块，剩下的预算只能拿别的页面来凑——而那些内容分数明明更低。实测问
+# co_yield，7 条 33～37 分的协程正文被跳过，让位给 24～33 分的缩略语词表和
+# 编译器厂商兼容性列表（BUG-018）。
+#
+# 保底那 2 块不能省：预算小的时候按占比算装不下第二块，那会比原来更差。
+MIN_CHUNKS_PER_PAGE = 2
+MAX_PAGE_BUDGET_RATIO = 0.6
 PRIMARY_BUDGET_RATIO = 0.8
 # 低于这个置信度的关系不进上下文：宁可不给，也不能让 AI 把猜测当官方对应。
 MIN_RELATION_CONFIDENCE = 0.8
@@ -53,21 +63,27 @@ def _select_primary(
     candidates: list[dict[str, Any]], budget: int
 ) -> tuple[list[dict[str, Any]], int]:
     selected: list[dict[str, Any]] = []
-    per_page: dict[int, int] = {}
+    page_count: dict[int, int] = {}
+    page_tokens: dict[int, int] = {}
     seen_hashes: set[str] = set()
+    page_allowance = int(budget * MAX_PAGE_BUDGET_RATIO)
     used = 0
     for row in candidates:
         tokens = int(row["token_estimate"] or 1)
         page_id = row["page_id"]
         content_hash = row.get("content_hash")
-        if per_page.get(page_id, 0) >= MAX_CHUNKS_PER_PAGE:
+        if (
+            page_count.get(page_id, 0) >= MIN_CHUNKS_PER_PAGE
+            and page_tokens.get(page_id, 0) + tokens > page_allowance
+        ):
             continue
         if content_hash and content_hash in seen_hashes:
             continue
         if used + tokens > budget:
             continue
         selected.append(row)
-        per_page[page_id] = per_page.get(page_id, 0) + 1
+        page_count[page_id] = page_count.get(page_id, 0) + 1
+        page_tokens[page_id] = page_tokens.get(page_id, 0) + tokens
         if content_hash:
             seen_hashes.add(content_hash)
         used += tokens
@@ -253,12 +269,11 @@ def build_context_pack(
                 "section": section_name or None,
             }
             if section:
-                # 这一节排前面，本页其余内容跟在后面当上下文——预算不够时
-                # 自然被裁掉，够时多给几块也不亏。
-                chosen = {chunk["id"] for chunk in section}
-                candidates = section + [
-                    chunk for chunk in candidates if chunk["id"] not in chosen
-                ]
+                # 指名了小节，答案就到这一节为止。以前这里把本页其余内容也
+                # 跟在后面当上下文，靠"每页最多 2 块"顺手截断——那是把
+                # BUG-014 的保证挂在一个不相干的常量上，同页限额一放宽，
+                # 整页内容就又回来了。限定条件由它自己这一层写死。
+                candidates = section
     # 版本意图在裁剪预算之前生效：先决定"哪些内容对这个版本算数"，再决定
     # "预算内放得下哪几条"。反过来的话，被排除的内容已经占掉了名额。
     candidates, version_report = versions.apply(
@@ -303,7 +318,8 @@ def build_context_pack(
         "primary_knowledge": primary,
         "one_hop_relations": relations,
         "retrieval_policy": {
-            "max_chunks_per_page": MAX_CHUNKS_PER_PAGE,
+            "min_chunks_per_page": MIN_CHUNKS_PER_PAGE,
+            "max_page_budget_ratio": MAX_PAGE_BUDGET_RATIO,
             "primary_budget_ratio": PRIMARY_BUDGET_RATIO,
             "graph_depth": 1,
             "min_relation_confidence": MIN_RELATION_CONFIDENCE,
@@ -637,7 +653,8 @@ def describe_lookup(lookup: dict[str, Any]) -> list[str]:
     # 官方没有这一页，用户只好一遍遍改查询词，而那一页在官网上活得好好的
     # （BUG-011）。改查询词永远解决不了收录范围的问题。
     scope = "、".join(
-        workspace.category_labels.get(key, key) for key in workspace.dataset.categories
+        workspace.category_labels.get(key, key)
+        for key in workspace.dataset.query_categories
     )
     return [
         "没有找到结果，本数据集的清单里也没有对得上的页面。",
