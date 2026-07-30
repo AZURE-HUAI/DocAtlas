@@ -33,6 +33,30 @@ clients run `python install.py --print` and paste the snippet.
 Options: `--data-dir D:/DocAtlasData` puts the databases on another drive,
 `--dataset <id>` picks which library is the default.
 
+**This step wires up your agent and collects no documentation.** None ships
+here, and which docs to collect is your call — that is the next section.
+
+To ask what state this machine is in and what to do next, at any point:
+
+```bash
+python -m docatlas doctor
+```
+
+It lists every library, what each one holds, and the single command that moves
+it forward; `--json` gives the same report machine-readably. It is the one
+command that still answers before anything is set up.
+
+### Uninstall
+
+```bash
+python install.py --uninstall
+```
+
+Lists every Skill copy, MCP entry and settings file it finds and removes
+nothing; add `--yes` to go ahead. Crawled libraries are kept unless you also
+pass `--purge-data` — that is the part that took hours. The repository itself is
+left alone; delete the folder to finish.
+
 ## Build a library
 
 A library starts as a dataset: one toml in `datasets/`, naming the site, its
@@ -49,6 +73,10 @@ page list:
 DOCATLAS_DATASET=<dataset-id> python -m docatlas crawl --discovery-only
 ```
 
+```powershell
+$env:DOCATLAS_DATASET='<dataset-id>'; python -m docatlas crawl --discovery-only
+```
+
 That takes tens of minutes and downloads no article bodies — **and that is
 enough to start using it.** The list records where every page lives, so anything
 not held locally is fetched on demand.
@@ -56,8 +84,21 @@ not held locally is fetched on demand.
 For a fully local copy, follow up with `crawl --skip-discovery`; it resumes
 after any interruption.
 
-There is no built-in default library. Choose one per command with
-`DOCATLAS_DATASET`, or make it stick with `python install.py --dataset <id>`.
+There is no built-in default library. Choose one per command as above, or make
+it stick with `python install.py --dataset <id>`.
+
+### Then tell your agent about it
+
+The Skill is a **snapshot** taken when the installer ran: it names one library
+and quotes this manual as they both stood at that moment. Building a library
+does not update it. So once yours exists, run the installer again:
+
+```bash
+python install.py --dataset <dataset-id>
+```
+
+The same applies after `git pull`. `python -m docatlas doctor` reports the Skill
+as out of date whenever this is due, so you do not have to remember.
 
 ## Use
 
@@ -70,6 +111,8 @@ python -m docatlas ask "<an official term from your docs>"
 
 ## More
 
+- `python -m docatlas doctor` — what is installed, what state each library is
+  in, what to do next
 - `python -m docatlas --help` — every command and its options
 - [skills/docatlas/WORKFLOWS.md](skills/docatlas/WORKFLOWS.md) — building a
   library, adding a site, reprocessing, health checks
