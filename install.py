@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent
 LAUNCHER = REPO_ROOT / "mcp_server.py"
@@ -253,6 +254,113 @@ def verify_skill(target: Path, rendered: dict[str, str]) -> None:
 
 
 # --------------------------------------------------------------------------
+# Uninstall
+# --------------------------------------------------------------------------
+
+
+def strip_codex_entry(text: str) -> tuple[str, bool]:
+    """Drop the `[mcp_servers.docatlas]` section, keeping the rest byte for byte.
+
+    Only that one section: the same rule that governs installing applies to
+    removing. Everything from the header to the next top-level `[` goes, which
+    is exactly the shape this installer appends.
+    """
+    section = f"[mcp_servers.{SERVER_NAME}]"
+    start = text.find(section)
+    if start == -1:
+        return text, False
+    rest = text.find("\n[", start + len(section))
+    end = len(text) if rest == -1 else rest + 1
+    # Also take the blank line the append put in front of the header.
+    while start > 0 and text[start - 1] == "\n":
+        start -= 1
+    kept = text[:start] + ("\n" if text[:start] and end < len(text) else "") + text[end:]
+    return (kept if not kept or kept.endswith("\n") else kept + "\n"), True
+
+
+def plan_uninstall(purge_data: bool) -> list[tuple[str, Any]]:
+    """What this machine has, and how to undo each piece.
+
+    Built as a list so it can be shown before anything is touched. Removing
+    what someone spent hours crawling on the strength of a flag they may have
+    typed by accident is not recoverable.
+    """
+    from docatlas.runtime import LOCAL_SETTINGS, local_settings
+
+    steps: list[tuple[str, Any]] = []
+    for client, home in SKILL_CLIENTS.items():
+        target = home / "skills" / SKILL_NAME
+        if target.exists():
+            steps.append((f"Skill for {client}: {target}",
+                          lambda t=target: shutil.rmtree(t, ignore_errors=True)))
+
+    claude = shutil.which("claude")
+    claude_config = Path.home() / ".claude.json"
+    if claude and claude_config.exists() and SERVER_NAME in claude_config.read_text(
+        encoding="utf-8", errors="replace"
+    ):
+        steps.append((
+            f"MCP entry for claude-code (via `claude mcp remove {SERVER_NAME}`)",
+            lambda: subprocess.run(
+                [claude, "mcp", "remove", SERVER_NAME, "-s", "user"],
+                capture_output=True, text=True,
+            ),
+        ))
+
+    codex = Path.home() / ".codex" / "config.toml"
+    if codex.exists() and f"[mcp_servers.{SERVER_NAME}]" in codex.read_text(
+        encoding="utf-8", errors="replace"
+    ):
+        def drop_codex(path: Path = codex) -> None:
+            stripped, found = strip_codex_entry(path.read_text(encoding="utf-8"))
+            if found:
+                path.write_text(stripped, encoding="utf-8")
+        steps.append((f"MCP entry for codex: [mcp_servers.{SERVER_NAME}] in {codex}",
+                      drop_codex))
+
+    data_dir = Path(local_settings().get("home") or REPO_ROOT / "data")
+    if purge_data and data_dir.exists():
+        steps.append((f"ALL crawled data: {data_dir}",
+                      lambda d=data_dir: shutil.rmtree(d, ignore_errors=True)))
+
+    if LOCAL_SETTINGS.exists():
+        steps.append((f"Local settings: {LOCAL_SETTINGS}",
+                      lambda: LOCAL_SETTINGS.unlink(missing_ok=True)))
+    return steps
+
+
+def uninstall(confirmed: bool, purge_data: bool) -> int:
+    from docatlas.runtime import local_settings
+
+    data_dir = Path(local_settings().get("home") or REPO_ROOT / "data")
+    steps = plan_uninstall(purge_data)
+    if not steps:
+        print("Nothing to remove: no Skill, MCP entry or settings found.")
+        return 0
+
+    print("This will remove:\n")
+    for description, _ in steps:
+        print(f"  - {description}")
+    if not purge_data:
+        print(f"\nKept: crawled data in {data_dir}")
+        print("      (add --purge-data to delete it too; it is the part that took hours)")
+    print("\nThe repository itself is left alone; delete the folder to finish.")
+
+    if not confirmed:
+        print("\nNothing has been removed. Re-run with --yes to go ahead:")
+        flags = " --purge-data" if purge_data else ""
+        print(f"    python install.py --uninstall --yes{flags}")
+        return 0
+
+    print()
+    for description, action in steps:
+        action()
+        print(f"  removed: {description.split(':')[0]}")
+    print("\nDone. Restart your AI client for it to notice.")
+    return 0
+
+
+# --------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -266,6 +374,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the MCP snippet only, touch no files")
     parser.add_argument("--skip-mcp", action="store_true", help="do not register MCP")
     parser.add_argument("--skip-skill", action="store_true", help="do not install the Skill")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the Skill and MCP entries (lists them first)")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --uninstall, actually remove instead of listing")
+    parser.add_argument("--purge-data", action="store_true",
+                        help="with --uninstall, also delete every crawled library")
     args = parser.parse_args(argv)
 
     if sys.version_info < MIN_PYTHON:
@@ -283,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_only:
         print(snippet)
         return 0
+    if args.uninstall:
+        return uninstall(confirmed=args.yes, purge_data=args.purge_data)
 
     try:
         data_dir, dataset = save_choices(args.data_dir, args.dataset)
