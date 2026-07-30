@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Only the Actions used by CI. There is no Python entry here on purpose:
+  # DocAtlas has no third-party dependencies, so there is nothing to watch.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 3

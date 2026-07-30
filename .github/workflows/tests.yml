@@ -1,0 +1,53 @@
+name: tests
+
+# A stranger's first question about a repository like this is whether it runs
+# at all. The suite answers that on a clean checkout, which is exactly what
+# they get: the template dataset ships, the real libraries do not, and the core
+# suite is written to pass with only the template present.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push makes an in-flight run pointless; cancelling keeps the badge
+  # reporting the tip of the branch rather than whichever run finished last.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    # Both platforms deliberately. The project is developed on Windows and
+    # ships PowerShell entry points, but nothing in the core is meant to be
+    # Windows-only, and that claim is worth checking rather than assuming.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # No install step, and that is the point: DocAtlas depends on nothing
+      # outside the standard library. If this file ever grows a `pip install`,
+      # that promise has quietly been broken.
+      - name: Core suite
+        run: python tests/test_docatlas.py
+
+      - name: Entry points still start
+        # Cheap smoke test for the breakage a unit test does not see: an import
+        # cycle or a bad path that only shows when the program is really run.
+        run: |
+          python -m docatlas doctor
+          python -m docatlas --help
+          python install.py --print
