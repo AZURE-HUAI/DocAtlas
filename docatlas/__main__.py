@@ -2,6 +2,14 @@ import sys
 
 from .runtime import DatasetNotChosen
 
+# `doctor` reports on the whole machine and must answer when nothing is set up
+# yet — including the "no library chosen" state that stops the import below.
+# So it is dispatched ahead of it rather than registered as a normal command.
+if __name__ == "__main__" and sys.argv[1:2] == ["doctor"]:
+    from .doctor import run
+
+    raise SystemExit(run(as_json="--json" in sys.argv[2:]))
+
 try:
     from .cli import main
 except DatasetNotChosen as error:

@@ -40,9 +40,9 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ["DOCATLAS_DATASET"] = "EXAMPLE"
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, coverage, crawl, dataset, db, discover, htmlmd,
-    members, net, ondemand, constants, relations, runtime, search, store, text,
-    validate, versions,
+    chunking, config, context, coverage, crawl, dataset, db, discover, doctor,
+    htmlmd, members, net, ondemand, constants, relations, runtime, search,
+    store, text, validate, versions,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
@@ -1858,6 +1858,91 @@ class InstallerSkillStepTests(unittest.TestCase):
             lambda: installer.main(["--skip-mcp"])
         )
         self.assertEqual(exit_code, 0, "skipping the Skill must not fail the install")
+
+
+class UninstallCodexEntryTests(unittest.TestCase):
+    """Uninstalling edits a file this project does not own.
+
+    `~/.codex/config.toml` holds the user's other MCP servers and their
+    settings. Removing our section by rewriting the file, or by matching too
+    greedily, silently deletes configuration nobody asked us to touch — and the
+    damage only shows up the next time some other tool fails to start.
+    """
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "docatlas_install_uninstall_test", runtime.REPO_ROOT / "install.py"
+        )
+        self.installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.installer)
+
+    def test_only_our_section_goes_wherever_it_sits(self):
+        neighbour = '[mcp_servers.other]\ncommand = "a"\n'
+        ours = '[mcp_servers.docatlas]\ncommand = "py"\nargs = ["x"]\n'
+        for name, text in {
+            "alone": ours,
+            "ours last": f"{neighbour}\n{ours}",
+            "ours first": f"{ours}\n{neighbour}",
+            "between others": f'[tools]\nweb = true\n\n{ours}\n{neighbour}',
+        }.items():
+            stripped, found = self.installer.strip_codex_entry(text)
+            self.assertTrue(found, name)
+            self.assertNotIn("docatlas", stripped, name)
+            if neighbour in text:
+                self.assertIn("[mcp_servers.other]", stripped, name)
+                self.assertIn('command = "a"', stripped, name)
+            if "[tools]" in text:
+                self.assertIn("web = true", stripped, name)
+            self.assertTrue(not stripped or stripped.endswith("\n"), name)
+
+    def test_a_config_that_never_had_us_is_returned_byte_for_byte(self):
+        text = '[mcp_servers.other]\ncommand = "a"\n\n[tools]\nweb = true\n'
+        stripped, found = self.installer.strip_codex_entry(text)
+        self.assertFalse(found)
+        self.assertEqual(stripped, text)
+
+
+class DoctorTests(unittest.TestCase):
+    """`doctor` has to answer in the states where nothing else will."""
+
+    def test_the_template_is_something_to_copy_not_something_to_crawl(self):
+        """The shipped template describes an invented site.
+
+        Telling a newcomer to crawl it sends them at a host that does not
+        resolve, and the failure looks like DocAtlas being broken rather than
+        like the template being a worked example.
+        """
+        report = doctor.inspect_dataset("EXAMPLE", is_default=True)
+        self.assertEqual(report["state"], "template")
+        self.assertNotIn("crawl", report["next"])
+        self.assertIn("example.py", report["next"])
+
+    def test_a_broken_config_is_reported_rather_than_raised(self):
+        """A diagnostic that dies on the first bad entry cannot diagnose."""
+        directory = Path(tempfile.mkdtemp(prefix="docatlas_broken_"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        (directory / "wrecked.toml").write_text("id = \nnot toml at all", encoding="utf-8")
+        original = runtime.DATASET_CONFIG_DIR
+        runtime.DATASET_CONFIG_DIR = directory
+        self.addCleanup(setattr, runtime, "DATASET_CONFIG_DIR", original)
+
+        report = doctor.inspect_dataset("wrecked", is_default=False)
+        self.assertEqual(report["state"], "broken config")
+        self.assertIn("wrecked.toml", report["next"])
+
+    def test_each_shell_is_given_a_line_it_can_actually_run(self):
+        """`VAR=value command` is not a thing in PowerShell.
+
+        Printing the POSIX spelling to a Windows user does not give them a hint
+        to adapt; it gives them a command that errors.
+        """
+        posix = doctor._env_prefix("some-docs", windows=False)
+        powershell = doctor._env_prefix("some-docs", windows=True)
+        self.assertEqual(posix, "DOCATLAS_DATASET=some-docs ")
+        self.assertTrue(powershell.startswith("$env:DOCATLAS_DATASET="))
+        self.assertIn(";", powershell)
 
 
 class RuntimeWorkspaceTests(unittest.TestCase):

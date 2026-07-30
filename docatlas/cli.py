@@ -404,6 +404,18 @@ def command_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_doctor(args: argparse.Namespace) -> int:
+    """Report the whole machine rather than one library.
+
+    Registered here so it shows up in `--help` like everything else, but
+    `__main__` dispatches it before importing this module as well: the state it
+    exists to explain includes "no dataset chosen", which stops that import.
+    """
+    from .doctor import run
+
+    return run(as_json=args.json)
+
+
 def command_mcp(_: argparse.Namespace) -> int:
     """Run as an MCP server, for MCP-capable AI clients."""
     from .mcpserver import serve  # imported only when MCP is actually run
@@ -719,6 +731,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     paths = subparsers.add_parser("paths", help="print dataset and data directory paths")
     paths.set_defaults(func=command_paths)
+
+    doctor = subparsers.add_parser(
+        "doctor", help="what is installed, the state of every library, what to do next"
+    )
+    doctor.add_argument("--json", action="store_true", help="report as JSON")
+    doctor.set_defaults(func=command_doctor)
 
     render = subparsers.add_parser(
         "render-skill", help="fill the skill template for this dataset and print it"
