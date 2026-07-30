@@ -4,6 +4,16 @@ Program location: `{{DOCATLAS_ROOT}}`. Run every command from there.
 
 ## Where to go
 
+**Start here when you do not know the state of the machine:**
+
+```powershell
+python -m docatlas doctor
+```
+
+Every library, what each holds, and the one command that moves it forward. Add
+`--json` to read it as data. It answers even when no library has been chosen
+yet, which is the state every other command refuses to run in.
+
 | Situation | Section |
 |---|---|
 | New version of the same site | [New version](#new-version) |
@@ -11,7 +21,7 @@ Program location: `{{DOCATLAS_ROOT}}`. Run every command from there.
 | An existing library is missing pages | [Widening the scope](#widening-the-scope) |
 | Chunking or relation rules changed | [Reprocessing](#reprocessing) |
 | Want to know the state of a library | [Health check](#health-check) |
-| The project moved, or this manual changed | [Reinstalling](#reinstalling) |
+| A library was just built, or the project changed | [Reinstalling](#reinstalling) |
 
 ## Principles
 
@@ -187,12 +197,25 @@ while the local library is still chunked by the old rules; one
 
 ## Reinstalling
 
-After the project moves or is renamed, or this manual and `SKILL.md` change,
-rerun the installer:
+The installed Skill is a **snapshot**: it names one library and quotes this
+manual as they both stood when the installer last ran. Nothing updates it in the
+background, so rerun the installer after any of these:
+
+- a library was just built, or a different one should become the default
+- `git pull` brought in changes to this manual or `SKILL.md`
+- the project moved or was renamed
 
 ```powershell
 python install.py
 ```
+
+`python -m docatlas doctor` reports the Skill as out of date when this is due —
+it compares the installed copy against a fresh rendering, so it catches both a
+changed default library and a moved-on repository.
+
+After a `git pull`, also run `python -m docatlas validate --phase content`: when
+the chunking rules changed, stored chunks are still on the old ones and
+[Reprocessing](#reprocessing) applies.
 
 The script **detects which supported clients this machine has** and writes the
 skill copy and MCP configuration only into those, then checks itself. Which ones
