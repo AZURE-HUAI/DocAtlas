@@ -1,4 +1,4 @@
-"""统计、总路由与全站清单。"""
+"""Statistics, the router page, and the whole-site manifest."""
 
 from __future__ import annotations
 
@@ -69,10 +69,11 @@ def database_stats(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def write_manifest(connection: sqlite3.Connection) -> Path:
-    """导出逐页机器可读清单。
+    """Export the machine-readable per-page manifest.
 
-    这是一个近 100 MB 的全量导出文件，只在真正需要时生成——以前它挂在
-    `write_reports` 里，导致每次看一眼进度都要重写 100 MB。
+    A full export approaching 100 MB, generated only when actually wanted: hung
+    off `write_reports`, it would rewrite 100 MB every time someone glanced at
+    progress.
     """
     manifest_path = DATA_DIR / "manifest.jsonl"
     with manifest_path.open("w", encoding="utf-8", newline="\n") as manifest:
@@ -89,7 +90,7 @@ def write_manifest(connection: sqlite3.Connection) -> Path:
 
 
 def _home_url() -> str:
-    """数据集首页地址。没配 home_path 就不写这一行，而不是编一个假地址。"""
+    """The dataset's home URL. With no home_path, omit the line; invent nothing."""
     home_path = DATASET.option("home_path")
     return SOURCE.canonical_url(DATASET, home_path) if home_path else ""
 
@@ -107,27 +108,27 @@ def write_reports(
         write_manifest(connection)
 
     router_lines = [
-        f"# {DATASET.name} 本地知识库总路由",
+        f"# {DATASET.name} — local knowledge base router",
         "",
         *(
-            [f"- 官方入口：[{home_url}]({home_url})"]
+            [f"- Official entry point: [{home_url}]({home_url})"]
             if (home_url := _home_url())
             else []
         ),
-        f"- 文档语言：{LANGUAGE}",
-        f"- 页面总数：{stats['pages_total']:,}",
-        f"- 成功页面：{stats['pages'].get('success', 0):,}",
-        f"- 逻辑小节：{stats['sections']:,}",
-        f"- 检索知识块：{stats['chunks']:,}",
-        f"- 交叉实体：{stats['entities']:,}",
-        f"- 交叉关系：{stats['relations']:,}",
-        f"- 失败页面：{stats['pages'].get('failed', 0):,}",
-        f"- 重定向页面：{stats['pages'].get('redirect', 0):,}",
-        f"- 失败站点地图：{stats['sitemaps_failed']:,}",
+        f"- Document language: {LANGUAGE}",
+        f"- Pages total: {stats['pages_total']:,}",
+        f"- Pages fetched: {stats['pages'].get('success', 0):,}",
+        f"- Logical sections: {stats['sections']:,}",
+        f"- Retrieval chunks: {stats['chunks']:,}",
+        f"- Cross-referenced entities: {stats['entities']:,}",
+        f"- Cross-referenced relations: {stats['relations']:,}",
+        f"- Pages failed: {stats['pages'].get('failed', 0):,}",
+        f"- Pages redirected: {stats['pages'].get('redirect', 0):,}",
+        f"- Feeds failed: {stats['sitemaps_failed']:,}",
         "",
-        "## 分类路由",
+        "## Routing by category",
         "",
-        "| 分类 | 已发现 | 成功 | 失败 |",
+        "| Category | Discovered | Fetched | Failed |",
         "|---|---:|---:|---:|",
     ]
     for category in CATEGORY_IDS:
@@ -140,29 +141,34 @@ def write_reports(
     router_lines.extend(
         [
             "",
-            "## 怎么查",
+            "## How to query",
             "",
             "```powershell",
-            ".\\docatlas.ps1                    # 交互式搜索",
-            '.\\docatlas.ps1 ask "<要查的东西>"',
-            'python -m docatlas search "<关键词>" --limit 20',
-            'python -m docatlas related "<名称或 K 编号>"',
+            ".\\docatlas.ps1                    # interactive search",
+            '.\\docatlas.ps1 ask "<what you want to know>"',
+            'python -m docatlas search "<keywords>" --limit 20',
+            'python -m docatlas related "<name or K id>"',
             "```",
             "",
-            "`ask` 会按 token 预算返回整理好的知识块和原出处，是 AI 的默认入口。"
-            "结构化总索引位于 `knowledge.sqlite3`；逐页清单需要时用 "
-            "`python -m docatlas stats --manifest` 生成到 `manifest.jsonl`；"
-            "整本 Markdown 位于 `exports/`（体积大，AI 不要整篇读）。",
+            "`ask` returns assembled chunks and their sources within a token "
+            "budget, and is the default entry point for an AI. The structured "
+            "index lives in `knowledge.sqlite3`; generate the per-page manifest "
+            "into `manifest.jsonl` with `python -m docatlas stats --manifest` "
+            "when needed; the full Markdown sits in `exports/` (large, and not "
+            "for an AI to read end to end).",
             "",
-            "## 数据保证",
+            "## Data guarantees",
             "",
-            "- 每个知识小节都单独保存 `source_url`。",
-            "- 每个检索块末尾都重复写入 `DOC 原出处`。",
-            "- 原始响应按内容哈希追加保存，可追溯到官方返回过的历史结构。",
-            "- 交叉关系保存证据类型与置信度，不把候选映射冒充官方声明。",
-            "- 重跑采集器默认只补抓未完成或失败项目，不会重复成功页面。",
+            "- Every section stores its own `source_url`.",
+            "- Every retrieval chunk repeats `DOC source` at its end.",
+            "- Raw responses are appended by content hash, so the structures the "
+            "site returned over time stay traceable.",
+            "- Relations store an evidence kind and a confidence, so a candidate "
+            "mapping is never passed off as an official statement.",
+            "- Re-running the crawler fetches only unfinished or failed items by "
+            "default and never repeats a successful page.",
             "",
-            f"最后生成：{stats['generated_at']}",
+            f"Generated: {stats['generated_at']}",
             "",
         ]
     )

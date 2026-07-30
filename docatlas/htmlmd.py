@@ -1,7 +1,7 @@
-"""HTML → Markdown。通用工具，不认识任何具体站点。
+"""HTML -> Markdown. A generic utility that knows no particular site.
 
-图片地址往往是相对路径，拼成绝对地址需要一个基准；基准由来源适配器给，
-这里不写死任何域名。
+Image URLs are often relative, and turning them absolute needs a base. The base
+comes from the source adapter; no domain is hardcoded here.
 """
 
 from __future__ import annotations
@@ -21,15 +21,19 @@ from .constants import (
 
 
 def _holds_blocks(cell: str) -> bool:
-    """这个单元格里装的是块级内容（标题、代码块）吗。
+    """Does this cell hold block-level content (a heading, a code block)?
 
-    Markdown 表格的一格只放得下行内内容。站点却常拿 `<table>` 当布局容器：
-    cppreference 的 `t-rev-begin` 就用一张表包住整个"自 C++20 起"的小节，
-    格子里是完整的 `<h3>` + 段落 + `<pre>`。照着表格压成一行，标题、段落和
-    代码块一起没了，整段正文挂到上一节名下（BUG-016）。
+    A Markdown table cell can only hold inline content, yet sites routinely use
+    `<table>` as a layout container: a site may wrap an entire versioned section
+    in a table whose single cell holds a full `<h3>` plus paragraphs and a
+    `<pre>`. Flattening that into one row loses the heading, the paragraphs and
+    the code block together, and the whole passage ends up filed under the
+    previous section.
 
-    只认标题和代码围栏这两样：它们在表格里确实无法表达，丢失是实打实的。
-    多段纯文字被压成一行只是难看，不影响意思，不值得为它改变表格形状。
+    Only headings and code fences count: those genuinely cannot be expressed
+    inside a table, so losing them is real damage. Several plain paragraphs
+    squashed into one row is merely ugly, does not change the meaning, and is not
+    worth reshaping the table for.
     """
     return any(
         HEADING_RE.match(line) or CODE_FENCE_RE.match(line)
@@ -159,8 +163,9 @@ class HTMLToMarkdown(HTMLParser):
                     self.table_row.append(flat.replace("|", "\\|"))
             self.table_cell = None
         elif tag == "tr":
-            # 单元格里装着标题或代码块，这张表就不是数据表，是布局容器——
-            # 那些东西在 Markdown 表格里根本表达不出来，压成一行就等于删掉。
+            # A cell holding a heading or code block means this is not a data
+            # table but a layout container. Those cannot be expressed in a
+            # Markdown table, so flattening would amount to deleting them.
             for block in self.block_cells:
                 self.append("\n\n" + block.strip() + "\n\n")
             if self.table_row:
@@ -216,7 +221,9 @@ def looks_like_html(text: str) -> bool:
 
 
 def maybe_html_to_markdown(text: str, asset_base: str = "") -> str:
-    """只在确实像 HTML 时才转换，避免把普通文本里的 `<` 当标签处理。"""
+    """Convert only when it really looks like HTML, so a `<` in ordinary text is
+    not treated as a tag.
+    """
     if not looks_like_html(text):
         return text
     markdown, _assets = html_to_markdown(text, asset_base)
@@ -272,60 +279,63 @@ def collect_strings(
         elif key in {"title", "name"}:
             result.append(f"### {text}")
         elif key in {"description", "content", "text", "caption"}:
-            # 这些字段里经常混着行内 HTML（<strong>、<a> 等）。不转换的话
-            # 标签会一路带进正文和全文索引，既难读又污染检索。
+            # These fields often mix in inline HTML (<strong>, <a>, ...). Left
+            # unconverted, the tags travel into the body and the full-text index,
+            # which is both unreadable and polluting to search.
             result.append(maybe_html_to_markdown(text, asset_base))
         elif key in {"code", "language"}:
-            # 代码原样保留：C++ 模板里的 < > 不是 HTML。
+            # Code is kept verbatim: `<` and `>` in a C++ template are not HTML.
             result.append(text)
     return result
 
 
 def plain_text(markdown: str) -> str:
     value = MARKDOWN_LINK_RE.sub(r"\1", markdown)
-    # 兜底：万一还有漏网的 HTML 标签，先整段去掉再去 Markdown 记号。
-    # 否则 MARKDOWN_MARKUP_RE 会把 `>` 吃掉、留下 `<strong` 这种碎片进全文索引。
+    # Fallback for any tag that slipped through: strip whole tags before stripping
+    # Markdown markers, or MARKDOWN_MARKUP_RE eats the `>` and leaves fragments
+    # like `<strong` to enter the full-text index.
     value = _HTML_TAG_RE.sub(" ", value)
     value = MARKDOWN_MARKUP_RE.sub(" ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 
-# 整行只有一张图，外面可以再套一层链接：
-# `![alt](src)`、`[![alt](src)](href)`。
+# A line holding only an image, optionally wrapped in a link:
+# `![alt](src)`, `[![alt](src)](href)`.
 _IMAGE_ONLY_LINE_RE = re.compile(
     r"^\[?\s*!\[[^\]]*\]\([^)]*\)\s*\]?(?:\([^)]*\))?$"
 )
-# 列表项的星号，不是 `**加粗**`：只认星号后面跟空白的写法。
+# A list bullet, not `**bold**`: only a star followed by whitespace counts.
 _STAR_BULLET_RE = re.compile(r"^\*\s")
 
-# 一句摘要至少要有多少个字。低于这个数的是标签不是句子：Blender 的节点页
-# 除了示意图就只有 `Image`、`EEVEE Only`、`Brightness` 这类参数名和徽章，
-# 挑中任何一个当"这一页在讲什么"都是误导。
+# Minimum length for a summary sentence. Below this it is a label, not a sentence:
+# a node page may hold nothing but a diagram plus parameter names and badges such
+# as `Image`, `EEVEE Only` or `Brightness`, and picking any of those as "what this
+# page is about" misleads.
 #
-# 按**字数**不按词数：词数要靠空格切，而中日韩整句话一个空格都没有，用词数
-# 会把这些语言的正常句子全判成标签。数据集的语言由它自己声明，这里不做假设。
+# Counted in **characters**, not words: word counts need spaces to split on, and a
+# whole sentence in Chinese, Japanese or Korean contains none, so a word count
+# would judge every normal sentence in those languages to be a label. A dataset
+# declares its own language; nothing is assumed here.
 MIN_LEAD_CHARS = 16
 
 
 def lead_sentence(markdown: str) -> str:
-    """正文里第一句像话的句子，用来当页面摘要。
+    """The first sentence-like line of a body, for use as the page summary.
 
-    三个适配器本来各抄了一份这段逻辑，规则还互相不一致，而且都漏了同一件事：
-    **整行只有一张图时，图的 alt 会被当成摘要**。Blender 的节点页每一页开头
-    都是一张示意图，于是 `pages.description` 存下来的是
-    `![Blur Attribute node. ](https://…/node-types_GeometryNodeBlurAttribute.webp)`
-    拍平后的残骸，还会原样漏进 Markdown 导出。
+    Skips what cannot answer "what is this page about": headings (that is the
+    page's own name), table rows, list items (usually a table of contents or
+    navigation), image-only lines, and labels shorter than `MIN_LEAD_CHARS`. An
+    image-only line matters because a page opening with a diagram would otherwise
+    yield the flattened image markup as its summary. When nothing qualifies,
+    returns an empty string: better no summary than passing off something
+    meaningless, since the page's name is already in its title.
 
-    跳过的几类都不是"这一页在讲什么"的答案：标题（那是页面自己的名字）、表格
-    行、列表项（多半是目录或导航）、纯图片行，以及短于 `MIN_LEAD_CHARS` 的
-    标签。一个都不合格就返回空串——宁可没有摘要，也不要拿一句不知所云的东西
-    冒充；页面叫什么，标题里本来就有。
-
-    刻意**不**跳引用块：Roblox 有一批页面的开场白就写在 `> …` 里，`plain_text`
-    会把记号去掉，正好是要的那句话。也刻意只把"星号加空格"当列表项——`**加粗**`
-    开头的句子是正文，不是列表，一起排除会连 "**Chaos Physics** is a…" 这种
-    正经首句都丢掉。
+    Deliberately does **not** skip block quotes: some sites write their opening
+    paragraph inside `> ...`, and `plain_text` strips the marker to leave exactly
+    the wanted sentence. Deliberately treats only "star plus space" as a list
+    item, too: a sentence starting `**Bold**` is prose, not a list, and excluding
+    it would discard perfectly good opening lines.
     """
     for line in markdown.splitlines():
         stripped = line.strip()

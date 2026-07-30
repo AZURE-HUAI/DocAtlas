@@ -1,27 +1,33 @@
-"""通用关系核心。
+"""Generic relation core.
 
-关系回答的是"这个东西和什么有关、凭什么这么说"。**怎么找候选、怎么验证目标、
-怎么挡撞名、怎么去重、怎么存、怎么增量更新、失败了怎么说清楚**——这些对任何
-文档站都一样，归这里。只有"凭什么说这两个实体有关"才是领域知识，归
-`knowledge/<名字>.py`。
+A relation answers "what is this connected to, and on what grounds".
+**Finding candidates, verifying targets, guarding against name collisions,
+deduplicating, storing, updating incrementally, and explaining failures**
+are the same for any documentation site and live here. Only "why are these
+two entities related" is domain knowledge, and that lives in
+`knowledge/<name>.py`.
 
-领域包的合同只有一个函数：
+A knowledge pack's contract is a single function:
 
     def relation_rules(graph):
         yield RelationCandidate(...)
 
-`graph` 是只读视图，给四个查询原语（`entities` / `find` / `name_matches` /
-`texts`）。候选用**实体对象**表达，实体只能从这四个原语里拿——所以目标一定
-存在，不存在的目标在 `find()` 那一步就被记成诊断了。领域包不写 SQL、不认识
-表结构、不需要知道 entity id，接一个新产品要改的只有这一个函数。
+`graph` is a read-only view offering four query primitives (`entities` /
+`find` / `name_matches` / `texts`). Candidates are expressed with **entity
+objects**, and entities can only come from those primitives — so a target
+always exists, and one that does not was already recorded as a diagnostic
+inside `find()`. A pack writes no SQL, knows no tables and never sees an
+entity id; supporting a new product means writing this one function.
 
-同一个函数同时服务全量重建和按需增量：`graph` 带上 `page_ids` 就只处理这几页。
-以前这是两个函数（`build_relations` / `link_pages`），于是按需抓取只补了三种
-领域关系里的一种，另外两种在增量路径上永远是空的。
+The same function serves both a full rebuild and an incremental one: give
+`graph` a `page_ids` list and only those pages are processed. Keeping it to
+one function is what keeps the two paths in step — every domain relation an
+incremental run can make is one a full rebuild makes too.
 
-关系的归属记在 `relations.origin`：核心产出的记 `core`，领域包产出的记包名。
-全量重建按 origin 删——领域包不必再维护一张"我会产出哪些 evidence_kind"的
-清单，漏写一项就会留下删不掉的死关系。
+Ownership is recorded in `relations.origin`: `core` for the core, otherwise
+the pack's name. A full rebuild deletes by origin, so a pack does not have
+to keep its own list of "evidence kinds I produce" — one missing entry
+there leaves a dead relation nothing can delete.
 """
 
 from __future__ import annotations
@@ -35,8 +41,8 @@ from .db import resolve_link_targets
 from .runtime import active
 from .util import utc_now
 
-# 官方链接的 link_kind → 关系类型。任何文档站都成立：正文里链到另一篇文档，
-# 就是一条关系。
+# link_kind of an official link → relation type. True of any documentation
+# site: a link from one document to another is a relation.
 RELATION_TYPE_BY_LINK_KIND = {
     "hierarchy": "belongs_to",
     "parameter_type": "parameter_type",
@@ -46,14 +52,16 @@ RELATION_TYPE_BY_LINK_KIND = {
     "official_reference": "official_reference",
 }
 
-# 核心自己产出的关系记这个 origin。
+# The origin recorded for relations the core produces itself.
 CORE_ORIGIN = "core"
 
-# 一个名字对上超过这么多实体，这名字就不算证据了——多半是 Get / Set 这类
-# 烂大街的名字，给出去只会误导。
+# Past this many entities for one name, the name stops being evidence — it
+# is almost certainly a ubiquitous verb like Get or Set, and handing it out
+# only misleads.
 DEFAULT_MAX_AMBIGUITY = 8
 
-# 名字短于这个长度不做匹配依据："Get"、"Add" 这种谁都叫。
+# Names shorter than this are not grounds for a match: everything is
+# called "Get" or "Add".
 DEFAULT_MIN_NAME_LENGTH = 6
 
 _ENTITY_FIELDS = (
@@ -72,7 +80,8 @@ _ENTITY_FIELDS = (
 
 
 def _columns(table: str, prefix: str = "") -> str:
-    """`SELECT` 里的实体字段列表；`prefix` 用来给第二个实体的列改名避免撞名。"""
+    """Entity columns for a `SELECT`; `prefix` renames the second entity's
+    columns so the two do not collide."""
     return ", ".join(
         f"{table}.{name} AS {prefix}{name}" if prefix else f"{table}.{name}"
         for name in _ENTITY_FIELDS
@@ -84,7 +93,8 @@ _ENTITY_COLUMNS = _columns("e")
 
 @dataclass(frozen=True)
 class Entity:
-    """领域包看到的实体。只读，字段就是判断"是不是它"用得上的那些。"""
+    """An entity as a knowledge pack sees it. Read-only, carrying the fields
+    needed to decide "is this the one"."""
 
     id: int
     page_id: int
@@ -95,9 +105,11 @@ class Entity:
     owner_type: str | None
     module: str | None
     source_url: str
-    # 非 None 表示它是别人页面上的一个成员（属性、方法），值是所有者实体 id。
+    # Not None means this is a member (property, method) documented on
+    # another entity's page; the value is the owner's entity id.
     member_of_id: int | None = None
-    # 抓取时记下的原样事实，领域包据此判断（Unreal 的 UPROPERTY 修饰符就在这）。
+    # Verbatim facts recorded at crawl time for the pack to judge by, such as
+    # the declaration modifiers a site prints beside a member.
     attributes: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -124,11 +136,12 @@ class Entity:
 
 @dataclass(frozen=True)
 class RelationCandidate:
-    """领域包声明的一条关系。
+    """One relation declared by a knowledge pack.
 
-    `confidence` 是"有多确定"：官方文档白纸黑字写着的用 1.0，靠名字推出来的
-    要压下去，并在 `note` 里写清楚凭什么——上层会把小于 1.0 的如实标成"推断"，
-    写得含糊就等于让 AI 把猜测当官方对应转述出去。
+    `confidence` is how certain it is: 1.0 for what the documentation states
+    outright, lower for anything inferred from names, with `note` saying on
+    what grounds. Anything below 1.0 is reported upstream as inferred, so a
+    vague note lets an agent pass a guess on as an official correspondence.
     """
 
     source: Entity
@@ -143,21 +156,25 @@ class RelationCandidate:
 
 @dataclass
 class RelationGraph:
-    """领域包用来找候选的只读视图。
+    """The read-only view a knowledge pack finds candidates through.
 
-    `page_ids` 为 None 表示全量；给了就把查询限定在这几页（按需抓取补页之后
-    只补这几页的关系，不重扫全库）。限定对关系的**任意一端**生效——新抓的
-    页面既可能是关系的起点，也可能是别人早就想指过来的终点。
+    `page_ids` of None means everything; a list restricts queries to those
+    pages, so a handful of newly fetched pages get their relations without
+    rescanning the library. The restriction applies to **either end** — a
+    new page can be the start of a relation, or the target something else
+    has been trying to point at all along.
     """
 
     connection: sqlite3.Connection
     page_ids: list[int] | None = None
-    # find() 没解析出实体的名字。这不是错误，是诊断：目标页多半还没抓，
-    # 甚至压根不在清单里（见 BUG-011）。
+    # Names find() could not resolve to an entity. Not an error but a
+    # diagnostic: the target page is probably unfetched, or was never
+    # enumerated into the inventory at all.
     unresolved: list[str] = field(default_factory=list)
 
     def _scope(self, *columns: str) -> tuple[str, tuple[Any, ...]]:
-        """把 page_ids 限定编译成 SQL 片段；不限定就返回空片段。"""
+        """Compile the page_ids restriction into a SQL fragment; empty when
+        there is no restriction."""
         if self.page_ids is None:
             return "", ()
         placeholders = ",".join("?" for _ in self.page_ids)
@@ -165,7 +182,7 @@ class RelationGraph:
         return f" AND ({clause})", tuple(self.page_ids) * len(columns)
 
     def entities(self, *entity_types: str) -> Iterator[Entity]:
-        """遍历实体，可按类型过滤。"""
+        """Walk the entities, optionally filtered by type."""
         where = ""
         params: tuple[Any, ...] = ()
         if entity_types:
@@ -187,17 +204,19 @@ class RelationGraph:
         alias_type: str | None = None,
         limit: int = DEFAULT_MAX_AMBIGUITY,
     ) -> list[Entity]:
-        """按名字或别名找实体。找不到会记进 `unresolved` 供诊断。
+        """Find entities by name or alias. Misses go into `unresolved`.
 
-        故意不做 page_ids 限定：关系的终点可以是任何早就抓好的页面，
-        限定了就会让增量更新只能连到同一批新页面上。
+        Deliberately not restricted by page_ids: the target of a relation can
+        be any page fetched at any time, and restricting it would confine an
+        incremental run to linking the new pages to each other.
         """
         from .text import normalize_name
 
         normalized = normalize_name(name)
         if not normalized:
             return []
-        # 参数顺序必须跟 SQL 文本里问号出现的顺序一致，所以边拼边攒。
+        # Parameters must be gathered in the order the placeholders appear in
+        # the SQL text, hence building both together.
         params: list[Any] = [normalized]
         alias_clause = ""
         if alias_type:
@@ -227,7 +246,8 @@ class RelationGraph:
         if not rows:
             self.unresolved.append(name)
             return []
-        # 撞名太多就整组丢弃：这名字已经不能当证据了。
+        # Too many collisions and the whole group goes: the name has stopped
+        # being evidence.
         return [] if len(rows) > limit else [Entity.of(row) for row in rows]
 
     def name_matches(
@@ -240,19 +260,22 @@ class RelationGraph:
         min_length: int = DEFAULT_MIN_NAME_LENGTH,
         max_ambiguity: int = DEFAULT_MAX_AMBIGUITY,
     ) -> Iterator[tuple[Entity, Entity, str]]:
-        """成批地把两类实体按名字对起来，产出 `(起点, 终点, 对上的那个名字)`。
+        """Match two kinds of entity by name in bulk, yielding
+        `(source, target, the name that matched)`.
 
-        这是结构性证据最常见的形状：蓝图节点 ↔ C++ 符号、组件 ↔ 类、
-        操作 ↔ 脚本接口……都是"两边名字对得上"。给 `source_alias` /
-        `target_alias` 就改按别名对（比如源用显示名、目标用元数据声明的名字）。
+        This is the commonest shape of structural evidence: a visual node and
+        the symbol behind it, a component and its class, an operator and its
+        scripting interface — all of them "the names line up". Pass
+        `source_alias` / `target_alias` to match on aliases instead, say a
+        display name on one side and a declared name on the other.
 
-        一个起点对上超过 `max_ambiguity` 个终点就整组丢弃——这名字已经不能
-        当证据了。`to_type` 给一组类型时，上限算的是这一组的总数，不是每类
-        各算各的。
+        A source matching more than `max_ambiguity` targets is dropped whole:
+        the name has stopped being evidence. When `to_type` is a group of
+        types the limit counts the group's total, not each type separately.
         """
         to_types = (to_type,) if isinstance(to_type, str) else tuple(to_type)
         params: list[Any] = []
-        # 起点这边按本名还是按某种别名对。
+        # Match the source on its own name, or on one kind of alias.
         if source_alias:
             source_join = (
                 "JOIN entity_aliases sa ON sa.entity_id=s.id AND sa.alias_type=?"
@@ -264,7 +287,8 @@ class RelationGraph:
             source_join = ""
             source_key = "s.normalized_name"
             source_label = "s.canonical_name"
-        # 终点这边同理。别名表必须先 JOIN 进来才能在 ON 里引用它。
+        # Same for the target. The alias table has to be joined before it can
+        # be referenced in the ON clause.
         if target_alias:
             target_join = (
                 f"JOIN entity_aliases ta"
@@ -311,10 +335,12 @@ class RelationGraph:
     def texts(
         self, *entity_types: str, containing: str | None = None
     ) -> Iterator[tuple[Entity, str]]:
-        """遍历实体所在页面的正文，产出 `(实体, 正文)`。
+        """Walk the bodies of the pages entities live on, yielding
+        `(entity, body)`.
 
-        用于"文档自己写着两者有关"这类证据（Unreal 蓝图页的 `Target is X`）。
-        `containing` 先在 SQL 里粗筛，精确边界由领域包自己定。
+        For evidence of the "the documentation says so itself" kind, where a
+        page states its counterpart in prose. `containing` is a coarse SQL
+        filter; the exact boundary is the pack's own business.
         """
         where = ""
         params: list[Any] = []
@@ -346,9 +372,9 @@ def _write(
     now: str,
     replace: bool,
 ) -> bool:
-    """存一条关系。返回 False 表示这条被挡下了。"""
+    """Store one relation. False means it was rejected."""
     if candidate.source.id == candidate.target.id:
-        return False  # 自己指自己不是关系
+        return False  # pointing at itself is not a relation
     if not candidate.relation_type or not candidate.evidence_kind:
         return False
     confidence = min(1.0, max(0.0, float(candidate.confidence)))
@@ -381,7 +407,8 @@ def _write(
 def _official_links(
     connection: sqlite3.Connection, now: str, page_ids: list[int] | None
 ) -> int:
-    """正文里链到另一篇文档 = 一条关系。任何文档站都成立，所以归核心。"""
+    """A link from one document to another is a relation. True of any
+    documentation site, so it belongs to the core."""
     scope = ""
     params: tuple[Any, ...] = ()
     if page_ids is not None:
@@ -391,7 +418,8 @@ def _official_links(
             f" OR page_links.target_page_id IN ({placeholders}))"
         )
         params = (*page_ids, *page_ids)
-    # 先把链接的目标路径解析成页面 id：目标页可能是这一轮才抓回来的。
+    # Resolve target paths to page ids first: a target may have arrived in
+    # this very round.
     resolve_link_targets(connection)
     created = 0
     for row in connection.execute(
@@ -413,8 +441,9 @@ def _official_links(
             ON target_entity.page_id=page_links.target_page_id
         WHERE page_links.evidence_kind='official_link'
           AND source_entity.id != target_entity.id
-          -- 链接是**这一页**指向另一页，不是页面上每个成员各指一次。不挡的话，
-          -- 一页 60 个成员 × 20 条链接会变成 1200 条一模一样的关系。
+          -- The link is from **this page** to another, not one link per
+          -- member on it. Without this guard, 60 members × 20 links become
+          -- 1200 identical relations.
           AND source_entity.member_of_id IS NULL
           AND target_entity.member_of_id IS NULL{scope}
         """,
@@ -446,10 +475,11 @@ def _official_links(
 def _member_links(
     connection: sqlite3.Connection, now: str, page_ids: list[int] | None
 ) -> int:
-    """成员表里列着它 = 它属于这一页讲的东西。
+    """Listed in a member table = it belongs to what the page is about.
 
-    和官方链接一样是抓来的事实，不是推断：类型页自己把这个属性列在
-    `Variables` 里。任何有类型页的文档站都成立，所以归核心。
+    Like an official link, a crawled fact rather than an inference: the page
+    lists the member itself. True of any site with per-type pages, so it
+    belongs to the core.
     """
     scope = ""
     params: tuple[Any, ...] = ()
@@ -479,10 +509,12 @@ def _member_links(
 def rebuild(
     connection: sqlite3.Connection, *, page_ids: list[int] | None = None
 ) -> dict[str, Any]:
-    """建关系。`page_ids=None` 是全量重建，给了就只补这几页。
+    """Build relations. `page_ids=None` rebuilds everything, a list fills in
+    only those pages.
 
-    全量会先按 origin 清掉领域包上一轮推导出来的关系（官方链接是抓来的事实，
-    每轮 `INSERT OR IGNORE` 重放即可）；增量是纯追加，不删任何东西。
+    A full rebuild first deletes by origin what the pack inferred last round;
+    official links are crawled facts and are simply replayed with `INSERT OR
+    IGNORE`. An incremental run only appends, and deletes nothing.
     """
     workspace = active()
     pack = workspace.dataset.knowledge or ""
@@ -512,8 +544,9 @@ def rebuild(
         "member_links": members,
         "domain_relations": accepted,
         "rejected": rejected,
-        # 领域规则想连、但库里没有这个实体的名字。多半是目标页还没抓，
-        # 也可能是来源清单压根没枚举到它（BUG-011）。
+        # Names a domain rule wanted to link to but the library has no entity
+        # for. Usually the target page is unfetched; sometimes the source
+        # never enumerated it into the inventory at all.
         "unresolved_targets": sorted(set(graph.unresolved))[:20],
         "scope": "full" if full else f"{len(page_ids or [])} pages",
     }
@@ -522,19 +555,25 @@ def rebuild(
 def link_target_gaps(
     connection: sqlite3.Connection, *, limit: int = 5
 ) -> dict[str, Any]:
-    """正文链到了别的文档页，但那一页连不上——分清是哪一种连不上。
+    """Links point at other documents that cannot be reached — and which
+    kind of unreachable it is.
 
-    两件事长得像，下一步完全相反：
+    The two look alike but the next step is the opposite:
 
-    * **目标还没抓**：清单里有这一页，只是正文没取。`get` 一下就有了。
-    * **目标不在清单**：来源适配器压根没枚举到它。抓多少次都没用，
-      要改的是适配器的枚举范围。
+    * **Target unfetched**: the inventory has the page, only its body is
+      missing. One `get` and it is there.
+    * **Target not in the inventory**: the source adapter never enumerated
+      it. Fetching will never help; the adapter's enumeration is what has
+      to change.
 
-    以前两种都表现为"这个实体没有关系"，于是排查方向经常整个跑偏。
+    Both used to surface as "this entity has no relations", which sends the
+    investigation the wrong way.
 
-    判断"来源范围漏了"用的是一个不会误伤的条件：**某个目录被别的页面链接
-    到，而清单在这个目录下一页都没有**。零星几条对不上是正常噪音（改版、
-    拼错、非文档页）；整个目录一页都没枚举到，那就是范围划漏了。
+    The test for "the source missed a region" cannot fire by accident: **an
+    area other pages link into, where the inventory holds no page at all**.
+    A few stray misses are ordinary noise (reorganisation, typos,
+    non-document pages); a whole area with nothing enumerated is a gap in
+    the source's scope.
     """
     pending = connection.execute(
         "SELECT COUNT(*) FROM page_links l JOIN pages p ON p.id=l.target_page_id"
@@ -571,10 +610,12 @@ def link_target_gaps(
 def page_link_status(
     connection: sqlite3.Connection, page_ids: list[int], *, limit: int = 5
 ) -> dict[str, list[dict[str, str]]]:
-    """这几页链向的目标现在各是什么状态。
+    """The current state of everything these pages link to.
 
-    "这个实体一条关系都没有"太笼统了。它指向的页面还没抓、还是那些页面
-    压根不在清单里，决定了下一步是补抓还是改来源——所以要分开说。
+    "This entity has no relations" is too coarse. Whether the pages it
+    points at are unfetched or absent from the inventory decides whether
+    the next step is a fetch or a change to the source, so the two are
+    reported apart.
     """
     if not page_ids:
         return {"pending": [], "missing": []}
@@ -621,16 +662,16 @@ def counts(connection: sqlite3.Connection) -> dict[str, int]:
 
 
 def build_cross_index(connection: sqlite3.Connection) -> dict[str, int]:
-    """全量重建，命令行 `cross-index` 的入口。"""
+    """Full rebuild; the entry point behind the `cross-index` command."""
     rebuild(connection)
     return counts(connection)
 
 
 def link_new_pages(connection: sqlite3.Connection, page_ids: list[int]) -> int:
-    """按需抓了几页之后只补这几页的关系。
+    """Fill in relations for pages just fetched on demand.
 
-    走的是和全量完全相同的规则——领域包只写一遍，两条路自动一致。以前增量
-    是另一个函数，只补了三种领域关系里的一种。
+    Runs the very same rules as a full rebuild, so a pack is written once
+    and the two paths cannot drift apart.
     """
     if not page_ids:
         return 0

@@ -1,25 +1,31 @@
-"""回答层：`ask` 和 `related` 的唯一实现。
+"""The answer layer: the single implementation of `ask` and `related`.
 
-命令行和 MCP 都调这里，所以两个入口不可能给出不一样的答案——以前它们各写
-一套"要不要补抓"的判断，然后慢慢分了岔。
+Both the CLI and MCP call in here, so the two entry points cannot give different
+answers — each having its own notion of "should we fetch" is how they drift apart.
 
-这一层的核心职责是**保护上下文**。检索能找到几十条相关内容，但把它们全塞给
-AI 只会让真正的答案被淹没。所以上下文包做四件事：
+This layer's central duty is **protecting the context**. Retrieval can find dozens
+of relevant items, but handing an AI all of them only buries the real answer. So a
+context pack does four things:
 
-1. **硬预算**：累计 token 超过预算就停，绝不"最后一条超一点没关系"。
-2. **同页限额**：一个页面最多贡献 2 块，避免一篇长文吃掉整个预算。
-3. **去重**：内容哈希相同的块只保留一份（文档站大量复制粘贴）。
-4. **一跳关系只给指针**：相关项只给名称、依据、置信度和一条可展开的命令，
-   不直接把正文塞进来——需要时再展开。
+1. **Hard budget**: stop once accumulated tokens exceed it, with no "one last item
+   slightly over is fine".
+2. **Per-page cap**: one page contributes a limited share, so a single long
+   article cannot consume the whole budget.
+3. **Deduplication**: chunks with the same content hash are kept once
+   (documentation sites copy and paste heavily).
+4. **One-hop relations as pointers only**: related items give a name, evidence,
+   confidence and a command to expand, rather than inlining their bodies.
 
-另外两件事同样属于"回答"，所以也在这里：
+Two more things are part of "answering", so they live here too:
 
-- `answer()` 决定要不要去清单里补抓。判断依据不是"本地有没有结果"，而是
-  **"有没有一条结果的页面标题就是用户问的名字"**——否则几条沾边的本地块
-  会一直把真正的目标页挡在门外。
-- 查不到时的**诊断**（`describe_lookup` / `exact_page_hint`）。空结果本身
-  不含信息量：官方没有这一页、清单里有但没抓、名字写得对不上，三件事的
-  下一步完全不同，必须说清楚是哪一种。
+- `answer()` decides whether to fetch from the inventory. The test is not "are
+  there local results" but **"does any result's page title equal the name the user
+  asked for"** — otherwise a few tangentially related local chunks keep the real
+  target page permanently out of reach.
+- **Diagnosis** when nothing is found (`describe_lookup` / `exact_page_hint`). An
+  empty result carries no information: the site not having the page, the inventory
+  having it unfetched, and the name being spelled differently all demand different
+  next steps, so which one it is must be stated.
 """
 
 from __future__ import annotations
@@ -43,19 +49,21 @@ from .search import page_chunks, query_names, search_chunks
 from .text import SCRIPT_NAMES, heading_anchor, script_mismatch, script_of_language
 from . import versions
 
-# 一个页面保底给几块，以及它最多能占预算的多少。
+# How many chunks a page is guaranteed, and the largest budget share it may take.
 #
-# 要防的是"一篇长文吃掉整个预算"，而那是**预算占比**的事。原来写死"每页最多
-# 2 块"，预算一变大就反过来伤人：预算 6000 说的正是"我要通读这一页"，却仍然
-# 只给 2 块，剩下的预算只能拿别的页面来凑——而那些内容分数明明更低。实测问
-# co_yield，7 条 33～37 分的协程正文被跳过，让位给 24～33 分的缩略语词表和
-# 编译器厂商兼容性列表（BUG-018）。
+# What needs preventing is "one long article eats the whole budget", and that is a
+# matter of **budget share**. A hardcoded "2 chunks per page" backfires as the
+# budget grows: a budget of 6000 is precisely someone saying "I want to read this
+# page through", yet it would still get 2 chunks, leaving the remaining budget to
+# be filled from other pages whose content scores lower.
 #
-# 保底那 2 块不能省：预算小的时候按占比算装不下第二块，那会比原来更差。
+# The guaranteed 2 cannot be dropped: with a small budget, a share-based limit
+# cannot fit a second chunk, which would be worse than before.
 MIN_CHUNKS_PER_PAGE = 2
 MAX_PAGE_BUDGET_RATIO = 0.6
 PRIMARY_BUDGET_RATIO = 0.8
-# 低于这个置信度的关系不进上下文：宁可不给，也不能让 AI 把猜测当官方对应。
+# Relations below this confidence stay out of the context: better to omit one than
+# to let an AI present a guess as an official correspondence.
 MIN_RELATION_CONFIDENCE = 0.8
 
 
@@ -88,11 +96,12 @@ def _select_primary(
             seen_hashes.add(content_hash)
         used += tokens
     if not selected and candidates:
-        # 最相关的一条本身就超预算：截断，而不是整个放弃或整块塞进去。
+        # The single most relevant item exceeds the budget by itself: truncate it,
+        # rather than dropping it entirely or forcing the whole thing in.
         head = dict(candidates[0])
         keep_chars = max(200, budget * 4)
         if len(head["content_md"]) > keep_chars:
-            head["content_md"] = head["content_md"][:keep_chars] + "\n\n…（已按预算截断）"
+            head["content_md"] = head["content_md"][:keep_chars] + "\n\n... (truncated to fit the budget)"
             head["truncated"] = True
         head["token_estimate"] = min(int(head["token_estimate"] or 1), budget)
         selected.append(head)
@@ -106,7 +115,8 @@ def _one_hop_relations(
     if not chunk_ids:
         return []
     placeholders = ",".join("?" for _ in chunk_ids)
-    # 主内容自己的实体不算"相关"，否则会看到"X 相关的是 X"。
+    # A primary item's own entity does not count as "related", or the output would
+    # say "X is related to X".
     own_entity_ids = {
         row["entity_id"]
         for row in connection.execute(
@@ -153,7 +163,7 @@ def _one_hop_relations(
     for row in rows:
         if row["entity_id"] in seen:
             continue
-        # route_depth <= 1 是 /API、/BlueprintAPI 这种总目录页，指过去没有意义。
+        # route_depth <= 1 is a top-level index page; pointing at one is useless.
         if (row["route_depth"] or 9) <= 1:
             continue
         seen.add(row["entity_id"])
@@ -181,10 +191,11 @@ def _one_hop_relations(
 def _named_pages(
     connection: sqlite3.Connection, query: str, category: str | None
 ) -> list[sqlite3.Row]:
-    """查询有没有直接指名页面——贴了官方地址，或清单里的路径。
+    """Whether the query names a page outright — an official URL, or an inventory path.
 
-    这比任何名字都确定，所以它决定的是"答案出自哪一页"，不是"哪一页排前面"。
-    地址认不认得出来由来源适配器回答（见 `ondemand.target_paths`）。
+    That is more certain than any name, so it decides *which page the answer comes
+    from*, not merely which page ranks first. Whether a URL is recognizable is the
+    source adapter's answer (see `ondemand.target_paths`).
     """
     paths = target_paths(query)
     if not paths:
@@ -198,23 +209,24 @@ def _named_pages(
 
 
 def _chunk_anchor(chunk: dict[str, Any]) -> str:
-    """这一块自己的锚点，拍平成和 fragment 一个口径。没有锚点就是空串。"""
+    """This chunk's own anchor, flattened the same way a fragment is. Empty if none."""
     url = chunk.get("source_url") or ""
     return normalize_name(url.split("#", 1)[1]) if "#" in url else ""
 
 
 def _ancestor_scope(chunks: list[dict[str, Any]], fragment: str) -> str:
-    """fragment 指着一个自己没有正文的父标题时，用 `heading_path` 把它找回来。
+    """Recover a fragment pointing at a body-less parent heading via `heading_path`.
 
-    切小节时只留下有正文的那些，光领着子标题、自己不写正文的父标题就没了。
-    cppreference 的 C++20 页正是这样：`## New library features` 底下直接是
-    `### New headers`，官方页面上明明有 `#New_library_features` 这个锚点，
-    库里却没有任何一块认领它，用户贴这个地址过来只会被告知"本页没有对应的
-    小节"（BUG-023）。
+    Section splitting keeps only sections that have a body, so a parent heading
+    which merely introduces subheadings and writes nothing itself disappears. A page
+    whose `## Overview` is followed straight by `### Details` is exactly this: the
+    official page has an `#Overview` anchor, no chunk in the library claims it, and
+    pasting that URL only gets the user told the page has no matching section.
 
-    但它并没有真的丢——子小节把它原样带在 `heading_path` 里。按锚点那条同样
-    的拍平规则比一遍路径上的每一段，就能把这一节的范围还回来。这样既不必为
-    一个空标题造一条没有正文的记录，也不用重建已经建好的库。
+    But it was not truly lost — the child sections carry it verbatim in their
+    `heading_path`. Applying the same flattening rule used for anchors to each
+    segment of that path recovers the section's extent. That avoids both inventing a
+    body-less record for an empty heading and rebuilding an already-built library.
     """
     for chunk in chunks:
         segments = chunk["heading_path"].split(" > ")
@@ -227,17 +239,19 @@ def _ancestor_scope(chunks: list[dict[str, Any]], fragment: str) -> str:
 def _fragment_section(
     chunks: list[dict[str, Any]], fragment: str
 ) -> tuple[list[dict[str, Any]], str]:
-    """挑出 fragment 指的那一节，返回 (这一节的块, 小节名)。
+    """Select the section a fragment points at; returns (its chunks, section name).
 
-    两步缺一不可：
+    Both steps are required:
 
-    - **锚点认出是哪一节。** 锚点由标题拍平而来，官方 href 拍平之后正好对上。
-      认不出来时再退一步，看这个锚点是不是某一段 `heading_path`——父标题自己
-      没有正文时，库里就只剩这一份记录（`_ancestor_scope`）。
-    - **`heading_path` 划定这一节到哪儿为止。** 一节里可以有好几块，其中带
-      自己小标题的那几块锚点并不等于这一节的锚点——Roblox 的
-      `CoreUISafeInsets` 就挂在 `Screen insets` 底下，只按锚点匹配会只给一块，
-      把用户点进这一节真正要读的内容留在外面。
+    - **The anchor identifies which section.** Anchors come from flattening a
+      heading, and an official href flattens to exactly the same thing. Failing
+      that, check whether the anchor matches a segment of some `heading_path` — when
+      a parent heading has no body of its own, that is the only record left of it
+      (`_ancestor_scope`).
+    - **`heading_path` bounds where the section ends.** A section may hold several
+      chunks, and those carrying a subheading of their own have an anchor that is
+      not the section's anchor. Matching by anchor alone returns one chunk and
+      leaves out what the user clicked through to read.
     """
     roots = [chunk for chunk in chunks if _chunk_anchor(chunk) == fragment]
     if roots:
@@ -269,9 +283,11 @@ def build_context_pack(
     version_intent: versions.Intent | None = None,
 ) -> dict[str, Any]:
     named = _named_pages(connection, query, category)
-    # 查询里贴了官方地址或清单路径，等于已经把页面指出来了。这时再拿整串地址
-    # 去做全文检索是本末倒置：地址里的 `documentation`、`language` 这类词会让
-    # 总目录页稳赢，被指名的那一页反而排在后面。有唯一标题就改用标题当检索词。
+    # A query carrying an official URL or inventory path has already named the page.
+    # Running full-text search over the whole URL then gets it backwards: words in
+    # it such as `documentation` or `language` guarantee a win for the top-level
+    # index page while the named page ranks below. With a unique title, search on
+    # the title instead.
     retrieval_query = named[0]["title"] if len(named) == 1 and named[0]["title"] else query
 
     candidates = search_chunks(
@@ -281,12 +297,15 @@ def build_context_pack(
     if named:
         named_ids = {row["id"] for row in named}
         candidates = [row for row in candidates if row["page_id"] in named_ids]
-        # 指名到小节时整页读回来自己挑：这时候用户已经把话说到最细了，
-        # 再让全文检索去撞只会把无关小节排前面。
+        # Named down to a section: read the whole page back and pick from it. The
+        # user has been as specific as possible, and letting full-text search
+        # compete only ranks unrelated sections first.
         fragment = target_fragment(query)
-        # 检索没把它排进来（标题为空、或页内用词与标题不搭）就直接按页读。
-        # 但**绝不**拿别的页面顶上：那会让 answer() 以为已经有答案，于是该
-        # 补抓的那一页永远抓不到，用户拿到"答非所问但看着像答案"的东西。
+        # Read by page when retrieval did not surface it (empty title, or on-page
+        # wording unlike the title). But **never** substitute another page: that
+        # would make answer() believe an answer exists, so the page that should be
+        # fetched never is, and the user gets something that looks like an answer to
+        # a different question.
         if fragment or not candidates:
             candidates = page_chunks(connection, sorted(named_ids), limit=60)
         if fragment:
@@ -297,13 +316,15 @@ def build_context_pack(
                 "section": section_name or None,
             }
             if section:
-                # 指名了小节，答案就到这一节为止。以前这里把本页其余内容也
-                # 跟在后面当上下文，靠"每页最多 2 块"顺手截断——那是把
-                # BUG-014 的保证挂在一个不相干的常量上，同页限额一放宽，
-                # 整页内容就又回来了。限定条件由它自己这一层写死。
+                # A named section bounds the answer to that section. Carrying the
+                # rest of the page along as context and relying on the per-page cap
+                # to trim it would hang this guarantee on an unrelated constant, so
+                # relaxing that cap would bring the whole page back. The limit is
+                # enforced at this level instead.
                 candidates = section
-    # 版本意图在裁剪预算之前生效：先决定"哪些内容对这个版本算数"，再决定
-    # "预算内放得下哪几条"。反过来的话，被排除的内容已经占掉了名额。
+    # Version intent applies before the budget is trimmed: first decide what counts
+    # for this version, then what fits. The other way round, excluded content has
+    # already consumed slots.
     candidates, version_report = versions.apply(
         connection, candidates, version_intent
     )
@@ -323,8 +344,9 @@ def build_context_pack(
             (normalized, normalized, category, category),
         )
     }
-    # 名字精确命中时，只看这个实体自己的页面——不要把同目录的兄弟函数一起带进来。
-    # 已经按指名页面限定过就不再动：那一档比名字更确定。
+    # On an exact name hit, look only at that entity's own page — do not drag in
+    # sibling functions from the same directory. Skipped when already limited to a
+    # named page: that is more certain than a name.
     scoped = [row for row in candidates if row["page_id"] in exact_page_ids]
     if scoped and not named:
         candidates = scoped
@@ -354,25 +376,28 @@ def build_context_pack(
             "relations_are_pointers_only": True,
             "large_cpp_member_indexes": "ranked down",
             "exact_entity_scope": bool(scoped),
-            # 答案被限定在查询点名的那一页上。调用方据此可以放心转述：
-            # 这不是"检索觉得它最像"，是用户自己指的。
+            # The answer is bounded to the page the query named. A caller can relay
+            # it confidently: this is not "retrieval thought it looked closest", it
+            # is what the user pointed at.
             "named_page_scope": bool(named),
         },
     }
     if version_report:
         pack["version_intent"] = version_report
-    # 和版本条件同一个道理：限定条件用了就得说出来。悄悄按小节筛过、或者
-    # 认不出那一节而静默退回页面概览，都会让调用方以为看到的就是全部。
+    # Same principle as the version conditions: a limit applied must be stated.
+    # Filtering to a section silently, or failing to identify it and quietly
+    # returning a page overview, both leave the caller thinking they saw everything.
     if fragment_report:
         pack["fragment_intent"] = fragment_report
     return pack
 
 
 def _has_exact_local_hit(pack: dict[str, Any], query: str) -> bool:
-    """本地结果里有没有一条"页面标题就是用户问的那个名字"。
+    """Whether any local result has a page title equal to the name asked for.
 
-    有，才说明真的找到了；只是若干页面顺带提到过这个词，不算。这条判断决定
-    要不要去清单里补抓——否则一堆弱相关的本地块会把真正的目标页挡在门外。
+    Only that means it was really found; several pages merely mentioning the word
+    does not. This test decides whether to fetch from the inventory — otherwise a
+    pile of weakly related local chunks keeps the real target page out.
     """
     wanted = set(query_names(query))
     return any(
@@ -392,7 +417,7 @@ def answer(
     quiet: bool = False,
     version_intent: versions.Intent | None = None,
 ) -> dict[str, Any]:
-    """`ask` 的唯一实现：命令行和 MCP 都走这里，两边结果不可能不一致。"""
+    """The single implementation of `ask`, shared by the CLI and MCP."""
 
     def build() -> dict[str, Any]:
         return build_context_pack(
@@ -405,8 +430,9 @@ def answer(
 
     pack = build()
     if allow_fetch:
-        # 指名的那一页已经有正文了，就是精确命中——不必再按名字去捞一批
-        # 名字相近的页面。指名了但正文还空着，则**必须**走补抓那条路。
+        # A named page that already has a body is an exact hit — no need to gather
+        # pages with similar names. Named but still empty **must** take the fetch
+        # path.
         named_and_local = (
             pack["retrieval_policy"]["named_page_scope"]
             and bool(pack["primary_knowledge"])
@@ -416,7 +442,8 @@ def answer(
             connection, query, category
         )
         if needs_fetch:
-            # 已经有确切命中时只补同名的那一页，不顺带把名字相近的一起拉进来。
+            # With an exact hit already, fetch only the same-named page rather than
+            # pulling in everything with a similar name.
             fetched = ensure_available(
                 connection,
                 query,
@@ -452,7 +479,8 @@ def _subject_entities(
                 (chunk_id,),
             )
         )
-    # 跨两张表的 OR 会让 SQLite 弃用索引；拆成 UNION，两边各走各的索引。
+    # An OR across two tables makes SQLite abandon its indexes; split into a UNION
+    # so each branch uses its own.
     rows: list[sqlite3.Row] = []
     seen: set[int] = set()
     for normalized in query_names(subject):
@@ -479,11 +507,13 @@ def _subject_entities(
 def related_payload(
     connection: sqlite3.Connection, subject: str
 ) -> dict[str, Any]:
-    """一跳交叉关系，带明确状态。
+    """One-hop cross relations, with an explicit status.
 
-    以前这里返回裸数组：没匹配到实体、实体存在但没关系、页面在清单里还没抓，
-    三件事都是一个 `[]`，调用方根本没法判断下一步该改写查询、补抓、还是
-    重建关系。所以状态必须写出来。
+    A bare array cannot express the difference between no entity matched, the entity
+    exists but has no relations, and the target page is in the inventory but
+    unfetched. All three would be one `[]`, leaving the caller unable to tell
+    whether to rewrite the query, fetch, or rebuild relations. So the status is
+    stated.
     """
     entities = []
     for entity in _subject_entities(connection, subject):
@@ -532,8 +562,9 @@ def related_payload(
             }
         )
     if not entities:
-        # K 编号是知识块 ID，不是页面名字——查不到时那是"编号不存在"，
-        # 跟清单里有没有这一页毫无关系，不能套用 inventory_lookup 的诊断。
+        # A K id identifies a chunk, not a page name — failing to find one means
+        # "no such id", which has nothing to do with whether the inventory holds a
+        # page, so inventory_lookup's diagnosis does not apply.
         status = (
             "knowledge_id_not_found"
             if KNOWLEDGE_ID_RE.fullmatch(subject)
@@ -551,20 +582,23 @@ def related_payload(
     }
     if status == "entity_not_found":
         result["lookup"] = inventory_lookup(connection, subject)
-        # "官方没有这一页"和"我们的来源没枚举到这一页"要分开：前者到此为止，
-        # 后者是我们自己的覆盖范围问题，改查询词永远解决不了。
+        # Keep "the site does not have this page" apart from "our source never
+        # enumerated it": the first ends there, the second is our own coverage
+        # problem, and no amount of rewording the query will ever fix it.
         if result["lookup"].get("linked_targets"):
             result["status"] = status = "target_outside_inventory"
         result["next_steps"] = describe_lookup(result["lookup"])
     elif status == "knowledge_id_not_found":
         result["next_steps"] = [
-            f"{subject} 不是本地存在的知识块编号。K 编号只能从 search / ask 的"
-            "结果里读到，不能凭空猜或复用旧结果——库重跑过一次编号就会变。"
-            '先用 python -m docatlas search "<关键词>" 拿到当前有效的 K 编号。',
+            f"{subject} is not a knowledge id present locally. K ids can only be "
+            "read from search / ask results, never guessed or reused from older "
+            "output — a rebuild changes them. Run "
+            'python -m docatlas search "<keywords>" to get a currently valid one.',
         ]
     elif status == "entity_found_but_no_relations":
-        # 笼统说一句"没有关系"没法照着做。它指向的页面还没抓、还是那些页面
-        # 压根不在清单里，下一步完全不同，所以直接把目标状态查出来说。
+        # A blanket "no relations" is not actionable. Whether the pages it points at
+        # are unfetched, or absent from the inventory entirely, implies completely
+        # different next steps, so look the target status up and say which.
         targets = page_link_status(
             connection, [item["entity"]["page_id"] for item in entities]
         )
@@ -572,160 +606,178 @@ def related_payload(
         steps: list[str] = []
         if targets["pending"]:
             steps.append(
-                f"这一页链向 {len(targets['pending'])} 个清单里已有、但正文还没抓的页面。"
-                "取回来关系就会出现："
+                f"This page links to {len(targets['pending'])} page(s) the inventory "
+                "has but whose bodies are not fetched. Retrieve them and the "
+                "relations appear:"
             )
             steps.extend(f'  python -m docatlas get "{t["path"]}"' for t in targets["pending"])
         if targets["missing"]:
             steps.append(
-                f"另有 {len(targets['missing'])} 个链接目标不在全站清单里"
-                "——官方有，是来源适配器没有枚举到，抓多少次都不会有："
+                f"A further {len(targets['missing'])} link target(s) are absent from "
+                "the inventory — the site has them, the source adapter never "
+                "enumerated them, and no amount of fetching will produce them:"
             )
             steps.extend(f"  {t['url']}" for t in targets["missing"])
         if not steps:
             steps = [
-                "这个实体在库里，它指向的页面也都抓过了，只是这一页确实不指向别处。",
-                "换个更具体的名字查，或者用 search 看看它出现在哪些页面里。",
+                "This entity is in the library and the pages it points at are all "
+                "fetched; it simply does not point anywhere else.",
+                "Try a more specific name, or use search to see which pages mention it.",
             ]
         result["next_steps"] = steps
     return result
 
 
 def describe_lookup(lookup: dict[str, Any]) -> list[str]:
-    """把"清单知道什么"翻译成人和 AI 都能照着做的下一步。
+    """Turn "what the inventory knows" into next steps a human or AI can act on.
 
-    空结果本身不含信息量：官方没有这一页、清单里有但没抓、名字写得对不上，
-    三件事的下一步完全不同，必须说清楚是哪一种。
+    An empty result carries no information: the site not having the page, the
+    inventory having it unfetched, and the name being spelled differently all demand
+    different next steps, so which one it is must be stated.
     """
     workspace = active()
     pending = lookup["pending_pages"]
     crawled = lookup["crawled_pages"]
     if pending:
-        lines = [f"本地没有正文，但全站清单里有 {len(pending)} 个页面对得上："]
+        lines = [f"No local body, but {len(pending)} inventory page(s) match:"]
         for page in pending:
             label = workspace.category_labels.get(page["category"], page["category"])
             lines.append(f"  [{label}] {page['path']}")
-        lines.append(f'取回来再查：python -m docatlas get "{lookup["query"]}"')
+        lines.append(f'Retrieve then query: python -m docatlas get "{lookup["query"]}"')
         return lines
     if crawled:
-        # 官方把这一页撤掉、跳到别处时，抓回来的是个没有正文的空壳。这时
-        # "换个说法再试"永远不可能成立——内容已经不在那个地址上了。
-        # 注意跳转目标未必是"搬家后的新页"：Epic 撤掉
-        # `…/GameFramework/AActor` 时是跳到 5.8 文档首页，照着它去查只会
-        # 得到首页。所以这里只如实报出跳转，不替用户跟过去。
+        # When a site withdraws a page and redirects elsewhere, what comes back is an
+        # empty shell with no body. "Rephrase and retry" can never work then: the
+        # content is no longer at that URL. Note the redirect target is not
+        # necessarily the page's new home — a withdrawn page may redirect to the
+        # documentation front page, and following it would only yield that. So this
+        # reports the redirect faithfully and does not follow it on the user's behalf.
         moved = [page for page in crawled if page.get("redirect_url")]
         live = [page for page in crawled if not page.get("redirect_url")]
         if moved:
             lines = [
-                f"这 {len(moved)} 个页面官方做了重定向，抓回来没有正文——"
-                "内容已经不在原地址上了，换查询词不会有结果："
+                f"{len(moved)} page(s) are redirected by the site and came back with "
+                "no body — the content is no longer at the original URL, and "
+                "rewording the query will not help:"
             ]
             lines.extend(f"  {page['path']} → {page['redirect_url']}" for page in moved)
             if live:
-                # 同名页面还活着，多半就是官方搬家后的新位置——但那是推断，
-                # 所以摆出来让人自己确认，不直接拿它当答案顶上去。
-                lines.append("库里另有同名页面还在，很可能是搬家后的位置：")
+                # A live page with the same name is probably where the site moved it
+                # — but that is inference, so it is offered for confirmation rather
+                # than substituted in as the answer.
+                lines.append("The library holds another live page of the same name, likely its new home:")
                 lines.extend(f"  {page['path']}" for page in live)
                 lines.append(f'  python -m docatlas ask "{live[0]["path"]}"')
             else:
-                lines.append("按跳转后的官方页面重新确定要查的名字，再查一次。")
+                lines.append("Work out the name to query from the redirected official page, then query again.")
             return lines
         return [
-            f"有 {len(crawled)} 个同名页面已经抓过了，但没有知识块命中这次的查询词。",
-            f'换个说法再试，或直接读那一页：python -m docatlas ask "{lookup["query"]}"',
+            f"{len(crawled)} same-named page(s) are already fetched, but no chunk matched these keywords.",
+            f'Reword and retry, or read the page directly: python -m docatlas ask "{lookup["query"]}"',
         ]
     if weak := lookup.get("weak_candidates"):
-        # "线索不够所以没敢抓"和"确实没有这一页"是两回事。把候选摆出来，
-        # 让人自己决定要不要取，而不是一句"官方没有"把路堵死。
+        # "Too little to go on, so nothing was fetched" and "there really is no such
+        # page" are different. Show the candidates and let the reader decide, rather
+        # than closing the road with "the site does not have it".
         lines = [
-            f"没有把握到底该取哪一页，所以这次没有自动补抓。清单里这几页沾边：",
+            f"Not confident which page to retrieve, so nothing was fetched automatically. These inventory pages are close:",
         ]
         for page in weak:
             label = workspace.category_labels.get(page["category"], page["category"])
             lines.append(f"  [{label}] {page['path']}")
         lines.append(
-            "看着对就直接取："
-            f'python -m docatlas get "{lookup["query"]}"；'
-            "或者换成页面的官方名字再查一次，那样就能自动补抓了。"
+            "If one looks right, fetch it: "
+            f'python -m docatlas get "{lookup["query"]}"; '
+            "or query again using the page's official name, which fetches automatically."
         )
         return lines
     if linked := lookup.get("linked_targets"):
-        # 已抓页面链过去，清单里却没有——那不是"官方没有"，是我们没枚举到。
-        # 说成"官方确实没有这一页"会让人一直去改查询词，白费力气。
+        # A fetched page links there and the inventory lacks it — that is not "the
+        # site does not have it", it is us not enumerating it. Calling it absent
+        # sends the reader rewriting the query forever, for nothing.
         lines = [
-            f"本地已有的页面里，有正文链接指向「{lookup['query']}」，"
-            "但这一页不在全站清单里——官方有，是我们的来源没有枚举到它。",
+            f"Pages already held locally contain body links to \u2018{lookup['query']}\u2019, "
+            "but that page is absent from the inventory — the site has it, our source "
+            "never enumerated it.",
         ]
         lines.extend(f"  {item['url']}" for item in linked)
         lines.append(
-            "先直接打开上面的官方地址；要让它进库，得扩大来源适配器的枚举范围"
-            "（见 WORKFLOWS.md 流程 B），重抓多少次都不会有。"
+            "Open the official URL above directly. Getting it into the library means "
+            "widening the source adapter's enumeration scope (see WORKFLOWS.md); no "
+            "amount of refetching will produce it."
         )
         return lines
     if foreign := script_mismatch(lookup["query"], workspace.language):
-        # 用另一套文字提问，在单语库里必然一无所获——这不是"官方没有这一页"，
-        # 而是"这个库里没有这种文字的正文"。两句话指向完全不同的下一步。
+        # Asking in one script of a single-language library can only find nothing —
+        # that is not "the site lacks this page" but "this library holds no text in
+        # that script". The two point at completely different next steps.
         return [
-            f"这个库的正文是 {workspace.language}"
-            f"（{SCRIPT_NAMES.get(script_of_language(workspace.language), '')}），"
-            f"而这条查询是用{SCRIPT_NAMES.get(foreign, foreign)}写的，"
-            "所以必然一条都对不上——不是官方没有这一页。",
-            f"把关键词换成原文（{workspace.language}）里的官方写法再查一次，"
-            "比如页面标题、函数名、菜单项的原词。专有名词和代码符号一般不翻译，"
-            "原样写就行。",
+            f"This library's text is in {workspace.language}"
+            f" ({SCRIPT_NAMES.get(script_of_language(workspace.language), '')}), "
+            f"while this query is written in {SCRIPT_NAMES.get(foreign, foreign)}, "
+            "so nothing can possibly match — this is not the site lacking the page.",
+            f"Rephrase the keywords in the official spelling used in {workspace.language} "
+            "and query again: page titles, function names, menu items as written. "
+            "Proper nouns and code symbols are usually left untranslated.",
         ]
-    # 到这里是真的什么线索都没有了，但"没有"的边界只到本数据集为止。
-    # DocAtlas 看得见的只有自己的清单，而清单的范围是数据集声明的那几个目录——
-    # 说成"官方文档确实没有这一页"是拿看不见的东西下结论。代价很实在：
-    # Blender 库没声明 editors/ 目录，于是 `Shader Editor` 查不到，系统却回答
-    # 官方没有这一页，用户只好一遍遍改查询词，而那一页在官网上活得好好的
-    # （BUG-011）。改查询词永远解决不了收录范围的问题。
-    scope = "、".join(
+    # Past here there truly is no clue left, but the boundary of "nothing" stops at
+    # this dataset. DocAtlas sees only its own inventory, whose scope is the
+    # directories the dataset declared, so saying "the official docs do not have this
+    # page" draws a conclusion about something it cannot see. The cost is real: a
+    # dataset that never declared a directory cannot find pages living under it, and
+    # answering "the site does not have it" sends the user rewording the query over
+    # and over while the page sits perfectly well on the official site. Rewording a
+    # query can never fix a coverage-scope problem.
+    scope = ", ".join(
         workspace.category_labels.get(key, key)
         for key in workspace.dataset.query_categories
     )
     return [
-        "没有找到结果，本数据集的清单里也没有对得上的页面。",
-        f"这个库的收录范围是：{scope or '（未声明分类）'}。"
-        "DocAtlas 只看得见自己的清单，不能据此断定官网没有这一页。",
-        f"换成原文（{workspace.language}）里的官方写法再试一次；"
-        "知道确切地址就直接把官方 URL 当查询词传进来，那能直接定位到页面。"
-        "确认官网有、而这里查不到，那是收录范围的问题，"
-        "得扩大来源适配器或数据集声明的目录（见 WORKFLOWS.md 流程 B）。",
+        "No results, and no inventory page in this dataset matches either.",
+        f"This library's coverage is: {scope or '(no categories declared)'}. "
+        "DocAtlas sees only its own inventory and cannot conclude from that the site "
+        "lacks the page.",
+        f"Try again in the official spelling used in {workspace.language}; if you know "
+        "the exact address, pass the official URL as the query, which locates the page "
+        "directly. If the site has it and this does not, that is a coverage problem, "
+        "and the source adapter or the dataset's declared directories need widening "
+        "(see WORKFLOWS.md).",
     ]
 
 
 def exact_page_hint(
     connection: sqlite3.Connection, query: str, category: str | None = None
 ) -> list[str]:
-    """有结果，但清单里还躺着一页正好叫这个名字——必须说出来。
+    """There are results, yet an inventory page is named exactly this — say so.
 
-    否则用户看到的是一串沾边的页面，完全不知道真正对得上的那一页就在清单里、
-    只差一条命令。"找不到"和"还没取回来"是两回事。
+    Otherwise the user sees a list of tangential pages with no idea the real match is
+    sitting in the inventory, one command away. "Not found" and "not retrieved yet"
+    are different things.
     """
     missing = missing_exact_pages(connection, query, category)
     if not missing:
         return []
     return [
-        f"提示：全站清单里还有 {missing} 个页面的名字与「{query}」完全一致，"
-        "但正文尚未抓取，所以不在上面的结果里。",
-        f'取回来：python -m docatlas get "{query}"（或直接用 ask，它会自动补抓）',
+        f"Hint: {missing} more page(s) in the inventory are named exactly '{query}' "
+        "but their bodies are not fetched, so they are absent from the results above.",
+        f'Retrieve them: python -m docatlas get "{query}" (or just use ask, which fetches)',
     ]
 
 
 def _render_empty(pack: dict[str, Any]) -> list[str]:
-    """没命中时，把"清单知道什么"说清楚，而不是丢一句"没找到"。"""
+    """On a miss, spell out what the inventory knows instead of just "not found"."""
     workspace = active()
     lookup = pack.get("lookup") or {}
     pending = lookup.get("pending_pages") or []
     if not pending:
-        # 诊断已经统一在 describe_lookup 里：异语言、线索不够、来源没枚举到、
-        # 确实没有——四种"没有"各有各的下一步，这里不该再写一份会走岔的副本。
-        return ["本地库里没有命中。", "", *describe_lookup(lookup or {
+        # Diagnosis is unified in describe_lookup: a foreign script, too little to go
+        # on, never enumerated by the source, and genuinely absent each have their own
+        # next step, and a second copy here would drift from it.
+        return ["No match in the local library.", "", *describe_lookup(lookup or {
             "query": pack["query"], "pending_pages": [], "crawled_pages": [],
         })]
     lines = [
-        f"本地还没有这一页的正文，但全站清单里有 {len(pending)} 个页面对得上：",
+        f"No local body for this page yet, but {len(pending)} inventory page(s) match:",
         "",
     ]
     for page in pending:
@@ -734,7 +786,7 @@ def _render_empty(pack: dict[str, Any]) -> list[str]:
     lines.extend(
         [
             "",
-            "本次没有补抓（可能用了 --no-fetch，或抓取失败）。取回来再问一次即可：",
+            "Nothing was fetched this time (perhaps --no-fetch, or the fetch failed). Retrieve and ask again:",
             "",
             f'    python -m docatlas get "{pack["query"]}"',
         ]
@@ -743,37 +795,39 @@ def _render_empty(pack: dict[str, Any]) -> list[str]:
 
 
 def describe_fragment(intent: dict[str, Any]) -> str:
-    """一句话说清 `#小节` 起没起作用。认不出来时尤其要说。
+    """One line on whether a `#fragment` took effect. Especially when it did not.
 
-    静默退回页面概览的话，用户看到的是一个像模像样的答案，完全不知道自己
-    指的那一节根本没被用上（BUG-014）。
+    Quietly falling back to a page overview shows the user a plausible-looking answer
+    with no hint that the section they named was never used.
     """
     if not intent:
         return ""
     if intent.get("matched"):
-        return f"已按地址里的 `#{intent['fragment']}` 限定到小节「{intent['section']}」。"
+        return f"Limited by the `#{intent['fragment']}` in the URL to section \u2018{intent['section']}\u2019."
     return (
-        f"注意：地址里的 `#{intent['fragment']}` 在本页没有对应的小节，"
-        "下面是整页的内容。小节名可能已经改过，按页内实际标题再查一次更准。"
+        f"Note: the `#{intent['fragment']}` in the URL matches no section on this "
+        "page, so the whole page follows. The section may have been renamed; query "
+        "again using a heading that actually appears on the page."
     )
 
 
 def render_context_markdown(pack: dict[str, Any]) -> str:
-    """把上下文包渲染成给 AI 读的 Markdown。
+    """Render a context pack as Markdown for an AI to read.
 
-    同样的内容，Markdown 比 JSON 省 30%~40% token——JSON 的引号、转义和字段名
-    全都要花钱，而且 AI 读起来还更费劲。
+    For the same content, Markdown costs 30-40% fewer tokens than JSON — quotes,
+    escaping and field names all cost money, and an AI reads it less easily too.
     """
     workspace = active()
     lines: list[str] = [
-        f"# 文档检索：{pack['query']}",
+        f"# Documentation search: {pack['query']}",
         "",
-        f"来源：《{workspace.name}》（{pack['product']} {pack['version']}）。"
-        f"预算 {pack['token_budget']:,} tokens，本次约用 {pack['estimated_tokens']:,}，"
-        f"共 {len(pack['primary_knowledge'])} 条知识块。",
+        f"Source: {workspace.name} ({pack['product']} {pack['version']}). "
+        f"Budget {pack['token_budget']:,} tokens, about {pack['estimated_tokens']:,} used, "
+        f"{len(pack['primary_knowledge'])} chunk(s).",
         "",
     ]
-    # 按版本筛过就必须说出来。悄悄少几条，比排错更难被发现。
+    # A version filter must be stated. Silently dropping a few is harder to notice
+    # than an outright error.
     if lines_about_version := versions.describe(pack.get("version_intent") or {}):
         lines.extend([*lines_about_version, ""])
     if line_about_fragment := describe_fragment(pack.get("fragment_intent") or {}):
@@ -785,7 +839,7 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
     for index, item in enumerate(pack["primary_knowledge"], 1):
         label = workspace.category_labels.get(item["category"], item["category"])
         lines.append(
-            f"## {index}. {item['heading_path']}　"
+            f"## {index}. {item['heading_path']}  "
             f"[{label} · {item['knowledge_type']} · K{item['id']}]"
         )
         lines.append("")
@@ -795,7 +849,7 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
     if pack["one_hop_relations"]:
         lines.append("---")
         lines.append("")
-        lines.append("## 交叉关系（只给指针，正文未展开）")
+        lines.append("## Cross relations (pointers only, bodies not expanded)")
         lines.append("")
         for relation in pack["one_hop_relations"]:
             kind = workspace.relation_labels.get(
@@ -805,14 +859,14 @@ def render_context_markdown(pack: dict[str, Any]) -> str:
                 relation["evidence_kind"], relation["evidence_kind"]
             )
             expand = (
-                f"　展开：`show K{relation['expand_chunk_id']}`"
+                f"  expand: `show K{relation['expand_chunk_id']}`"
                 if relation["expand_chunk_id"]
                 else ""
             )
             lines.append(
-                f"- **{kind}**：{relation['canonical_name']} "
-                f"（{relation['entity_type']}）　依据：{evidence}　"
-                f"置信度 {relation['confidence']:.2f}{expand}"
+                f"- **{kind}**: {relation['canonical_name']} "
+                f"({relation['entity_type']})  evidence: {evidence}  "
+                f"confidence {relation['confidence']:.2f}{expand}"
             )
             lines.append(f"  {relation['source_url']}")
         lines.append("")

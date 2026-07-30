@@ -1,17 +1,19 @@
-"""检索层。
+"""The retrieval layer.
 
-一次查询按"从最准到最广"分五档执行，然后把各档结果合并排序：
+A query runs in five stages from most precise to broadest, and the results are
+then merged and ranked:
 
-| 档位 | 做法 | 适合的提问 |
+| Stage | How | Suits |
 |---|---|---|
-| A 实体 | 名称/别名精确命中 | `Set Timer by Function Name`、`AActor` |
-| B 短语 | FTS 完整短语 | `virtual shadow maps` |
-| C 全含 | FTS 所有关键词都出现 | `nanite tessellation displacement` |
-| D 任含 | FTS 任一关键词，BM25 排序 | `how do I make an object glow` |
-| E 前缀 | 最后一个词按前缀匹配 | 拼了一半 / 记不全名字 |
+| A entity | exact name/alias hit | `Set Timer by Function Name`, `AActor` |
+| B phrase | full FTS phrase | `virtual shadow maps` |
+| C all | every FTS keyword present | `nanite tessellation displacement` |
+| D any | any FTS keyword, BM25 ranked | `how do I make an object glow` |
+| E prefix | last word matched as a prefix | half-typed / half-remembered names |
 
-排序不只看 BM25：签名、概要、参数、返回值这些"直接能回答问题"的知识类型
-会被提前，庞大的 C++ 成员目录会被压后。这样 AI 拿到的前几条就是有用的。
+Ranking is not BM25 alone: knowledge types that answer a question directly —
+signature, summary, parameters, return value — move up, while huge C++ member
+listings move down, so the first few results an AI receives are the useful ones.
 """
 
 from __future__ import annotations
@@ -27,7 +29,8 @@ from .db import chunk_fts_mode, fts_mode
 from .runtime import active
 from .text import qualifier_segments, qualifier_suffixes, qualifier_tail
 
-# 只在"任含"档剔除，避免 how/what 这类词淹没真正的关键词。
+# Removed only in the "any" stage, so words like how/what cannot drown out the
+# real keywords.
 STOPWORDS = frozenset(
     """
     a an and are as at be by can do does for from get got have how i if in into is
@@ -36,10 +39,11 @@ STOPWORDS = frozenset(
     """.split()
 )
 
-# 同一个词，问法不同想要的东西完全不同：
-#   "K2_SetTimer"  → 想要签名、参数、返回值
-#   "Nanite"       → 想要这是什么、怎么用，而不是某个节点的 Outputs 表
-# 所以按查询的"形状"切换排序偏好。
+# The same subject wants different things depending on how it is asked:
+#   an exact symbol name -> wants the signature, parameters, return value
+#   a bare concept word  -> wants what it is and how to use it, not some
+#                           reference page's parameter table
+# So ranking preference switches on the *shape* of the query.
 API_TYPE_BONUS = {
     "signature": 9.0,
     "summary": 8.0,
@@ -66,7 +70,8 @@ CONCEPT_TYPE_BONUS = {
     "navigation": -4.0,
 }
 
-# 各档位的起评分。小节回退档不在这里：它建库初期才走，结果不参与打分排序。
+# Base score per stage. The section fallback stage is absent: it only runs early
+# in a library's life, and its results take no part in scored ranking.
 STAGE_BASE = {
     "entity": 100.0,
     "phrase": 70.0,
@@ -75,24 +80,28 @@ STAGE_BASE = {
     "prefix": 20.0,
 }
 
-# `all_terms` 和 `any_term` 查的是同一组词，只有布尔运算符不同，所以同一行在两档
-# 里的 bm25 完全相等——两档的分数落在同一把尺子上，可以直接比大小。因此它们**共用
-# 起评分**，由 bm25 分出高下。
+# `all_terms` and `any_term` query the same set of words and differ only in the
+# boolean operator, so one row's bm25 is identical in both stages. Their scores
+# therefore sit on the same scale and can be compared directly, which is why they
+# **share a base score** and let bm25 decide between them.
 #
-# 从前 `all_terms` 比 `any_term` 高 20 分，等于宣称"凑齐了所有词"一定比"只中了
-# 部分词"更相关。这在长文档面前不成立：几万字的版本说明里随便都能凑齐三个常见词，
-# 而真正讲这件事的那一节可能不含其中某个词。实测 `random stream nodes` 的正确页面
-# 落到第 8 位，前 7 位全是噪音；同样的形状在 cppreference 和 Roblox 上也各复现一次
-# ——bm25 早就把顺序排对了，只是它的**分值**被丢掉、只用了档内名次（BUG-020）。
+# Giving `all_terms` a higher base would assert that "matched every word" is
+# always more relevant than "matched some". That does not hold for long documents:
+# a release-notes page of tens of thousands of words accumulates three common
+# terms by accident, while the section actually about the subject may omit one of
+# them. Measured across three datasets, the correct page fell well down the list
+# with noise above it — bm25 had ordered them correctly all along, and only its
+# *magnitude* was being discarded in favour of within-stage rank.
 COMPARABLE_STAGES = frozenset({"all_terms", "any_term"})
 
-# 归一化 bm25 能拿到的分数区间。要压得住"整页标题全中"的 12 分加成，否则常见词
-# 拼出来的弱匹配又会靠标题字面重合翻上来。
+# Score range normalized bm25 can reach. It has to outweigh the 12-point bonus
+# for "whole page title matched", or a weak match assembled from common words
+# climbs back up on literal title overlap alone.
 RELEVANCE_WEIGHT = 30.0
 
 
 def query_profile(query: str, *, entity_hit: bool) -> str:
-    """`api`（找具体符号）还是 `concept`（问这是什么、怎么做）。"""
+    """`api` (looking for a specific symbol) or `concept` (what is it / how do I)."""
     if entity_hit:
         return "api"
     identifier_re = active().identifier_re
@@ -107,8 +116,9 @@ CHUNK_COLUMNS = """
     c.content_hash
 """
 
-# 全文索引四列的权重：标题 > 小节路径 > 上下文前缀 > 正文。排序和打分必须用同一
-# 个式子，各写一遍迟早分岔。
+# Weights for the four full-text columns: title > section path > context prefix >
+# body. Ranking and scoring must use the same expression; written twice they would
+# eventually diverge.
 _BM25 = "bm25(chunks_fts, 2.5, 1.8, 1.5, 1.0)"
 
 
@@ -117,11 +127,12 @@ def tokenize(query: str) -> list[str]:
 
 
 def knowledge_id(value: str) -> int | None:
-    """`K9290` / `9290` → 9290；不是知识编号则返回 None。
+    """`K9290` / `9290` -> 9290; None when it is not a knowledge id.
 
-    命令行、MCP 和关系查询原本各写了一遍"去掉开头的 K 再转整数"，其中命令行
-    那份直接 `int()`，输入不是数字时抛的是 ValueError 堆栈而不是一句人话。
-    编号长什么样是检索层的事，所以规则收在这里，三处共用。
+    What an id looks like is the retrieval layer's business, so the rule lives
+    here and is shared by the CLI, MCP and relation queries rather than
+    reimplemented in each — one of those did a bare `int()` and raised a
+    ValueError traceback instead of a readable message on non-numeric input.
     """
     text = value.strip()
     digits = text[1:] if text[:1].casefold() == "k" else text
@@ -133,12 +144,12 @@ def _quote(token: str) -> str:
 
 
 def quote_fts_query(query: str) -> str:
-    """所有关键词都必须出现。小节回退档用它。"""
+    """Every keyword must appear. Used by the section fallback stage."""
     return " AND ".join(_quote(token) for token in tokenize(query))
 
 
 def fts_expressions(query: str) -> list[tuple[str, str]]:
-    """返回 [(档位, FTS 表达式)]，从精确到宽松。"""
+    """Returns [(stage, FTS expression)], from precise to loose."""
     tokens = tokenize(query)
     if not tokens:
         return []
@@ -158,12 +169,14 @@ def fts_expressions(query: str) -> list[tuple[str, str]]:
 
 
 def query_names(query: str) -> list[str]:
-    """这条查询该按哪几个名字去对实体表。
+    """Which names this query should be matched against the entity table.
 
-    第一个永远是查询本身；接着是限定名的后缀写法（`std::views::transform`
-    对得上官方页面 `std::ranges::views::transform`）；末段单独放在最后一档，
-    它最宽也最容易撞名。再往后是领域知识包补的说法（Unreal 的 `K2_` 前缀、
-    属性访问器脱 Get/Set 之类）。核心不知道这些规则，只负责按顺序试。
+    The query itself always comes first, then suffix spellings of a qualified name
+    (`b::c` matches an official page named `a::b::c`). The bare tail goes last on
+    its own, being the broadest and the most collision-prone. After that come
+    spellings supplied by the knowledge pack, such as stripping a domain's naming
+    prefix or an accessor's Get/Set. The core knows none of those rules and only
+    tries the names in order.
     """
     names = [query, *qualifier_suffixes(query), qualifier_tail(query)]
     expand = active().hook("query_aliases")
@@ -182,10 +195,11 @@ def query_names(query: str) -> list[str]:
 def _entity_hits(
     connection: sqlite3.Connection, query: str, category: str | None, limit: int
 ) -> list[sqlite3.Row]:
-    """名称或别名精确命中的知识块。
+    """Chunks hit exactly by name or alias.
 
-    刻意拆成两条 UNION 而不是 `名称=? OR 别名=?`：跨两张表的 OR 会让
-    SQLite 放弃索引去全表扫，两条分支各自都能走索引。
+    Deliberately two UNIONed branches rather than `name=? OR alias=?`: an OR
+    across two tables makes SQLite abandon its indexes for a full scan, whereas
+    each branch on its own can use one.
     """
     rows: list[sqlite3.Row] = []
     seen: set[int] = set()
@@ -221,9 +235,10 @@ def _fts_hits(
     category: str | None,
     limit: int,
 ) -> list[sqlite3.Row]:
-    # CROSS JOIN 是有意的：它锁死连接顺序，逼 SQLite 从全文索引出发。
-    # 不锁的话，只要带上 `--category`，优化器就改从 pages 的分类索引出发，
-    # 于是每一个候选块都要单独跑一次全文匹配——实测 0.05 秒变 44 秒。
+    # The CROSS JOIN is deliberate: it pins the join order, forcing SQLite to
+    # start from the full-text index. Unpinned, adding `--category` makes the
+    # optimizer start from the pages category index instead, so every candidate
+    # chunk runs its own full-text match — measured at 0.05 seconds versus 44.
     sql = f"""
         SELECT {CHUNK_COLUMNS}, {_BM25} AS bm25_score
         FROM chunks_fts
@@ -240,7 +255,8 @@ def _fts_hits(
     try:
         return list(connection.execute(sql, params))
     except sqlite3.OperationalError:
-        # 用户输入里可能带 FTS 语法字符；宁可这一档没结果，也不要整体报错。
+        # User input may contain FTS syntax characters; better this stage returns
+        # nothing than the whole query erroring out.
         return []
 
 
@@ -264,16 +280,17 @@ def _like_hits(
 
 @dataclasses.dataclass
 class _Scoring:
-    """一次查询里所有档位共用的打分上下文。
+    """Scoring context shared by every stage of one query.
 
-    这些值按查询算一次就够了，但打分要对每一行调用；分开存着，省得把六七个
-    参数在函数之间传来传去，也方便后面往里加新的排序信号。
+    These values are computed once per query but needed for every row. Keeping
+    them together avoids passing six or seven parameters between functions and
+    makes room for new ranking signals later.
     """
 
     workspace: Any
     terms: set[str]
     normalized_query: str
-    # 查询里末段之前的那几段（`std::views::transform` → std、views）。
+    # Segments before the tail in the query (`std::views::transform` -> std, views).
     qualifiers: tuple[str, ...] = ()
     profile: str = "api"
 
@@ -281,11 +298,13 @@ class _Scoring:
 def stage_relevance(
     batches: Sequence[tuple[str, Sequence[sqlite3.Row]]],
 ) -> list[list[float] | None]:
-    """逐档给出归一化到 0..1 的 bm25 相关度；同尺的几档共用一个基准。
+    """Per-stage bm25 relevance normalized to 0..1; same-scale stages share a base.
 
-    基准必须**跨档**取。只按本档取的话，每一档的第一名都是 1.0，宽松档里的最佳
-    匹配和精确档里的勉强匹配就一样高——那正是 BUG-020 的成因。不同尺的档（`phrase`
-    是整串短语、`prefix` 有词干展开）返回 None，由档内名次兜底。
+    The baseline has to be taken **across** stages. Taken within one, every
+    stage's top row scores 1.0, making the best match in a loose stage equal to a
+    barely-qualifying one in a precise stage. Stages on a different scale
+    (`phrase` is a whole phrase, `prefix` expands stems) return None and fall back
+    to within-stage rank.
     """
     best = min(
         (
@@ -311,8 +330,9 @@ def _score(
     ctx: _Scoring,
     relevance: float | None = None,
 ) -> float:
-    # 档内名次只是同档的平局裁决，跨档没有可比性——`all_terms` 的第 4 名未必
-    # 比 `any_term` 的第 1 名更相关。所以能拿到归一化 bm25 时一律用它。
+    # Within-stage rank only breaks ties inside a stage and does not compare
+    # across them: 4th in `all_terms` is not necessarily more relevant than 1st in
+    # `any_term`. So normalized bm25 is used whenever it is available.
     if relevance is None:
         score = STAGE_BASE[stage] - min(rank, 40) * 0.4
     else:
@@ -329,16 +349,18 @@ def _score(
         heading = (row["heading_path"] or "").casefold()
         score += sum(1 for t in ctx.terms if t in title) / len(ctx.terms) * 6.0
         score += sum(1 for t in ctx.terms if t in heading) / len(ctx.terms) * 3.0
-    # 用户打出来的限定符是位置信息，不是可有可无的装饰。同为 entity 档时，
-    # 名字里带着 `views` 的那一页才是他要的——少了这一档，
-    # `std::views::transform` 和 `std::sort` 一样，只能退到末段去撞名，而
-    # 这个库里叫 transform 的有八个（BUG-017）。
+    # A qualifier the user typed is location information, not optional decoration.
+    # Among entity-stage hits, the page whose name carries that qualifier is the
+    # one they meant. Without this stage a fully qualified name behaves like a
+    # bare one and can only fall back to colliding on its tail, which in a large
+    # library may be shared by a dozen unrelated pages.
     if ctx.qualifiers:
         where = normalize_name(f"{row['page_title'] or ''}{row['source_url'] or ''}")
         matched = sum(1 for segment in ctx.qualifiers if segment in where)
         score += matched / len(ctx.qualifiers) * 8.0
 
-    # 标题本身就是（或以之开头）用户问的东西，几乎一定是对的那一页。
+    # The title is, or begins with, exactly what was asked: almost certainly the
+    # right page.
     normalized_title = normalize_name(row["page_title"] or "")
     if ctx.normalized_query and normalized_title:
         if normalized_title == ctx.normalized_query:
@@ -346,11 +368,14 @@ def _score(
         elif normalized_title.startswith(ctx.normalized_query):
             score += 6.0
 
-    # 大段的成员罗列回答不了"这是什么、怎么做"，但很占 token，所以压后。
+    # Long member listings cannot answer "what is this / how do I" and cost many
+    # tokens, so they move down.
     #
-    # 只在概念提问时压。问一个具体符号时，答案往往**就在**那张成员表里——
-    # 官方不给属性单独出页面，`TargetArmLength` 这类名字只记在所属类的成员
-    # 表中，一律压后就等于把唯一的官方定义压掉。
+    # Only for concept questions, though. Asking about a specific symbol, the
+    # answer is often **inside** that member table: many sites give properties no
+    # page of their own, so such a name is recorded only in its owning type's
+    # member table, and demoting unconditionally would demote the only official
+    # definition there is.
     if (
         ctx.profile == "concept"
         and row["category"] in ctx.workspace.dataset.verbose_categories
@@ -363,7 +388,7 @@ def _score(
 
 def _snippet(content_md: str, terms: set[str], width: int = 260) -> str:
     body = re.sub(r"^#{1,6}\s+.*$", "", content_md or "", flags=re.M)
-    body = re.sub(r"^>\s*DOC 原出处.*$", "", body, flags=re.M)
+    body = re.sub(r"^>\s*DOC source.*$", "", body, flags=re.M)
     body = re.sub(r"\s+", " ", body).strip()
     if not body:
         return ""
@@ -384,7 +409,7 @@ def search_chunks(
     limit: int,
     category: str | None = None,
 ) -> list[dict[str, Any]]:
-    """返回按相关度排序的知识块，每条带 `score` 与 `match_stage`。"""
+    """Chunks ordered by relevance, each carrying `score` and `match_stage`."""
     if not connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]:
         return _legacy_section_search(connection, query, limit=limit, category=category)
 
@@ -422,12 +447,15 @@ def search_chunks(
     ctx.profile = query_profile(query, entity_hit=bool(entity_rows))
     absorb(entity_rows, "entity")
     if chunk_fts_mode(connection) == "fts5":
-        # 共用同一把尺子的那两档要先收齐再打分：归一化的基准是两档合起来的最佳
-        # bm25，边收边打分就只能拿本档的基准，等于又回到"本档第一名必得满分"。
+        # The two stages sharing one scale must be collected before scoring: the
+        # normalization baseline is the best bm25 across both, and scoring as they
+        # arrive would use only this stage's baseline, which again means "top row
+        # of this stage always scores full marks".
         batches: list[tuple[str, list[sqlite3.Row]]] = []
         collected = set(scored)
         for stage, expression in fts_expressions(query):
-            # 高精度档已经够用就不再下探，避免宽松档冲淡结果。
+            # Stop descending once the precise stages suffice, so loose stages do
+            # not dilute the result.
             if len(collected) >= pool and stage in {"any_term", "prefix"}:
                 break
             rows = _fts_hits(connection, expression, category, pool)
@@ -447,11 +475,12 @@ def search_chunks(
 def chunk_or_section(
     connection: sqlite3.Connection, numeric_id: int
 ) -> sqlite3.Row | None:
-    """按编号读一条知识块；找不到再退回小节表。
+    """Read one chunk by id, falling back to the sections table.
 
-    刚建完库、还没切分知识块的时候，编号指的是小节（见 `_legacy_section_search`），
-    所以两张表都要查。命令行和 MCP 的 `show` 用的是同一份查询——两边的 K 编号
-    必须指向同一条内容，各写一份 SQL 迟早会分岔。
+    Just after a library is built, before chunks are split, an id refers to a
+    section (see `_legacy_section_search`), so both tables are queried. The CLI
+    and MCP `show` share this one query: a K id must point at the same content on
+    both sides, and two copies of the SQL would eventually diverge.
     """
     row = connection.execute(
         """
@@ -480,13 +509,15 @@ def chunk_or_section(
 def page_chunks(
     connection: sqlite3.Connection, page_ids: list[int], *, limit: int
 ) -> list[dict[str, Any]]:
-    """整页读取：不检索，直接按顺序取这几页的知识块。
+    """Whole-page read: no retrieval, just this page's chunks in order.
 
-    用在"查询已经把页面指出来了"的场合（贴了官方地址或清单路径）。那时再让
-    全文检索去撞是本末倒置——地址里的 `documentation`、`language` 这类词会把
-    总目录页顶到第一位，而用户明明已经说清楚要哪一页了。
+    Used when the query already names the page (an official URL or inventory path
+    was supplied). Letting full-text search compete then gets it backwards — words
+    in the URL such as `documentation` or `language` push the top-level index page
+    to first place, when the user already said exactly which page they wanted.
 
-    先给能直接回答问题的类型（概要、签名、概述），其余按页内顺序。
+    Types that answer a question directly (summary, signature, overview) come
+    first; the rest follow in page order.
     """
     if not page_ids:
         return []
@@ -522,7 +553,7 @@ def _legacy_section_search(
     limit: int,
     category: str | None,
 ) -> list[dict[str, Any]]:
-    """知识块还没生成时（刚建库）退回到小节级检索。"""
+    """Fall back to section-level retrieval before chunks exist (fresh library)."""
     columns = """
         s.id, s.page_id, p.title AS page_title, s.heading_path,
         s.content_md, '' AS context_prefix, s.source_url,
@@ -533,8 +564,8 @@ def _legacy_section_search(
         expression = quote_fts_query(query)
         if not expression:
             return []
-        # CROSS JOIN 的理由同 `_fts_hits`：不锁连接顺序，带分类的查询会退化成
-        # 逐行跑全文匹配。
+        # Same reason for CROSS JOIN as in `_fts_hits`: unpinned join order makes
+        # a category-filtered query degrade into a per-row full-text match.
         sql = f"""
             SELECT {columns}
             FROM sections_fts

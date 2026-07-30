@@ -1,10 +1,12 @@
-"""单页文档的抓取与结构化转换。
+"""Fetching and structuring a single document page.
 
-流程是固定的，跟站点无关：
-    要内容 → 解析成标题/正文 → 切小节 → 切知识块 → 认实体 → 挖链接
+The pipeline is fixed and site-independent:
+    request content -> parse into title/body -> split sections -> split chunks
+    -> identify entities -> extract links
 
-其中"怎么要、怎么解析"交给来源适配器，"这个符号还能叫什么名字"交给
-领域知识包。这个文件本身不认识任何具体网站或引擎。
+"How to request, how to parse" is delegated to the source adapter, and "what else
+this symbol can be called" to the knowledge pack. This file knows no particular
+site or engine.
 """
 
 from __future__ import annotations
@@ -25,10 +27,10 @@ from .net import fetch_bytes
 from .htmlmd import plain_text
 from .chunking import chunk_sections, normalize_name, split_sections
 from .text import qualifier_suffixes
-from .text import humanize_cpp_identifier  # noqa: F401  （测试与外部调用方在用）
+from .text import humanize_cpp_identifier  # noqa: F401  (used by tests/callers)
 
 
-# 小节的知识类型 → 它里面的链接算哪种关系。
+# Section knowledge type -> which kind of relation its links count as.
 LINK_KIND_BY_KNOWLEDGE_TYPE = {
     "navigation": "hierarchy",
     "parameters": "parameter_type",
@@ -88,10 +90,11 @@ def entity_descriptor(
     source_type: str | None,
     document_type: str | None,
 ) -> dict[str, Any]:
-    """一页文档 = 一个知识实体。这里给它起名字、找别名、认归属。
+    """One document page = one knowledge entity: name it, alias it, place it.
 
-    通用别名（标题、路径末段、限定名）在这里生成；
-    领域特有的别名（Unreal 的 K2_ 脱前缀之类）由知识包补。
+    Generic aliases (title, last path segment, qualified name) are produced here;
+    domain-specific ones, such as stripping a domain's naming prefix, come from
+    the knowledge pack.
     """
     workspace = active()
     prefix = workspace.doc_prefix
@@ -114,18 +117,21 @@ def entity_descriptor(
         (slug, "route_slug"),
         (qualified_name, "qualified_name"),
     }
-    # 用 extension 而不是 hook：一个站点怎么给页面起标题，和"怎么解析这个站的
-    # 页面"是同一类知识，属于来源适配器；知识包仍然优先。
+    # An extension rather than a hook: how a site titles its pages is the same
+    # kind of knowledge as how to parse that site, so it belongs to the source
+    # adapter. The knowledge pack still takes precedence.
     extra_aliases = workspace.extension("extra_entity_aliases")
     if extra_aliases:
         aliases |= extra_aliases(title=title, category=category, segments=segments)
     compact_title = re.sub(r"[^A-Za-z0-9_]+", "", title)
     if compact_title:
         aliases.add((compact_title, "compact_name"))
-    # 限定名的后缀指着同一个东西，也得登记，否则两边永远碰不上头：用户写
-    # `std::views::transform`（标准里 `std::views` 就是 `std::ranges::views`），
-    # 官方页面叫 `std::ranges::views::transform`，两个归一化后并不相等，只能
-    # 退到末段 `transform`——而这个库里叫 transform 的有八个（BUG-017）。
+    # Suffixes of a qualified name point at the same thing and must be registered
+    # too, or the two sides never meet: a user writes `std::views::transform`
+    # (in the standard, `std::views` *is* `std::ranges::views`) while the official
+    # page is `std::ranges::views::transform`. Those are unequal once normalized,
+    # leaving only the bare tail `transform` — and eight things here are called
+    # transform.
     aliases |= {
         (suffix, "qualifier_suffix")
         for name, _kind in list(aliases)
@@ -184,7 +190,8 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         category=category,
     )
     if not version_supported:
-        # 文档明说不支持当前版本，内容还留着，但可信度打对折。
+        # The page states it does not support the current version. Keep the
+        # content, but halve its confidence.
         for section in sections:
             section["quality_score"] *= 0.5
     chunks = chunk_sections(
@@ -213,8 +220,9 @@ def transform_document(row: sqlite3.Row, body: bytes) -> dict[str, Any]:
         )
         if extra:
             entity["aliases"] = sorted(set(entity["aliases"]) | extra)
-    # 类型页的成员表里还藏着一批实体（属性、方法），它们大多没有自己的页面。
-    # 认表格是站点知识，所以由适配器出；这里只是把它们一起交出去。
+    # A type page's member table hides further entities (properties, methods),
+    # most without a page of their own. Recognizing the table is site knowledge
+    # and comes from the adapter; here they are just passed along.
     members = collect_members(
         category=category,
         title=title,

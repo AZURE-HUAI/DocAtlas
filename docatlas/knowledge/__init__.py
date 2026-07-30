@@ -1,12 +1,17 @@
-"""领域知识包：每个模块懂一个技术领域的"行话"。
+"""Knowledge packs: each module understands one technical domain's vocabulary.
 
-跟来源适配器的区别：适配器懂**站点**（网址怎么拼、返回怎么解析），
-知识包懂**领域**（Unreal 里 K2_ 是前缀、蓝图节点和 C++ 函数是同一个东西）。
+How this differs from a source adapter: an adapter understands a **site** (how
+URLs are formed, how responses parse), while a knowledge pack understands a
+**domain** (which prefixes are decoration rather than part of a name, and when
+two differently-named APIs are one thing seen from two sides).
 
-这些东西刻意不做成配置项。像"K2_ 开头要脱前缀、UAFIET 开头是类型前缀、
-蓝图和 C++ 靠 DisplayName 元数据对应"这类规则，写成配置会变成一套又难读
-又没法测的迷你语法；写成普通 Python 函数反而清楚，还能直接写单元测试。
+These rules are deliberately not configuration. Rules of the form "strip this
+leading prefix", "these single letters are type prefixes" and "these two APIs
+correspond via that metadata field" would turn into an unreadable, untestable
+mini-language if expressed as config; as ordinary Python functions they stay
+clear and can be unit tested directly.
 
-知识包是可选的：不挂也能抓能搜，只是少了这些额外线索。
-实现哪几个函数就提供哪几项能力，不必为了凑接口写空方法。
+Knowledge packs are optional: crawling and searching work without one, just with
+fewer extra clues. A pack provides exactly the capabilities it implements — there
+is no need to add empty methods to satisfy an interface.
 """

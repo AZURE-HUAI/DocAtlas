@@ -1,4 +1,4 @@
-"""正文引用图片的下载。"""
+"""Download images referenced by page bodies."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def download_assets(
     ).fetchone()[0]
     if max_assets:
         total = min(total, max_assets)
-    log(f"开始下载正文引用图片，目标 {total:,} 个")
+    log(f"Downloading referenced images, {total:,} target(s)")
     processed = 0
     uncommitted = 0
     commit_every = max(workers * 10, 50)
@@ -115,6 +115,6 @@ def download_assets(
                     connection.commit()
                     uncommitted = 0
                 if processed % 200 == 0 or processed == total:
-                    log(f"图片 {processed:,}/{total:,}")
+                    log(f"Images {processed:,}/{total:,}")
             connection.commit()
             uncommitted = 0

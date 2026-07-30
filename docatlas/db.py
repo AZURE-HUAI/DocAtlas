@@ -1,4 +1,4 @@
-"""SQLite 连接、表结构与轻量迁移。"""
+"""SQLite connection, schema, and in-place migrations."""
 
 from __future__ import annotations
 
@@ -9,17 +9,19 @@ import urllib.parse
 from .runtime import active
 from .util import utc_now
 
-# 表结构版本。加表、加列、改索引都在 initialize_db 里就地迁移，这个号只是
-# 写进库里备查，方便拿到一个陌生库时知道它是哪一代的。
+# Schema version. New tables, columns and indexes all migrate in place in
+# initialize_db; this number is recorded in the database purely so an
+# unfamiliar file can be identified as belonging to a given generation.
 SCHEMA_VERSION = "3"
 
 
 def inventory_index_url() -> str:
-    """清单入口的总地址，纯粹是溯源信息，没有任何代码依赖它。
+    """Address of the inventory entry point: provenance only, nothing reads it.
 
-    只有站点地图型来源才有"一个总入口"这个概念。用分页 API、目录页或静态
-    索引列页的来源（`inventory_feeds` / `read_feed`）压根没有总入口——那种
-    来源不实现 `sitemap_index_url`，这里就留空，而不是让开库直接崩掉。
+    Only sitemap-style sources have the notion of "one entry point". Sources
+    built on a paginated API, directory pages or static index listings
+    (`inventory_feeds` / `read_feed`) have none at all; they do not implement
+    `sitemap_index_url`, so this stays empty rather than crashing on open.
     """
     workspace = active()
     index_url = getattr(workspace.source, "sitemap_index_url", None)
@@ -27,10 +29,12 @@ def inventory_index_url() -> str:
 
 
 def connect_db(path: Path | None = None) -> sqlite3.Connection:
-    # 默认值不能写在签名里：那是导入时求值，MCP 切了数据集也还是老路径。
+    # Not a default in the signature: that evaluates at import time, so a
+    # dataset switch would still open the old path.
     path = path or active().db_path
-    # 第一次用的时候数据目录还不存在，不建的话 sqlite 只会甩一句
-    # "unable to open database file"，看不出该干嘛。
+    # On first use the data directory does not exist yet; without this,
+    # sqlite only says "unable to open database file", which tells the
+    # user nothing about what to do.
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=120)
     connection.row_factory = sqlite3.Row
@@ -169,8 +173,9 @@ def initialize_db(connection: sqlite3.Connection) -> None:
             source_url TEXT NOT NULL,
             version TEXT NOT NULL,
             attributes_json TEXT NOT NULL DEFAULT '{}',
-            -- 这个实体是不是别人页面上的一个成员。NULL = 它就是这一页讲的东西。
-            -- 成员实体永远和所有者同页，所以按 page_id 删就能连它一起删干净。
+            -- Whether this entity is a member documented on another entity's
+            -- page. NULL = it is what the page itself is about. Members always
+            -- live on the owner's page, so deleting by page_id clears them too.
             member_of_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -250,11 +255,13 @@ def initialize_db(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_entity_id);
         CREATE INDEX IF NOT EXISTS idx_relations_to ON relations(to_entity_id);
 
-        -- 一个知识块适用于哪些版本。内容来自领域层从正文里认出的标记
-        -- （`(since C++20)`、"versions before 3.4"），是文档自己写的事实，
-        -- 不是推断。核心只存和比，不认识任何具体版本体系——排序键由领域层给。
-        -- `scope` 记标记写在哪：heading 限定整段，body 只限定那一行。
-        -- 只有 heading 够硬到能排除内容，理由见 versions.py 的模块说明。
+        -- Which versions a chunk applies to. The marks come from the domain
+        -- layer reading the prose, so they are facts the documentation states
+        -- rather than inferences. The core only stores and compares them and
+        -- knows no versioning scheme; the sort key comes from the domain layer.
+        -- `scope` records where a mark sat: heading qualifies the section, body
+        -- only its own line, and only heading is hard enough to exclude on.
+        -- See the module docstring of versions.py.
         CREATE TABLE IF NOT EXISTS chunk_versions (
             chunk_id INTEGER NOT NULL,
             kind TEXT NOT NULL,
@@ -295,10 +302,10 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     add_column_if_missing(connection, "pages", "discovered_at", "TEXT")
     add_column_if_missing(connection, "pages", "last_seen_at", "TEXT")
     add_column_if_missing(connection, "pages", "deleted_at", "TEXT")
-    # 按需抓取靠它定位页面：没抓过的页面只有 path，没有标题。
-    # 关系是谁建的：核心记 'core'，领域知识包记包名。全量重建按它清理，
-    # 领域包因此不必再自己维护一张"我会产出哪些 evidence_kind"的清单——
-    # 那张清单漏写一项，就会留下一条永远删不掉的死关系。
+    # Who created a relation: 'core' for the core, otherwise the knowledge
+    # pack's name. A full rebuild cleans up by this column, so a pack no
+    # longer has to keep its own list of "evidence kinds I produce" — one
+    # missing entry there leaves a dead relation nothing can ever delete.
     if add_column_if_missing(connection, "relations", "origin", "TEXT"):
         connection.execute(
             "UPDATE relations SET origin=CASE WHEN evidence_kind='official_link'"
@@ -308,15 +315,17 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin)"
     )
-    # 加 scope 列的库，已有的标记全是"不分范围"时算出来的，必须整批重算：
-    # 旧行会一律落成 body，而只有 heading 能排除内容，不重算就等于版本限定
-    # 悄悄失效。清掉版本戳，下面的 backfill 会自己重来一遍。
+    # In a database gaining the scope column, every existing mark was computed
+    # without scopes and must be recomputed: old rows all read as body, and
+    # since only heading can exclude, skipping the rebuild would silently
+    # disable version restriction. Clearing the stamp makes backfill redo it.
     if add_column_if_missing(
         connection, "chunk_versions", "scope", "TEXT NOT NULL DEFAULT 'body'"
     ):
         connection.execute("DELETE FROM metadata WHERE key='version_marks'")
-    # 老库加成员列时，已有实体全是"一页一个"，member_of_id 留 NULL 正好是
-    # 它们的真实身份，不需要回填；成员由下面的 backfill 从已存正文里重算。
+    # When an old database gains the member column, its existing entities are
+    # all one-per-page, so a NULL member_of_id is already the truth about them.
+    # Members are recomputed by the backfill below from bodies already stored.
     if add_column_if_missing(connection, "entities", "member_of_id", "INTEGER"):
         connection.execute("DELETE FROM metadata WHERE key='page_members'")
     connection.execute(
@@ -327,7 +336,8 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(normalized_slug)"
     )
-    # 部分索引，只收录还缺派生元数据的页面——见 backfill_page_metadata。
+    # Partial index covering only pages still missing derived metadata — see
+    # backfill_page_metadata.
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_pages_metadata_pending ON pages(id)"
         f" WHERE {PENDING_METADATA_CONDITION}"
@@ -341,8 +351,10 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     add_column_if_missing(
         connection, "sections", "quality_score", "REAL NOT NULL DEFAULT 1.0"
     )
-    # 加列的那一刻，库里已有的块必然都是加列之前的规则产出的，统一标 v1。
-    # 只在真正加列时回填一次：之后写入都自带版本号，再回填反而会覆盖真相。
+    # At the moment the column appears, every chunk already stored was produced
+    # by the rules that predate it, so they are all v1. Backfilled once, only
+    # when the column is actually added: later writes carry their own version,
+    # and backfilling again would overwrite the truth.
     if add_column_if_missing(connection, "chunks", "parser_version", "TEXT"):
         connection.execute(
             "UPDATE chunks SET parser_version='v1' WHERE parser_version IS NULL"
@@ -350,12 +362,15 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunks_parser ON chunks(parser_version)"
     )
-    # 相邻块指针。刻意不做"内容重叠"：重叠会让 content_hash 失去唯一性，
-    # 直接破坏上下文包的去重，还会把全文索引撑大。要上下文就顺着指针去取。
+    # Neighbour pointers. Overlapping content is deliberately avoided: overlap
+    # destroys the uniqueness of content_hash, which breaks deduplication in
+    # context bundles, and inflates the full-text index. Follow the pointers
+    # instead when more context is wanted.
     add_column_if_missing(connection, "chunks", "prev_chunk_id", "INTEGER")
     add_column_if_missing(connection, "chunks", "next_chunk_id", "INTEGER")
-    # 页面级的加工版本。有了它，重切可以只挑没做过的页，中途断掉能接着跑；
-    # 也能覆盖"这一页加工完一个知识块都没有"的情况（纯导航页就是这样）。
+    # Per-page processing version. It lets a rechunk pick only pages not yet
+    # done and resume after an interruption, and it also covers pages that
+    # produced no chunk at all — pure navigation pages do exactly that.
     if add_column_if_missing(connection, "pages", "parser_version", "TEXT"):
         connection.execute(
             "UPDATE pages SET parser_version='v1' WHERE status='success'"
@@ -370,26 +385,31 @@ def initialize_db(connection: sqlite3.Connection) -> None:
     write_metadata(connection, fts_modes)
     backfill_page_metadata(connection)
     backfill_page_slugs(connection)
-    # 版本适用信息是纯本地计算（对已有正文跑一遍领域层的识别规则），不联网。
-    # 数据集没声明版本词汇时直接跳过，不会去扫 UE 那种二十多万页的库。
+    # Applicability is computed locally by running the domain layer's rules
+    # over bodies already stored — no network. Datasets that declare no
+    # version vocabulary are skipped, so a library of a few hundred thousand
+    # pages is never scanned for a feature it cannot use.
     from .versions import backfill as backfill_chunk_versions
 
     backfill_chunk_versions(connection)
-    # 成员实体同理：已抓页面的小节正文都在，重读一遍表格即可，不必重抓。
+    # Member entities likewise: the section bodies of fetched pages are all
+    # here, so the tables are simply reread — nothing is fetched again.
     from .members import backfill as backfill_page_members
 
     backfill_page_members(connection)
-    # "这条链接算不算站内文档"的规则改了之后，已存链接也要跟着重判，
-    # 否则同一个库里两套判断，清单缺口统计会时准时不准。
+    # When the rule for "does this link point at in-scope documentation"
+    # changes, links already stored must be reclassified, or one database
+    # holds two verdicts and the inventory gap figures drift.
     from .coverage import reclassify_links
 
     reclassify_links(connection)
     connection.commit()
 
 
-# 全文索引表。`UNINDEXED` 的列只是跟着存，不参与匹配；末尾那列的标记按
-# fts5 语法写在列名后面，退回普通表时统一当 TEXT。
-# (metadata 里记模式用的 key, 表名, 列定义)
+# Full-text tables. `UNINDEXED` columns ride along without being matched;
+# per fts5 syntax the marker follows the column name, and on the plain-table
+# fallback every column becomes TEXT.
+# (metadata key recording the mode, table name, column definitions)
 FTS_TABLES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "fts",
@@ -410,10 +430,11 @@ FTS_TABLES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 def _create_fts(
     connection: sqlite3.Connection, table: str, columns: tuple[str, ...]
 ) -> str:
-    """建全文索引表，返回实际用上的模式（`fts5` 或 `fallback`）。
+    """Create the full-text table; returns the mode used (`fts5`/`fallback`).
 
-    fts5 是编译选项，不是所有 Python 自带的 SQLite 都有。没有就退回普通表，
-    检索层据此改走 LIKE——功能差一截，但装不上 fts5 的机器仍然能用。
+    fts5 is a compile-time option and not every SQLite shipped with Python
+    has it. Without it, a plain table is created and the search layer falls
+    back to LIKE — weaker, but the machine still works.
     """
     try:
         connection.execute(
@@ -436,12 +457,14 @@ def _create_fts(
 def write_metadata(
     connection: sqlite3.Connection, fts_modes: dict[str, str] | None = None
 ) -> None:
-    """把数据集身份写进库，只在真的变了的时候写。
+    """Record the dataset identity, writing only when something changed.
 
-    这些值一次建库之后基本不会再动，而 `initialize_db` 每次开库都会跑到这里，
-    包括纯查询。无条件 `INSERT OR REPLACE` 九行意味着**每次查询都要拿一次写
-    锁**：库文件只读时直接查不了，边爬边查时两个进程还要互相等。先读一遍再
-    比对，代价是一条 SELECT，换来读路径真的只读。
+    These values barely move once a library exists, yet `initialize_db` runs
+    on every open, queries included. An unconditional `INSERT OR REPLACE` of
+    nine rows would mean **taking a write lock on every query**: a read-only
+    file could not be queried at all, and querying while crawling would make
+    the two processes wait on each other. Reading first costs one SELECT and
+    keeps the read path genuinely read-only.
     """
     dataset = active().dataset
     wanted = {
@@ -459,7 +482,8 @@ def write_metadata(
         row["key"]: row["value"]
         for row in connection.execute("SELECT key, value FROM metadata")
     }
-    # 清单入口要问来源适配器，可能挺贵；已经存过就不再问一遍。
+    # The entry point has to be asked of the source adapter and may be
+    # expensive; once stored, never asked again.
     if "inventory_index" not in stored:
         wanted["inventory_index"] = inventory_index_url()
     changed = [(key, value) for key, value in wanted.items() if stored.get(key) != value]
@@ -470,15 +494,17 @@ def write_metadata(
 
 
 def resolve_link_targets(connection: sqlite3.Connection) -> None:
-    """把链接的目标路径解析成页面 id。
+    """Resolve link target paths to page ids.
 
-    只处理还没解析出来的行。已经解析出来的行再算一遍必然得到同一个答案：
-    `pages.path` 有 UNIQUE 约束，写入之后全程没有任何代码改过它，而页面被
-    删掉时外键的 `ON DELETE SET NULL` 会自己把这一列清空。
+    Only rows not yet resolved. Recomputing a resolved row could only ever
+    produce the same answer: `pages.path` is UNIQUE and no code rewrites it
+    after insert, and when a page is deleted the foreign key's `ON DELETE SET
+    NULL` clears the column by itself.
 
-    这不是微优化。UE 库里 43,472 条带路径的链接中 43,430 条早就解析好了，
-    每次按需抓取都把它们重写成原值——实测 0.086 秒，且随着抓取进度线性增长
-    （目前才抓了全站的 5%）。加上这个条件之后是 0.020 秒，而且不再随库变大。
+    Not a micro-optimisation. In a large library 43,430 of 43,472 path-bearing
+    links were already resolved, and every on-demand fetch rewrote them to
+    their existing values — 0.086 seconds measured, growing linearly with
+    crawl progress. With this condition it is 0.020 seconds, and flat.
     """
     connection.execute(
         """
@@ -497,7 +523,8 @@ def add_column_if_missing(
     column: str,
     definition: str,
 ) -> bool:
-    """加列；返回 True 表示这次真的加了（可据此做一次性回填）。"""
+    """Add a column; True means it was actually added, which is the signal
+    for a one-off backfill."""
     columns = {
         row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
     }
@@ -510,7 +537,8 @@ def add_column_if_missing(
 def rename_column_if_present(
     connection: sqlite3.Connection, table: str, old: str, new: str
 ) -> bool:
-    """老库改名用；SQLite 的 RENAME COLUMN 只改元数据，不重写数据。"""
+    """Rename for older databases; SQLite's RENAME COLUMN only touches
+    metadata and does not rewrite data."""
     columns = {
         row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
     }
@@ -521,9 +549,10 @@ def rename_column_if_present(
 
 
 def migrate_metadata_key(connection: sqlite3.Connection, old: str, new: str) -> None:
-    """老库改名用；`metadata.key` 是主键，改名不能靠 UPDATE 就完事——如果两个
-    key 都在（旧库跑过一次 initialize 之后新 key 已经写入），旧的那行就是
-    死数据，删掉；如果只有旧 key，直接把它改名。"""
+    """Rename for older databases. `metadata.key` is the primary key, so a
+    plain UPDATE is not enough: when both keys exist (the new one was written
+    the first time the newer code ran) the old row is dead data and is
+    deleted; when only the old key exists it is renamed."""
     old_row = connection.execute(
         "SELECT value FROM metadata WHERE key=?", (old,)
     ).fetchone()
@@ -542,10 +571,11 @@ def migrate_metadata_key(connection: sqlite3.Connection, old: str, new: str) -> 
 
 
 def migrate_tag_type(connection: sqlite3.Connection, old: str, new: str) -> None:
-    """老库改名用。`tags` 表 `UNIQUE(name, tag_type)`，同一个 name 在旧库里可能
-    已经同时有 old 和 new 两个 tag_type（新代码跑过一次之后）。逐个改名会撞
-    UNIQUE 约束，所以撞了就把引用旧 tag 的 chunk_tags 转投新 tag，再删旧
-    tag；没撞就直接改名。"""
+    """Rename for older databases. `tags` is `UNIQUE(name, tag_type)`, and one
+    name may already carry both the old and the new tag_type once the newer
+    code has run. Renaming row by row would violate the constraint, so on a
+    collision the chunk_tags pointing at the old tag are moved to the new one
+    and the old tag is deleted; without a collision it is simply renamed."""
     old_tags = list(
         connection.execute("SELECT id, name FROM tags WHERE tag_type=?", (old,))
     )
@@ -577,8 +607,10 @@ def route_metadata(path: str) -> tuple[int, str | None]:
     return len(segments), parent
 
 
-# 哪些页面还缺派生元数据。写成常量，是因为下面的部分索引必须和查询**逐字**
-# 一致，SQLite 才认得出可以用它——分开写两份，改了一处就会静默退回全表扫描。
+# Which pages still lack derived metadata. A constant because the partial
+# index below must match the query **verbatim** for SQLite to use it — two
+# separate copies would silently fall back to a full scan the moment one of
+# them was edited.
 PENDING_METADATA_CONDITION = (
     "doc_version IS NULL OR locale IS NULL OR route_depth IS NULL"
     " OR discovered_at IS NULL OR last_seen_at IS NULL"
@@ -586,12 +618,14 @@ PENDING_METADATA_CONDITION = (
 
 
 def backfill_page_metadata(connection: sqlite3.Connection) -> None:
-    """给缺派生元数据的页面补上。绝大多数时候一行都不缺，必须廉价。
+    """Fill in pages missing derived metadata. Almost always none are, so
+    this has to be cheap.
 
-    这个函数在**每次**打开库时都会跑一遍，包括纯查询。没有上面那个部分索引
-    时，它对整张 pages 表做一次扫描才能确认"没有要补的"——UE 库 20 万页，
-    实测每次查询白付 0.105 秒，而 `ask` 本身也就这个量级。部分索引只收录
-    真正缺字段的行（通常 0 行），于是这次确认变成读一个空索引。
+    It runs on **every** open, queries included. Without the partial index
+    above it scans the whole pages table just to confirm "nothing to do" —
+    0.105 seconds wasted per query on a library of 200k pages, about what
+    `ask` itself costs. The partial index holds only rows genuinely missing a
+    field, usually none, so the confirmation reads an empty index.
     """
     rows = list(
         connection.execute(
@@ -623,23 +657,25 @@ def backfill_page_metadata(connection: sqlite3.Connection) -> None:
     )
 
 
-# 静态站点会把实现细节写进地址（`fields.html`、`index.php`）。用户说的是
-# 页面名，不会带这一截，所以定位前先去掉。只认这几种确定是"文件类型"的后缀，
-# 免得把 `UObject.Tick` 这种名字里的点当成扩展名切掉。
+# Static sites write implementation detail into the address (`page.html`,
+# `index.php`). Users say the page name without it, so it comes off before
+# matching. Only suffixes that are unmistakably file types count, so that a
+# dot inside a name such as `Type.Method` is not mistaken for an extension.
 PAGE_EXTENSIONS = frozenset(
     {"html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "md", "txt"}
 )
-# 改了 page_slug 的规则就 +1：已有库里的 slug 会被整批重算，
-# 否则新规则只对以后发现的页面生效，同一个库里两套 slug 并存。
+# Bump when the page_slug rules change: slugs in existing libraries are then
+# recomputed in one pass. Otherwise the new rules would apply only to pages
+# discovered later, leaving two kinds of slug in one database.
 SLUG_VERSION = "2"
 
 
 def page_slug(path: str) -> str:
-    """URL 最后一段，标准化后用于精确定位。
+    """The last URL segment, normalised for exact matching.
 
-    `/…/UKismetSystemLibrary/K2_SetTimer` → `k2settimer`，
-    `/modeling/geometry_nodes/fields.html` → `fields`，
-    而用户问的 `K2_SetTimer` / `Fields` 标准化后正好是同一串。
+    `/…/<Owner>/<Some_Symbol>` → `somesymbol`, `/…/<group>/<topic>.html` →
+    `topic` — and `Some_Symbol` or `Topic` as typed by the user normalises to
+    exactly the same string.
     """
     from .text import normalize_name
 

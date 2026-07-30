@@ -8,15 +8,15 @@ param(
 
 $inventorySummaryPath = $InventorySummaryPath
 
-Write-Host "开始构建知识库（数据集 $DatasetId）。请确认数据合同已冻结；任务可断点续传。"
+Write-Host "Building the knowledge base (dataset $DatasetId). The task is resumable."
 
 if (-not (Test-Path -LiteralPath $inventorySummaryPath)) {
-    throw '尚未生成 site_inventory_summary.json，请先完成 discover 阶段。'
+    throw 'site_inventory_summary.json does not exist yet; finish the discover phase first.'
 }
 $inventory = Get-Content -LiteralPath $inventorySummaryPath -Raw |
     ConvertFrom-Json
 if ($inventory.status -ne 'complete' -or $inventory.failed_sitemaps -ne 0) {
-    throw '页面清单尚未达到 complete，拒绝启动正文阶段。'
+    throw 'The page inventory is not complete; refusing to start the body phase.'
 }
 
 if ($SkipAssets) {
@@ -27,7 +27,7 @@ else {
 }
 
 if ($LASTEXITCODE -ne 0) {
-    throw "采集器退出码：$LASTEXITCODE"
+    throw "The crawler exited with code $LASTEXITCODE"
 }
 
-Write-Host "完成。总路由：$(Join-Path $DataDir 'ROUTER.md')"
+Write-Host "Done. Router: $(Join-Path $DataDir 'ROUTER.md')"

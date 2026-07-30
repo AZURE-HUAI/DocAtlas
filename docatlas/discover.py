@@ -1,19 +1,24 @@
-"""页面清单枚举：把全站有哪些页面写进 pages 表。
+"""Page inventory enumeration: record which pages a site has in the pages table.
 
-"这个站点有哪些页面"由来源适配器回答，这里只负责并发、落库、状态和进度。
+"Which pages does this site have" is answered by the source adapter; this module
+only handles concurrency, storage, status and progress.
 
-清单来源分成两半，适配器可以只换其中一半：
+Inventory sources come in two halves, and an adapter may replace just one:
 
-    inventory_feeds(dataset)      -> [(清单入口地址, 分类或 None)]
-    read_feed(dataset, url)       -> [(分类或 None, 页面地址)]
+    inventory_feeds(dataset)      -> [(feed URL, category or None)]
+    read_feed(dataset, url)       -> [(category or None, page URL)]
 
-默认实现就是 sitemap：入口 = 站点地图索引里被 `categorize_sitemap` 认领的
-子地图；读取 = 解析 XML 里的 `<loc>`。站点如果用的是分页 API、目录页或者
-Sphinx 的 `searchindex.js`，适配器换掉这两个函数就行——路径规范化、分类、
-版本语言元数据、写库、失败诊断和 inventory 验收全都照旧复用。翻页、限流和
-重试属于"这个站怎么列页"，所以归适配器；并发和落库归这里。
+The default implementation is sitemaps: feeds are the sub-sitemaps claimed by
+`categorize_sitemap` from the sitemap index, and reading parses `<loc>` out of
+the XML. For a site using a paginated API, index pages or Sphinx's
+`searchindex.js`, an adapter replaces those two functions and everything else is
+reused: path normalization, categorization, version and language metadata,
+storage, failure diagnostics and inventory validation. Pagination, rate limiting
+and retries are part of "how this site lists pages" and belong to the adapter;
+concurrency and storage belong here.
 
-`sitemaps` 表存的就是这些"清单入口"，表名是历史原因，语义是通用的。
+The `sitemaps` table holds these feeds. Its name is historical; the meaning is
+generic.
 """
 
 from __future__ import annotations
@@ -72,7 +77,7 @@ def discover_inventory(
     refresh: bool,
 ) -> int:
     workspace = active()
-    log(f"读取 {workspace.name} 的页面清单入口…")
+    log(f"Reading inventory feeds for {workspace.name}...")
     selected = inventory_feeds()
     connection.executemany(
         """
@@ -87,7 +92,7 @@ def discover_inventory(
             "UPDATE sitemaps SET status='pending', error=NULL WHERE 1=1"
         )
     connection.commit()
-    log(f"已找到 {len(selected):,} 个清单入口")
+    log(f"Found {len(selected):,} inventory feed(s)")
 
     pending = list(
         connection.execute(
@@ -120,8 +125,9 @@ def discover_inventory(
             if result["ok"]:
                 page_rows: list[tuple[Any, ...]] = []
                 for entry_category, location in result["entries"]:
-                    # 分类优先看条目自己说的，其次才是入口所属的：一个入口列出
-                    # 多个分类（分页 API 常见）和一个入口一类（sitemap）都能表达。
+                    # An entry's own category wins over its feed's, which covers
+                    # both one feed listing many categories (common for
+                    # paginated APIs) and one feed per category (sitemaps).
                     category = entry_category or result["category"]
                     normalized = workspace.source.normalize_location(
                         workspace.dataset, location
@@ -185,13 +191,13 @@ def discover_inventory(
             connection.commit()
             if completed % 20 == 0 or completed == len(pending):
                 log(
-                    f"清单入口 {completed:,}/{len(pending):,}；"
-                    f"本轮列出页面 {discovered_pages:,}"
+                    f"Feeds {completed:,}/{len(pending):,}; "
+                    f"pages listed this pass {discovered_pages:,}"
                 )
     connection.commit()
     total_pages = connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
     failed_feeds = connection.execute(
         "SELECT COUNT(*) FROM sitemaps WHERE status='failed'"
     ).fetchone()[0]
-    log(f"去重后页面总数：{total_pages:,}；失败清单入口：{failed_feeds:,}")
+    log(f"Pages after dedupe: {total_pages:,}; failed feeds: {failed_feeds:,}")
     return total_pages

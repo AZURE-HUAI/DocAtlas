@@ -31,21 +31,21 @@ function Write-State {
 }
 
 if ($WaitForPid -gt 0) {
-    Write-State -Status 'waiting' -Message "等待现有验收任务 $WaitForPid 结束"
+    Write-State -Status 'waiting' -Message "Waiting for the running acceptance task $WaitForPid to finish"
     while (Get-Process -Id $WaitForPid -ErrorAction SilentlyContinue) {
         Start-Sleep -Seconds 30
     }
 }
 
 if ($Mode -eq 'discover') {
-    $statusMessage = '只枚举完整页面清单；完成后自动停止，不抓正文'
+    $statusMessage = 'Enumerating the full page inventory only; stops when done, fetches no bodies'
 }
 else {
-    $statusMessage = '正在执行正文、知识加工、图片与 Markdown 导出'
+    $statusMessage = 'Fetching bodies, processing knowledge, downloading assets and exporting Markdown'
 }
 
 Write-State -Status 'running' -Message $statusMessage
-"[$(Get-Date -Format o)] 开始 $Mode 阶段断点续传任务" |
+"[$(Get-Date -Format o)] Starting the resumable $Mode phase" |
     Set-Content -LiteralPath $logPath -Encoding UTF8
 if (Test-Path -LiteralPath $errorLogPath) {
     Clear-Content -LiteralPath $errorLogPath
@@ -75,10 +75,10 @@ try {
     & python.exe @arguments 2>> $errorLogPath | Out-Null
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) {
-        Write-State -Status 'completed' -ExitCode 0 -Message "$Mode 阶段已完成"
+        Write-State -Status 'completed' -ExitCode 0 -Message "The $Mode phase is complete"
     }
     else {
-        Write-State -Status 'failed' -ExitCode $exitCode -Message '任务退出，可重新运行 start-background.ps1 续传'
+        Write-State -Status 'failed' -ExitCode $exitCode -Message 'The task exited; rerun start-background.ps1 to resume'
     }
 }
 catch {

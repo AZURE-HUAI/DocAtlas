@@ -8,10 +8,12 @@ source URL.
 Without it, an AI answering a technical question either makes things up from
 memory or dumps a whole page into the context window and runs out of budget.
 
-The repository ships **code only**. Adapters and configs are included for four
-sites — Unreal Engine 5.8, cppreference, Blender Manual, Roblox Creator Hub —
-but **you crawl the docs yourself** (see below). Adding another site means
-writing one adapter; the core stays untouched.
+The repository ships **code only** — no documentation, and no opinion about
+which docs you should collect. What comes with it is one worked example: a
+template dataset and the template adapter it names, both annotated line by line,
+for an invented site. Point DocAtlas at whatever documentation you actually use;
+adding a site means writing one adapter, and the core stays untouched. You crawl
+the docs yourself (see below) — no content is distributed here.
 
 ## Install
 
@@ -33,27 +35,43 @@ Options: `--data-dir D:/DocAtlasData` puts the databases on another drive,
 
 ## Build a library
 
+A library starts as a dataset: one toml in `datasets/`, naming the site, its
+version, and the adapter that understands it. Copy
+[datasets/EXAMPLE.toml](datasets/EXAMPLE.toml) and
+[docatlas/sources/example.py](docatlas/sources/example.py) and work from there —
+between them they explain every field and every function, and
+[WORKFLOWS.md](skills/docatlas/WORKFLOWS.md) walks the process.
+
+The dataset id is that toml's filename. With one in place, enumerate the site's
+page list:
+
 ```bash
-DOCATLAS_DATASET=cppreference-2026-07-26 python -m docatlas crawl --discovery-only
+DOCATLAS_DATASET=<dataset-id> python -m docatlas crawl --discovery-only
 ```
 
-That enumerates the site's page list (tens of minutes) without downloading
-article bodies — **and that is enough to start using it.** The list records
-where every page lives, so anything not held locally is fetched on demand.
+That takes tens of minutes and downloads no article bodies — **and that is
+enough to start using it.** The list records where every page lives, so anything
+not held locally is fetched on demand.
 
 For a fully local copy, follow up with `crawl --skip-discovery`; it resumes
 after any interruption.
 
-There is no built-in default library — pick the one you want with
+There is no built-in default library. Choose one per command with
 `DOCATLAS_DATASET`, or make it stick with `python install.py --dataset <id>`.
 
 ## Use
 
 Just ask in Claude Code or any MCP client; the agent queries the library and
-cites its sources. Or run it yourself: `python -m docatlas ask "std::vector"`.
+cites its sources. Or run it yourself:
+
+```bash
+python -m docatlas ask "<an official term from your docs>"
+```
 
 ## More
 
-- [Usage guide](docs/USAGE.md) — every command, crawling, data layout, new datasets
-- [Architecture](docs/ARCHITECTURE.md) · [Data contract](docs/DATA_CONTRACT.md) · [AI routing](docs/AI_ROUTING.md)
-- [Issue log](issues/README.md)
+- `python -m docatlas --help` — every command and its options
+- [skills/docatlas/WORKFLOWS.md](skills/docatlas/WORKFLOWS.md) — building a
+  library, adding a site, reprocessing, health checks
+- [Issue log](issues/README.md) — past bug and enhancement records (written in
+  Chinese)

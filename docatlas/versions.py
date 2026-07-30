@@ -1,60 +1,61 @@
-"""版本适用范围与版本意图。
+"""Version applicability, and version intent.
 
-这里回答两个**不同**的问题，混在一起就一定会写死某种偏好：
+Two **different** questions live here. Merging them guarantees a hardcoded
+preference:
 
-  * **这段内容适用于哪些版本**——文档自己写着的事实。由领域层（来源适配器
-    或知识包）从正文里认出来，因为"版本怎么写"是每个站自己的排版约定：
-    cppreference 写 `(since C++20)`，Blender 写"versions before 3.4"。
-  * **用户想要哪些版本**——这是意图，核心猜不出来。必须由上层 AI 判断之后，
-    以结构化条件传进来。
+  * **Which versions does this content apply to** — a fact the documentation
+    states itself. The domain layer (a source adapter or a knowledge pack)
+    recognises it in the prose, because how a version is written is each
+    site's own typographic convention.
+  * **Which versions does the user want** — an intent the core cannot guess.
+    The caller decides, and passes it in as a structured condition.
 
-核心只做通用的那一半：存事实、比大小、按意图筛。它不知道 C++20 比 C++17 新，
-也不知道 Blender 5.2 是什么——**排序键由领域层给出**。这不是洁癖：C++98 比
-C++11 早，可数字上 98 > 11，任何通用的"版本号比大小"规则都会把它排反。
+The core does only the generic half: store the facts, compare them, filter by
+intent. It does not know which of two version labels is newer — **the sort key
+comes from the domain layer**. That is not fastidiousness: numbering schemes
+where the older release carries the larger number are common, and any generic
+"compare the numbers" rule orders those backwards.
 
-## 三种证据，强度不同，用途不同
+## Three kinds of evidence, of differing strength
 
-    since     "从 X 版本才有"。硬证据，**只有它能用来排除**。
-    until     "到 X 版本为止"。存下来供报告和比较，但不参与排除（原因见下）。
-    mentions  正文提到了某个版本。软证据，只在"迁移追溯"时加分。
+    since     "exists only from version X". Hard evidence, and **the only
+              kind allowed to exclude**.
+    until     "up to version X". Stored for reporting and comparison, but it
+              never excludes (see below).
+    mentions  the body names some version. Soft evidence; earns a bonus only
+              when tracing migrations.
 
-`until` 为什么不排除：真实数据里一个知识块能同时带好几行不同的标记。
-cppreference 的 `Algorithms library > Modifying sequence operations` 一块里
-既有 `(until C++11)` 又有 `(since C++11)`——那是同一张表相邻两行的脚注。
-按"到 C++11 为止"去排除，会把 C++20 里明明存在的整组 swap 操作删掉。
-所以 `until` 只报告，不裁决。
+Why `until` never excludes: one chunk legitimately carries several conflicting
+marks. A single table can have adjacent rows footnoted `(until X)` and
+`(since X)`. Excluding on "up to X" would then delete a whole group of
+operations that does exist in the target version. So `until` reports, it does
+not rule.
 
-## 标记写在哪里，决定它管多大范围
+## Where a mark sits decides how far it reaches
 
-同样是 `(since C++26)`，写在标题里和写在正文里完全不是一回事：
+    heading   qualifies the whole section — this material does not exist at
+              all in earlier versions.
+    body      qualifies one row of one table, while the table itself is much
+              older.
 
-    heading   `Annotations (since C++26)`、`C++ attribute: assume (since C++23)`
-              ——限定整个小节，这一段在更早的版本里根本不存在。
-    body      `std::optional` 成员函数表里的一行 `begin (C++26)`
-              ——只限定那一行，整张表在 C++17 就有了。
+So **only a `since` in a heading may exclude content**. The two errors are not
+symmetric: content from a newer version is visible to the user and can be
+judged, whereas content silently withheld cannot be discovered at all. When in
+doubt, over-serve.
 
-所以**只有标题里的 `since` 能排除内容**。这不是保守，是实测：cppreference
-小样里标题限定的 6 块全部确实是版本限定；只在正文出现标记的 19 块中，
-`std::all_of`、`std::binary_search`、实参依赖查找、`std::optional` 成员表
-等十余块都是很早就有的内容，按正文标记排除等于把用户要的答案藏起来。
+## Four intents, opposite handling of the same evidence
 
-两种错误的代价不对称：多给了新版本的内容，用户看得见也看得懂；少给了本该有的
-内容，用户完全无从发现。所以宁可漏放宽，不可误藏。
+    strict     exclude content that does not yet exist in the target version.
+    migration  marked content is **promoted** instead — "when did it change"
+               is the answer the user is after.
+    compare    drop nothing; pass the marks through for the caller to arrange.
+    any        behaves exactly as if this feature did not exist.
 
-## 四种意图，同一份证据可以有相反的处理
+## Never filter without information
 
-这正是不能写死"优先新版本"或"优先当前版本"的原因：
-
-    strict     严格限定：排除"目标版本里还不存在"的内容。
-    migration  迁移追溯：带版本标记的内容反而**加分**——"什么时候变的"
-               就是用户要问的答案。
-    compare    版本比较：一条都不删，把标记原样带出去，由上层组织。
-    any        不限定：与没有这个功能时的行为完全一致。
-
-## 没有信息时永远不筛
-
-数据集没有声明版本词汇、或某一块没有任何标记时，一律按"适用"处理。宁可多给，
-也不能因为"我不知道"就把官方内容藏起来——那种错误在结果里完全看不出来。
+When the dataset declares no version vocabulary, or a chunk carries no mark,
+treat it as applicable. Withholding official content because "I don't know"
+is the kind of error that leaves no trace in the result.
 """
 
 from __future__ import annotations
@@ -65,36 +66,44 @@ from typing import Any, Iterable
 
 from .runtime import active
 
-# 意图。`any` 等同于不传。
+# Intents. `any` is equivalent to passing nothing.
 STRICT = "strict"
 MIGRATION = "migration"
 COMPARE = "compare"
 ANY = "any"
 MODES = (STRICT, MIGRATION, COMPARE, ANY)
 
-# 证据种类。
+# Kinds of evidence.
 SINCE = "since"
 UNTIL = "until"
 MENTIONS = "mentions"
 MARK_KINDS = (SINCE, UNTIL, MENTIONS)
 
-# 标记的作用范围。标题里的管整段，正文里的只管那一行——只有前者够硬到能排除。
+# How far a mark reaches. In a heading it covers the section, in the body only
+# its own line — only the former is hard enough to exclude on.
 HEADING = "heading"
 BODY = "body"
 
-# 提取规则的版本。领域层改了写法就 +1，已有库会整批重算——
-# 否则同一个库里两套规则产出的标记并存，筛出来的结果没法解释。
+# Version of the extraction rules. Bump it when the domain layer changes how it
+# reads marks; existing libraries then recompute in one pass — otherwise marks
+# produced by two different rule sets coexist and the filtered result cannot be
+# explained.
 MARKS_VERSION = "1"
 
-# 迁移追溯时的加分。带任何版本标记就说明"这里讲的是版本之间的差异"，
-# 而标记的版本与用户所在版本不同时，那基本就是迁移证据本身。
+# Bonuses when tracing migrations. Any version mark says "this passage is about
+# a difference between versions", and a mark naming a version other than the
+# user's is usually the migration evidence itself.
 MIGRATION_MARKED_BONUS = 8.0
 MIGRATION_OTHER_VERSION_BONUS = 10.0
 
 
 @dataclass(frozen=True)
 class Mark:
-    """一条版本适用信息。`key` 是领域层给的可比较键，核心只拿它比大小。"""
+    """One piece of applicability evidence.
+
+    `key` is the comparable key supplied by the domain layer; the core only
+    ever compares it, never interprets it.
+    """
 
     kind: str
     label: str
@@ -107,7 +116,7 @@ class Mark:
 
 @dataclass(frozen=True)
 class Intent:
-    """用户的版本意图。由上层 AI 判断后传进来，核心不推断。"""
+    """What the user wants, version-wise. Decided upstream, never inferred."""
 
     mode: str
     target: str = ""
@@ -115,22 +124,28 @@ class Intent:
 
     @property
     def excludes(self) -> bool:
-        """这次会不会真的排除内容。没有可比较的目标版本就只能不排除。"""
+        """Whether this run really drops content.
+
+        Without a comparable target version there is nothing to exclude on.
+        """
         return self.mode == STRICT and bool(self.target_key)
 
 
 def vocabulary() -> str:
-    """这个数据集的版本说的是什么，用于把诊断写成人话。"""
+    """What "version" means for this dataset, for readable diagnostics."""
     return str(active().extension("VERSION_VOCABULARY", "") or "")
 
 
 def supported() -> bool:
-    """这个数据集能不能提供可验证的版本适用信息。"""
+    """Whether this dataset can supply verifiable applicability information."""
     return callable(active().extension("version_marks"))
 
 
 def sort_key(label: str) -> str:
-    """把版本标签变成可比较的键；领域层不认识这个标签就返回空串。"""
+    """Turn a version label into a comparable key.
+
+    Empty when the domain layer does not recognise the label.
+    """
     maker = active().extension("version_sort_key")
     if not maker or not label:
         return ""
@@ -138,11 +153,12 @@ def sort_key(label: str) -> str:
 
 
 def marks_in(heading: str, body: str) -> list[Mark]:
-    """认出一个知识块的版本标记，并记住每条是写在标题还是正文里。
+    """Recognise a chunk's version marks, recording where each one sits.
 
-    领域层只需要回答"这段文字里有哪些版本标记"；标记管多大范围是核心的
-    记账，不该让每个适配器各自实现一遍。同一条标记两处都出现时算标题——
-    强的那个说了算。
+    The domain layer only answers "which version marks are in this text";
+    how far a mark reaches is the core's bookkeeping, not something every
+    adapter should reimplement. A mark appearing in both places counts as a
+    heading — the stronger scope wins.
     """
     reader = active().extension("version_marks")
     if not reader:
@@ -160,23 +176,24 @@ def marks_in(heading: str, body: str) -> list[Mark]:
 
 
 def parse_intent(mode: str | None, target: str | None) -> Intent | None:
-    """把上层传来的版本条件变成结构化意图。
+    """Turn a caller's version condition into a structured intent.
 
-    看不懂的模式要报错，不能默默忽略——静静地不筛，比明确拒绝危险得多：
-    调用方会以为限定生效了。
+    An unrecognised mode must raise rather than be ignored: filtering nothing
+    in silence is more dangerous than refusing outright, because the caller
+    goes on believing the restriction took effect.
     """
     mode = (mode or "").strip().casefold()
     target = (target or "").strip()
     if not mode and not target:
         return None
     if not mode:
-        # 只给了目标版本，最常见的意思就是"限定在这个版本"。
+        # A bare target version almost always means "restrict to this one".
         mode = STRICT
     if mode not in MODES:
         raise ValueError(
-            f"看不懂的版本意图 {mode!r}。可选：{'、'.join(MODES)}。"
-            f"strict=严格限定该版本，migration=追溯版本之间的变化，"
-            f"compare=保留全部版本供比较，any=不限定。"
+            f"Unknown version intent {mode!r}. Choose from: {', '.join(MODES)}. "
+            f"strict=restrict to that version, migration=trace what changed "
+            f"between versions, compare=keep every version, any=no restriction."
         )
     if mode == ANY:
         return None
@@ -184,14 +201,14 @@ def parse_intent(mode: str | None, target: str | None) -> Intent | None:
 
 
 # ---------------------------------------------------------------------------
-# 存取
+# Storage
 # ---------------------------------------------------------------------------
 
 
 def store_marks(
     connection: sqlite3.Connection, chunk_id: int, heading: str, body: str
 ) -> int:
-    """记下一个知识块的版本适用信息。返回记了几条。"""
+    """Record a chunk's applicability. Returns how many marks were written."""
     marks = marks_in(heading, body)
     if not marks:
         return 0
@@ -209,7 +226,7 @@ def store_marks(
 def load_marks(
     connection: sqlite3.Connection, chunk_ids: Iterable[int]
 ) -> dict[int, list[Mark]]:
-    """批量取版本标记。没标记的块不会出现在结果里。"""
+    """Load marks in bulk. Unmarked chunks are absent from the result."""
     ids = list(chunk_ids)
     if not ids:
         return {}
@@ -232,10 +249,12 @@ def load_marks(
 
 
 def backfill(connection: sqlite3.Connection) -> int:
-    """给已经抓好的知识块补上版本标记，不需要重新联网。
+    """Add version marks to chunks already crawled, without going online.
 
-    只在提取规则变了、或这个库还没做过时整批重算。数据集不声明版本词汇时
-    直接跳过——UE 那种二十多万页的库不该为一个用不上的功能扫一遍全表。
+    Runs only when the extraction rules changed, or when this library has
+    never been processed. Datasets that declare no version vocabulary are
+    skipped outright — a library of hundreds of thousands of pages should not
+    scan its whole table for a feature it cannot use.
     """
     if not supported():
         return 0
@@ -265,20 +284,21 @@ def backfill(connection: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 按意图筛选
+# Filtering by intent
 # ---------------------------------------------------------------------------
 
 
 def _excluded_by(marks: list[Mark], target_key: str) -> str:
-    """这一块该不该因为版本被排除；该排除就返回那个版本的标签。
+    """Whether version rules drop this chunk; if so, the label that did it.
 
-    两道闸门，都是实测定下来的：
+    Two gates, both settled by measurement:
 
-    1. **只看标题里的 `since`**。正文里的标记只限定它所在的那一行，拿它排除
-       整块会误伤（`std::optional` 的成员表因为一行 `begin (C++26)` 被整块
-       藏起来）。
-    2. **只看最早的那一个**。标题上若干标记里最早的 since 都还晚于目标版本，
-       才说明这一段在目标版本里确实不存在。
+    1. **Only a `since` in a heading counts.** A mark in the body qualifies
+       only its own line, so excluding the whole chunk on it hides material
+       that has been there all along.
+    2. **Only the earliest one counts.** The chunk is genuinely absent from
+       the target version only when even the earliest heading `since` is
+       later than it.
     """
     since = [
         mark for mark in marks if mark.kind == SINCE and mark.scope == HEADING
@@ -290,10 +310,11 @@ def _excluded_by(marks: list[Mark], target_key: str) -> str:
 
 
 def _migration_bonus(marks: list[Mark], target_key: str) -> float:
-    """迁移追溯时这一块该加多少分。
+    """How much to promote this chunk when tracing a migration.
 
-    带版本标记 = 这里讲的是"版本之间有差异"；标记的版本和用户所在版本不同 =
-    这基本就是"以前是怎样、现在换成什么"本身。
+    Any mark means "this passage is about a difference between versions", and
+    a mark naming a version other than the user's is usually the "it used to
+    be like this, now it is like that" evidence itself.
     """
     if not marks:
         return 0.0
@@ -308,10 +329,11 @@ def apply(
     rows: list[dict[str, Any]],
     intent: Intent | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """按版本意图处理检索结果，并如实说明做了什么。
+    """Apply a version intent to search results, and say what was done.
 
-    返回 `(留下的结果, 报告)`。报告一定要能回答"为什么这条在/不在"——
-    悄悄少几条结果，是比排错更难发现的问题。
+    Returns `(kept rows, report)`. The report must be able to answer "why is
+    this result here / missing" — quietly returning fewer results is harder to
+    notice than an outright error.
     """
     if intent is None:
         return rows, {}
@@ -326,14 +348,16 @@ def apply(
         report["vocabulary"] = vocab
     if not supported():
         report["note"] = (
-            "这个库没有声明版本词汇，无法核对版本适用范围，因此本次没有按版本"
-            "筛选，全部结果照常返回。"
+            "This library declares no version vocabulary, so applicability "
+            "cannot be checked. No version filtering was applied and every "
+            "result is returned as usual."
         )
         return rows, report
     if intent.target and not intent.target_key:
         report["note"] = (
-            f"这个库不认识版本 {intent.target!r}，无法比较，因此本次没有按版本"
-            "筛选。用该库自己的版本写法再试一次。"
+            f"This library does not recognise the version {intent.target!r}, "
+            "so it cannot be compared and no version filtering was applied. "
+            "Try again using the library's own way of writing versions."
         )
         return rows, report
 
@@ -350,7 +374,7 @@ def apply(
                     {
                         "knowledge_id": f"K{row['id']}",
                         "title": row["page_title"],
-                        "reason": f"{label} 才有，{intent.target} 里还没有",
+                        "reason": f"added in {label}, absent from {intent.target}",
                     }
                 )
             continue
@@ -365,33 +389,38 @@ def apply(
 
 
 def describe(report: dict[str, Any]) -> list[str]:
-    """把版本处理结果写成人和 AI 都能照着做的说明。"""
+    """Write up what the version pass did, for humans and agents alike."""
     if not report:
         return []
     if note := report.get("note"):
         return [note]
     mode = report["mode"]
-    target = report.get("target") or "（未指定）"
+    target = report.get("target") or "(unspecified)"
     if mode == STRICT:
         if not report["excluded"]:
             return [
-                f"已按 {target} 核对版本适用范围，没有结果因为版本被排除。"
+                f"Checked applicability against {target}; nothing was excluded."
             ]
         lines = [
-            f"已按 {target} 严格限定：{report['excluded']} 条内容因为在 {target} "
-            f"里还不存在而被排除。"
+            f"Strict {target}: {report['excluded']} item(s) absent from {target}"
+            f" were excluded, having been introduced later."
         ]
         lines.extend(
-            f"  排除：{item['title']}（{item['reason']}）"
+            f"  excluded: {item['title']} ({item['reason']})"
             for item in report["excluded_examples"]
         )
         lines.append(
-            "如果你想看这些更新版本里的做法，把版本意图改成 compare 再问一次。"
+            "To see how the newer versions do it, ask again with the version "
+            "intent set to compare."
         )
         return lines
     if mode == MIGRATION:
         return [
-            "按迁移追溯排序：明确写着版本差异的内容已经提前——"
-            "「什么时候改的、以前是什么」正是这类问题的答案。"
+            "Ordered for migration tracing: content that states a difference "
+            "between versions has been promoted — \"when did it change, what "
+            "was it before\" is the answer such questions want."
         ]
-    return ["已保留全部版本的内容，每条都带着自己的适用范围，供按版本对照。"]
+    return [
+        "Kept every version, each result carrying its own applicability, "
+        "so they can be compared side by side."
+    ]

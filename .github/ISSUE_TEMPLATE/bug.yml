@@ -1,5 +1,5 @@
-name: 报告问题
-description: 报告可以复现的错误、异常结果或性能问题
+name: Report a bug
+description: A reproducible error, a wrong result, or a performance problem
 title: "[Bug] "
 labels:
   - bug
@@ -8,44 +8,44 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈。请尽量提供最小复现和原始输出；不要粘贴密钥、Token 或私人数据。
+        Thanks for the report. Please give the smallest reproduction you can, with the original output. Do not paste keys, tokens or personal data.
 
   - type: textarea
     id: summary
     attributes:
-      label: 问题概述
-      description: 实际发生了什么，它为什么影响使用？
-      placeholder: 用一两句话说明问题。
+      label: Summary
+      description: What actually happened, and why does it get in the way?
+      placeholder: One or two sentences.
     validations:
       required: true
 
   - type: input
     id: dataset
     attributes:
-      label: 数据集与版本
-      description: 例如 epic-ue-5.8；不知道可以写“不确定”。
-      placeholder: epic-ue-5.8
+      label: Dataset and version
+      description: The dataset id you were querying. "Not sure" is a fine answer.
+      placeholder: <dataset-id>
     validations:
       required: true
 
   - type: dropdown
     id: entrypoint
     attributes:
-      label: 使用入口
+      label: Entry point
       options:
         - CLI / docatlas.ps1
         - Python API
         - MCP
         - Skill
-        - 其他或不确定
+        - Other or not sure
     validations:
       required: true
 
   - type: textarea
     id: reproduction
     attributes:
-      label: 最小复现
-      description: 写明命令、输入和可以稳定重现问题的最少步骤。
+      label: Minimal reproduction
+      description: The commands, the input, and the fewest steps that reproduce it reliably.
       render: powershell
     validations:
       required: true
@@ -53,31 +53,31 @@ body:
   - type: textarea
     id: actual
     attributes:
-      label: 实际结果
-      description: 请保留原始错误、耗时和重复次数；敏感内容请先删除。
+      label: Actual result
+      description: Keep the original error, the timings and how often it repeats. Remove anything sensitive first.
     validations:
       required: true
 
   - type: textarea
     id: expected
     attributes:
-      label: 期望结果
-      description: 描述用户能够观察和验证的正确行为，不预先指定内部实现。
+      label: Expected result
+      description: The correct behaviour as a user can observe and verify it, without prescribing the internals.
     validations:
       required: true
 
   - type: textarea
     id: workaround
     attributes:
-      label: 临时绕行
-      description: 可选；如果没有可用绕行方式，可以写“暂无”。
+      label: Workaround
+      description: Optional. "None" is a fine answer.
 
   - type: checkboxes
     id: checks
     attributes:
-      label: 提交前确认
+      label: Before submitting
       options:
-        - label: 我已经移除密钥、Token、账号信息和私人数据。
+        - label: I have removed keys, tokens, account details and personal data.
           required: true
-        - label: 我已经搜索现有 Issues，暂未发现相同问题。
+        - label: I searched the existing issues and found no duplicate.
           required: true

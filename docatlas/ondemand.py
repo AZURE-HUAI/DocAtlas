@@ -1,22 +1,27 @@
-"""按需抓取：用到哪一页才去取哪一页。
+"""On-demand fetching: pull a page only when something actually needs it.
 
-全站清单在正文抓取之前就已经冻结了，所以即使一页还没取正文，我们**依然知道
-它存在、在哪个分类、URL 是什么**。这就是按需抓取能成立的前提：不用漫无目的
-地爬，可以直接命中目标那一页。
+The site inventory is frozen before any body is fetched, so even for a page
+whose body is missing we **still know it exists, which category it is in, and
+what its URL is**. That is what makes on-demand fetching possible: no aimless
+crawling, just a direct hit on the page in question.
 
-定位分三档，从最确定到最宽松，任何一档够数就停：
+Locating runs in three tiers, most certain to loosest, stopping as soon as one
+of them has enough:
 
-    A 精确  slug 完全一致
-            /…/UKismetSystemLibrary/K2_SetTimer  ← "K2_SetTimer"
-            /…/geometry_nodes/fields.html        ← "Fields"（扩展名不算名字）
-            /…/charconv/from_chars               ← "std::from_chars"（限定符剥掉）
-    B 包含  slug 里含有这个词
-            /…/nanite-virtualized-geometry-…     ← "Nanite"
-    C 覆盖  查询里每个实词都出现在路径中
-            /render/shader_nodes/textures/wave…  ← "Wave Texture Node"
+    A exact     the slug matches the name outright
+                /…/<owner>/<Symbol>            ← "Symbol"
+                /…/<group>/<topic>.html        ← "Topic" (the extension is
+                                                 not part of the name)
+                /…/<header>/<function>         ← "ns::function" (qualifiers
+                                                 stripped)
+    B contains  the slug contains the term
+                /…/<feature>-<detail>-<more>   ← "Feature"
+    C covers    every content word of the query appears in the path
+                /<area>/<group>/<page>-<kind>  ← "Page Kind"
 
-C 档要求**全部**实词命中，所以"怎么让物体发光"这种概念提问不会误触发补抓；
-真命中了，那一页也确实值得取。
+Tier C demands that **all** content words hit, so a conceptual question like
+"how do I make an object glow" never triggers a fetch by accident; and when it
+does hit, that page really is worth having.
 """
 
 from __future__ import annotations
@@ -37,18 +42,21 @@ from .text import qualifier_segments, qualifier_tail
 from .store import store_document_result
 from .util import log
 
-# 一次按需抓取最多取几页。目的是"补上缺的那一页"，不是顺手爬一片。
+# Pages one on-demand fetch may pull at most. The point is to fill in the page
+# that is missing, not to crawl a neighbourhood while we are there.
 DEFAULT_FETCH_LIMIT = 5
 MAX_FETCH_LIMIT = 40
 
-# 路径覆盖档至少要有这么多个实词，否则一个词就能扫回一大片。
+# The path-coverage tier needs at least this many content words, otherwise a
+# single word sweeps back a whole region of the site.
 MIN_COVERAGE_TOKENS = 2
-# 太短的词（as、id、ue）做包含匹配会命中几万页，只在精确档用。
+# Very short words (as, id, ui) match tens of thousands of pages when used for
+# containment, so they are only allowed in the exact tier.
 MIN_CONTAINS_CHARS = 5
 
 
 def coverage_tokens(query: str) -> list[str]:
-    """路径覆盖档要求全部出现的那几个实词。"""
+    """The content words the path-coverage tier requires all of."""
     tokens = []
     for token in tokenize(query):
         if token.casefold() in STOPWORDS:
@@ -56,17 +64,19 @@ def coverage_tokens(query: str) -> list[str]:
         stripped = normalize_name(token)
         if len(stripped) >= 3:
             tokens.append(stripped)
-    return tokens[:6]  # 再多就是整句话了，全部命中反而不可能
+    return tokens[:6]  # beyond this it is a sentence, and never all matches
 
 
-# 地址里的分隔符。比对之前要先去掉：用户敲的 `duration_cast` 规范化成
-# `durationcast`，而路径里原样写着 `duration_cast`——不去掉下划线，
-# 这两个字符串永远对不上，于是"清单里明明有"的页面报成"没有"。
+# Separators found in addresses, stripped before comparing: a typed
+# `duration_cast` normalises to `durationcast` while the path spells it
+# `duration_cast`. Leave the underscore in and the two strings can never meet,
+# so a page plainly present in the inventory is reported as missing.
 _PATH_SEPARATORS = ("_", "-", ".", "~", "+", "%20", " ")
 
 
 def _flattened_path(column: str = "path") -> str:
-    """把路径拍平成和 `normalize_name` 一个口径，好跟规范化后的词直接比。"""
+    """Flatten a path the way `normalize_name` flattens a word, so the two
+    can be compared directly."""
     expression = f"lower({column})"
     for separator in _PATH_SEPARATORS:
         expression = f"replace({expression}, '{separator}', '')"
@@ -74,7 +84,7 @@ def _flattened_path(column: str = "path") -> str:
 
 
 def _flatten(path: str) -> str:
-    """`_flattened_path` 的 Python 版，两边口径必须一致。"""
+    """Python twin of `_flattened_path`; the two must stay in step."""
     flat = path.casefold()
     for separator in _PATH_SEPARATORS:
         flat = flat.replace(separator, "")
@@ -82,19 +92,24 @@ def _flatten(path: str) -> str:
 
 
 def target_paths(query: str) -> list[str]:
-    """查询里直接写出来的、属于本数据集的页面——地址或路径。
+    """Pages of this dataset named outright in the query — URL or path.
 
-    贴一条精确 URL 是用户能给出的**最强**线索，比任何名字都确定，因为它已经
-    把页面指出来了。可它以前是最没用的输入：整条地址被当成一串普通文字规范化
-    成 `httpscppreferencecomcpplanguagecoroutines`，跟任何 slug 都对不上，
-    于是"给了准确地址反而一页都抓不到"（BUG-008）。
+    Pasting an exact URL is the **strongest** clue a user can give, more
+    certain than any name, because it already points at the page. Yet it used
+    to be the most useless input: the whole address was normalised as ordinary
+    text into one long run of letters that matched no slug at all, so giving a
+    precise address fetched nothing.
 
-    路径同理，而且更要紧：`related` 和 `describe_lookup` 的 `next_steps`
-    自己就在打印路径（`get "/render/shader_nodes/index"`）。名字匹配对这条
-    路径只看得到末段 `index`，于是**系统给出的下一步命令自己跑不通**。
+    The same holds for paths, and matters more there: `related` and
+    `describe_lookup` print paths in their own `next_steps` (`get
+    "/<area>/<group>/index"`). Name matching sees only the last segment of
+    such a path, so **the next step the system itself suggested does not
+    run**.
 
-    地址属不属于本数据集、对应哪一页，交给来源适配器回答；路径则原样比对，
-    它本来就是我们自己库里的写法。核心不认识任何站点。
+    Whether an address belongs to this dataset, and which page it is, is for
+    the source adapter to answer; paths are compared as-is, since they are
+    already written the way our own library writes them. The core knows no
+    sites.
     """
     dataset = active().dataset
     resolve = active().extension("normalize_link_target")
@@ -110,9 +125,11 @@ def target_paths(query: str) -> list[str]:
     for token in query.split():
         if not token.startswith("/") or "://" in token:
             continue
-        # 先问适配器：路径也可能带着语言段之类的变体写法
-        # （`/documentation/en-us/unreal-engine/…` 和清单里的规范写法差一段）。
-        # 适配器不认（比如缺扩展名）时，原样比对——它本来就是库里的写法。
+        # Ask the adapter first: a path may carry variant spellings such as a
+        # locale segment (`/documentation/<locale>/<product>/…` differs from
+        # the canonical form in the inventory by one segment). When the
+        # adapter does not recognise it (a missing extension, say), compare
+        # as-is — it is already our library's own spelling.
         if resolve:
             remember(resolve(dataset, token))
         remember(token.rstrip("/") or None)
@@ -120,15 +137,18 @@ def target_paths(query: str) -> list[str]:
 
 
 def target_fragment(query: str) -> str:
-    """地址指向的**小节**：`…/on-screen-containers#screen-insets` → `screeninsets`。
+    """The **section** an address points at: `…/some-page#screen-insets` →
+    `screeninsets`.
 
-    页面之下还有一层。用户在官方页面里点开某一节再复制地址，`#…` 就是他指的
-    那一节；丢掉它，回答只能退回页面概览，而目标小节的正文明明已经在库里
-    （BUG-014）。
+    There is a level below the page. When a user opens a section on the
+    official page and copies the address, the `#…` is the part they mean;
+    drop it and the answer falls back to a page overview while the body of
+    the section asked for is already in the library.
 
-    官方 href 和我们存的锚点写法未必一样（`screen-insets` / `screeninsets`）：
-    我们的锚点是标题拍平来的（见 `text.heading_anchor`），所以两边都按同一条
-    规则拍平就能对上。这是纯字符串规则，不需要任何站点知识。
+    The official href and the anchor we store need not agree on spelling
+    (`screen-insets` versus `screeninsets`): our anchors come from flattened
+    headings (see `text.heading_anchor`), so flattening both sides by the same
+    rule makes them meet. Pure string handling, no site knowledge required.
     """
     for candidate in URL_RE.findall(query):
         fragment = urllib.parse.urlsplit(candidate).fragment
@@ -138,10 +158,10 @@ def target_fragment(query: str) -> str:
 
 
 def query_qualifiers(query: str) -> list[str]:
-    """查询里"这东西在哪儿"的那几段：`std::ranges::sort` → `['ranges']`。
+    """The "where does this live" segments of a query: `a::b::name` → `['b']`.
 
-    只留够长的段：`std` 这种两三个字母的命名空间在任何路径里都撞得到，
-    拿它排序等于随机。
+    Only segments long enough to mean something: a two or three letter
+    namespace collides with any path at all, so ordering by it is random.
     """
     found: list[str] = []
     for token in tokenize(query):
@@ -153,12 +173,14 @@ def query_qualifiers(query: str) -> list[str]:
 
 
 def identifier_tokens(query: str) -> list[str]:
-    """查询里"一看就是个符号"的词：带 `::`、下划线或驼峰的那些。
+    """Words in the query that are visibly symbols: `::`, underscores, camel
+    case.
 
-    普通英文词不算。`milliseconds` 单独拿去对 slug 会扫回一大片，
-    而 `duration_cast` 基本只可能是那一页——所以只有后者够格单独定位。
-    这也是概念提问不会误触发补抓的原因：`how do I make an object glow`
-    里一个符号形状的词都没有。
+    Ordinary English words do not count. A plain noun taken to the slugs
+    sweeps back a whole region, whereas a compound identifier can realistically
+    be only that one page — so only the latter is allowed to locate on its own.
+    This is also why conceptual questions never trigger a fetch: "how do I
+    make an object glow" contains no symbol-shaped word at all.
     """
     identifier_re = active().identifier_re
     found: list[str] = []
@@ -173,9 +195,10 @@ def identifier_tokens(query: str) -> list[str]:
 
 
 def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
-    """返回 [(档位, WHERE 片段, 参数)]，从最确定到最宽松。"""
+    """Returns [(tier, WHERE fragment, params)], most certain to loosest."""
     stages: list[tuple[str, str, tuple[Any, ...]]] = []
-    # 地址排在所有名字之前：它不是"很像那一页"，它就是那一页。
+    # Addresses come before every name: an address is not "much like that
+    # page", it is that page.
     if paths := target_paths(query):
         stages.append(
             ("exact_url", f"path IN ({','.join('?' for _ in paths)})", tuple(paths))
@@ -185,9 +208,9 @@ def _candidate_queries(query: str) -> list[tuple[str, str, tuple[Any, ...]]]:
         return stages
     placeholders = ",".join("?" for _ in names)
     stages.append(("exact_slug", f"normalized_slug IN ({placeholders})", tuple(names)))
-    # 整条查询对不上，但里面某个符号正好就是一页的名字——`duration_cast
-    # milliseconds` 里的 `duration_cast` 就是这样。只认符号形状的词，
-    # 所以自然语言提问不会掉进来。
+    # The whole query matches nothing, but one symbol inside it is exactly a
+    # page name — the identifier in "some_identifier some noun". Only
+    # symbol-shaped words qualify, so natural-language questions stay out.
     if tokens := [name for name in identifier_tokens(query) if name not in names]:
         stages.append(
             (
@@ -236,9 +259,10 @@ def _collect(
                 (stage, *params, *category_params, limit * 3),
             )
         )
-        # 同一档里若干页同名时，用户写出来的限定符就是区分它们的那一段：
-        # `std::ranges::sort` 的 `ranges` 明明白白写在正确那一页的地址里。
-        # 稳定排序，所以没有限定符命中时上面 SQL 的顺序原样保留。
+        # When several pages in one tier share a name, the qualifier the user
+        # wrote out is the segment that tells them apart: the `b` of `a::b::name`
+        # is spelled plainly in the address of the right page. A stable sort, so
+        # with no qualifier hit the SQL order above survives untouched.
         if qualifiers:
             found.sort(
                 key=lambda row: -sum(
@@ -266,7 +290,8 @@ def find_uncrawled_candidates(
     category: str | None = None,
     exact_only: bool = False,
 ) -> list[sqlite3.Row]:
-    """在清单里找出"很可能是用户要的、但还没抓正文"的页面。"""
+    """Inventory pages that are very likely what was asked for, body not
+    fetched yet."""
     stages = _candidate_queries(query)
     if exact_only:
         stages = [stage for stage in stages if stage[0] == "exact_slug"]
@@ -278,10 +303,13 @@ def find_uncrawled_candidates(
 def missing_exact_pages(
     connection: sqlite3.Connection, query: str, category: str | None = None
 ) -> int:
-    """清单里有一页正好叫这个名字，但还没抓——这种情况一定要补抓。
+    """A page named exactly this sits in the inventory unfetched — always
+    worth fetching.
 
-    否则会出现这种事：问 `GetCharacterMovement`，本地只有某篇教程的代码示例
-    顺带提到了它，于是就用那段代码来回答，而真正的 API 页面明明就在清单里。
+    Otherwise this happens: asked for an exact symbol name, the only local
+    match is a tutorial's code sample that mentions it in passing, so the
+    answer is built from that snippet while the real API page is right there
+    in the inventory.
     """
     names = query_names(query)
     if not names:
@@ -305,29 +333,35 @@ def weak_candidates(
     category: str | None = None,
     limit: int = 3,
 ) -> list[dict[str, str]]:
-    """线索不够、不敢自动补抓，但清单里确实沾边的页面。
+    """Inventory pages that are related but the clues are too thin to fetch.
 
-    "线索不足以安全补抓"和"清单里确实没有这一页"是两回事，以前都表现成同一句
-    "官方文档确实没有这一页"。前者该把候选摆出来让人自己定，后者才是真没有。
+    "The clues are not strong enough to fetch safely" and "the inventory
+    really has no such page" are different things, and both used to surface as
+    the same sentence. The first should put candidates on the table and let a
+    human decide; only the second is a genuine absence.
 
-    这里用的条件比补抓宽得多（任意一个实词出现在路径里就算），所以**只报告、
-    不抓取**——照这个条件去抓，一个宽泛问题就能拖回一整片无关页面。
+    The condition here is far looser than the fetching tier (any one content
+    word appearing in the path counts), so this **reports only, never
+    fetches** — fetching on this condition would drag back a whole region of
+    unrelated pages for one broad question.
     """
     raw = tokenize(query)
     tokens = coverage_tokens(query)
-    # 至少三个实词，才谈得上"差一个"。两个词里差一个就只剩一个词，
-    # 那跟随便找个词去撞没有区别。
+    # Three content words minimum before "one word short" means anything. One
+    # short out of two leaves a single word, which is no better than picking a
+    # word at random.
     if len(tokens) < MIN_COVERAGE_TOKENS + 1:
         return []
-    # 虚词占了一半以上，这就是一句话，不是一个页面名。
-    # "how do I make an object glow" 里 how/do/I/an 全是虚词，剩下的
-    # make + object 能撞上一堆 MakeXxxObject 页面——那是噪音，不是候选。
-    # 摆出来只会把人带偏，还不如老实说没找到。
+    # More than half function words: this is a sentence, not a page name. In
+    # "how do I make an object glow" the how/do/I/an are all function words,
+    # and the remaining make + object hit a pile of unrelated pages — noise,
+    # not candidates. Showing them only misleads; better to say nothing found.
     if len(tokens) * 2 < len(raw):
         return []
-    # 补抓那一档要求**每个**实词都出现在路径里。这里放宽整整一个词：
-    # 差一个词的页面往往就是用户要的（"camera field of view settings" 差的是
-    # settings），但"差一个"还不足以替用户决定去抓，所以只报告不抓取。
+    # The fetching tier requires **every** content word in the path. Here that
+    # is relaxed by a full word: a page one word short is often the one wanted
+    # ("camera field of view settings" missing settings), but one word short
+    # is not enough to decide on the user's behalf, so report without fetching.
     flattened = _flattened_path()
     matched = " + ".join(f"(CASE WHEN {flattened} LIKE ? THEN 1 ELSE 0 END)" for _ in tokens)
     sql = f"SELECT path, category FROM pages WHERE {_PENDING} AND ({matched}) >= ?"
@@ -336,7 +370,8 @@ def weak_candidates(
     if category:
         sql += " AND category=?"
         params.append(category)
-    # 不排序：这只是"要不要人工看一眼"的提示，而 ORDER BY 会逼着扫完全表再排。
+    # Unordered on purpose: this is only a hint that a human might want a look,
+    # and ORDER BY would force a full table scan before sorting.
     sql += " LIMIT ?"
     params.append(limit)
     return [
@@ -348,13 +383,16 @@ def weak_candidates(
 def linked_but_unlisted(
     connection: sqlite3.Connection, query: str, *, limit: int = 3
 ) -> list[dict[str, str]]:
-    """别的页面链接过去、但全站清单里根本没有的目标页。
+    """Pages other pages link to that the site inventory never listed.
 
-    这是"官方确实没有这一页"和"我们的来源没枚举到这一页"之间的分界线。
-    答错方向的代价很实在：用户会一遍遍改查询词，而真正该改的是来源适配器的
-    枚举范围——那一页在官网上好好地待着，只是我们从来没把它列进来。
+    This is the line between "the official docs really have no such page" and
+    "our source never enumerated it". Getting that wrong costs real effort:
+    the user keeps rewording the query when what needs changing is the source
+    adapter's enumeration — the page sits on the official site perfectly well,
+    we simply never listed it.
 
-    只在"什么都没找到"时才会走到这里，所以这个全表扫描不在常用路径上。
+    Only reached when nothing at all was found, so this full scan is off the
+    common path.
     """
     names = set(query_names(query))
     if not names:
@@ -382,11 +420,12 @@ def inventory_lookup(
     category: str | None = None,
     limit: int = 5,
 ) -> dict[str, Any]:
-    """清单对这个名字知道些什么。
+    """What the inventory knows about this name.
 
-    没有它，"查不到"就只能是一个空结果——调用方分不清是官方压根没这一页、
-    这一页在清单里躺着只是正文还没取、还是我们的来源根本没枚举到它。
-    三件事的下一步完全不同。
+    Without it, "not found" can only be an empty result, and the caller cannot
+    tell whether the official docs have no such page, the page is sitting in
+    the inventory with its body not yet fetched, or our source never
+    enumerated it at all. The next step differs in all three cases.
     """
     stages = _candidate_queries(query)
     pending = _collect(
@@ -415,14 +454,17 @@ def inventory_lookup(
             {
                 "path": row["path"],
                 "category": row["category"],
-                # 抓过了不等于有正文：官方撤掉的页面会留下一个只有跳转的空壳。
-                # 这两样让调用方分得清"没命中查询词"和"这一页已经没有内容了"。
+                # Fetched is not the same as having a body: a page withdrawn
+                # upstream leaves a shell holding nothing but a redirect. These
+                # two let the caller tell "missed the query words" apart from
+                # "this page no longer has content".
                 "status": row["status"],
                 "redirect_url": row["redirect_url"],
             }
             for row in crawled
         ],
-        # 后两样只在什么都没找到时才算：它们回答的是"到底是哪一种没有"。
+        # The last two only count when nothing was found at all: they answer
+        # which kind of absence this is.
         "linked_targets": (
             linked_but_unlisted(connection, query) if not pending and not crawled else []
         ),
@@ -441,7 +483,7 @@ def fetch_now(
     workers: int = 4,
     quiet: bool = False,
 ) -> dict[str, Any]:
-    """立刻抓这几页并入库。返回成功/失败统计。"""
+    """Fetch these pages now and store them. Returns success/failure counts."""
     if not rows:
         return {"requested": 0, "succeeded": 0, "failed": 0, "pages": []}
 
@@ -471,7 +513,7 @@ def fetch_now(
             else:
                 failed += 1
                 if not quiet:
-                    log(f"按需抓取失败 {row['path']}：{result['error']}")
+                    log(f"On-demand fetch failed for {row['path']}: {result['error']}")
     connection.commit()
     return {
         "requested": len(rows),
@@ -490,10 +532,12 @@ def ensure_available(
     quiet: bool = False,
     exact_only: bool = False,
 ) -> dict[str, Any]:
-    """本地没有就现抓——`ask` 命中不到时自动走这条路。
+    """Fetch on the spot when nothing is held locally — the path `ask` takes
+    when it finds no hit.
 
-    `exact_only=True` 用在"本地已经有些结果、但清单里还有一页正好同名"的情况：
-    只补那一页，不顺带把一堆名字相近的页面拉进来。
+    `exact_only=True` is for "some local results exist, but the inventory also
+    holds a page named exactly this": fill in that one page without dragging
+    in a crowd of similarly named ones.
     """
     limit = max(1, min(limit, MAX_FETCH_LIMIT))
     candidates = find_uncrawled_candidates(
@@ -508,7 +552,7 @@ def ensure_available(
                 {category_labels.get(r["category"], r["category"]) for r in candidates}
             )
         )
-        log(f"本地还没有这一页，正在按需抓取 {len(candidates)} 页（{labels}）…")
+        log(f"Not held locally; fetching {len(candidates)} page(s) on demand ({labels})…")
     outcome = fetch_now(connection, candidates, quiet=quiet)
     outcome["relations"] = link_new_pages(
         connection, [page["page_id"] for page in outcome["pages"]]

@@ -1,5 +1,5 @@
-name: 提议增强
-description: 提出能力、体验、架构或协作流程上的改进方向
+name: Propose an enhancement
+description: A direction for improving capability, experience, architecture or process
 title: "[Enhancement] "
 labels:
   - enhancement
@@ -8,50 +8,50 @@ body:
   - type: markdown
     attributes:
       value: |
-        增强建议描述希望改善的结果，不要求提交者预先设计最终方案。
+        An enhancement describes the outcome you want improved. You are not expected to design the final solution.
 
   - type: textarea
     id: background
     attributes:
-      label: 背景
-      description: 当前能力或限制是什么，为什么值得讨论？
+      label: Background
+      description: What is the current capability or limitation, and why is it worth discussing?
     validations:
       required: true
 
   - type: textarea
     id: goal
     attributes:
-      label: 目标
-      description: 描述希望改善的用户结果，不预先绑定具体实现。
+      label: Goal
+      description: The user-visible outcome you want improved, without committing to an implementation.
     validations:
       required: true
 
   - type: textarea
     id: directions
     attributes:
-      label: 可能方向
-      description: 可选；记录帮助思考的方向及权衡，不把它们写成既定方案。
+      label: Possible directions
+      description: Optional. Directions and trade-offs worth thinking about, not settled plans.
 
   - type: textarea
     id: non_goals
     attributes:
-      label: 非目标
-      description: 当前不要求解决什么，以避免范围失控。
+      label: Non-goals
+      description: What this does not ask to solve, so the scope stays contained.
 
   - type: textarea
     id: validation
     attributes:
-      label: 验证思路
-      description: 将来怎样判断这个增强确实有效？
+      label: How to verify
+      description: How would we later tell whether this enhancement actually worked?
     validations:
       required: true
 
   - type: checkboxes
     id: checks
     attributes:
-      label: 提交前确认
+      label: Before submitting
       options:
-        - label: 我已经搜索现有 Issues，暂未发现相同建议。
+        - label: I searched the existing issues and found no duplicate.
           required: true
-        - label: 这份建议说明的是目标和约束，而不是要求采用唯一实现。
+        - label: This proposal states goals and constraints rather than demanding one implementation.
           required: true

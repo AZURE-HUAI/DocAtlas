@@ -1,4 +1,4 @@
-"""数据合同验收。"""
+"""Data contract validation."""
 
 from __future__ import annotations
 
@@ -13,15 +13,17 @@ from .constants import CHUNKER_VERSION
 from .runtime import active
 from .util import utc_now
 
-# 抽查多少篇原文来核对语言。全量解压太慢，而"要错就整批错"，抽样足够。
+# How many stored bodies to sample when checking language. Decompressing all of
+# them is slow, and this failure mode is all-or-nothing, so a sample suffices.
 LOCALE_SAMPLE_SIZE = 300
 
 
 def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
-    """服务器实际回了哪些语言版本，按篇数统计。
+    """Which language versions the server actually returned, counted by document.
 
-    数据集里的 `language` 是指令不是事实：站点没有你要的语言时，多半不报错，
-    只不声不响回默认语言。不对一遍，就会得到一个标着德语的英文库。
+    A dataset's `language` is an instruction, not a fact: when a site lacks the
+    language you asked for, it usually does not error but quietly returns its
+    default. Without checking, you end up with an English library labelled German.
     """
     read_locale = getattr(active().source, "document_locale", None)
     if read_locale is None:
@@ -35,7 +37,7 @@ def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
         try:
             payload = json.loads(zlib.decompress(blob))
         except (zlib.error, ValueError):
-            continue  # 坏掉的存档由别的检查去管，这里只看语言
+            continue  # broken archives are another check's business; language only
         locale = read_locale(payload)
         if locale:
             seen[locale.lower()] += 1
@@ -43,10 +45,11 @@ def fetched_locales(connection: sqlite3.Connection) -> collections.Counter:
 
 
 def expected_evidence_kinds() -> list[str]:
-    """这个数据集本应产出哪几类关系证据。
+    """Which kinds of relation evidence this dataset ought to produce.
 
-    官方链接是通用的，任何文档站都有；成员表只有认得它的来源适配器才会产出；
-    其余由领域知识包声明自己会推出哪几类。
+    Official links are generic and exist on any documentation site; member tables
+    only appear when the source adapter recognizes them; the rest are declared by
+    the knowledge pack as what it will infer.
     """
     from .members import supported as members_supported
 
@@ -58,16 +61,18 @@ def expected_evidence_kinds() -> list[str]:
 
 
 def link_coverage_observation(connection: sqlite3.Connection) -> dict[str, Any]:
-    """来源清单有没有漏掉别的页面正在链接的目录。
+    """Whether the source inventory missed directories other pages link into.
 
-    刻意**不算作合同违反**：官方站点地图列不列某个目录是站点自己的事，
-    把它判成失败会让一个本来健康的库无缘无故变红。但它必须被说出来——
-    "别的页面链过去、清单里却没有"是来源范围划漏的唯一早期信号，
-    不报出来就只能等到用户查不到东西时再从头排查。
+    Deliberately **not** treated as a contract violation: whether an official
+    sitemap lists a directory is the site's own business, and failing the library
+    for it would turn a healthy build red for no reason. But it must be said out
+    loud — "other pages link there and the inventory has it not" is the only early
+    signal that the source scope was drawn too narrowly, and unreported it surfaces
+    only when a user cannot find something.
     """
     gaps = relations.link_target_gaps(connection)
-    areas = "；".join(
-        f"{item['area']}（{item['links']} 条链接）"
+    areas = "; ".join(
+        f"{item['area']} ({item['links']} links)"
         for item in gaps["top_uncovered_areas"]
     )
     return {
@@ -76,14 +81,15 @@ def link_coverage_observation(connection: sqlite3.Connection) -> dict[str, Any]:
         "missing_targets": gaps["missing_targets"],
         "uncovered_areas": gaps["uncovered_areas"],
         "detail": (
-            f"{gaps['pending_targets']:,} 条链接指向清单里已有、但正文尚未抓取的页面"
-            "（用 get 或 ask 就能补上）。"
+            f"{gaps['pending_targets']:,} links point at pages the inventory has "
+            "but whose bodies are not fetched yet (get or ask will fill them in)."
             + (
-                f"另有 {gaps['missing_targets']:,} 条指向清单里根本没有的页面，"
-                f"集中在 {gaps['uncovered_areas']} 个完全没被枚举的目录：{areas}。"
-                "这类要改来源适配器的枚举范围，抓多少次都不会有。"
+                f"A further {gaps['missing_targets']:,} point at pages the inventory "
+                f"lacks, in {gaps['uncovered_areas']} unenumerated directories: {areas}. "
+                "These need the source adapter's enumeration scope changed; no "
+                "amount of fetching will produce them."
                 if gaps["uncovered_areas"]
-                else "没有发现整目录缺失的情况。"
+                else "No wholly missing directories found."
             )
         ),
     }
@@ -110,17 +116,18 @@ def validate_contract(
     add(
         "inventory_feeds_complete",
         feeds_total - feeds_ok,
-        f"全部清单入口必须成功读取（共 {feeds_total}，成功 {feeds_ok}）",
+        f"every inventory feed must be read successfully ({feeds_total}, ok {feeds_ok})",
     )
-    # 只统计"不合格的行"是不够的：一个刚建好的空库一行都没有，于是一行都不
-    # 不合格，全部通过、退出码 0。空 ≠ 合格，得单独确认它确实有东西。
+    # Counting only "non-conforming rows" is not enough: a freshly created empty
+    # library has no rows, so nothing fails, everything passes and the exit code is
+    # 0. Empty is not the same as valid, so confirm separately that it holds data.
     page_total = connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
     add(
         "inventory_not_empty",
         0 if feeds_ok and page_total else 1,
-        "数据集至少要有一个成功的清单入口和一个页面；"
-        f"当前成功入口 {feeds_ok}、页面 {page_total:,}。"
-        "为 0 说明还没跑过 `crawl --discovery-only`，或者跑到一半失败了",
+        "a dataset needs at least one successful inventory feed and one page; "
+        f"currently {feeds_ok} feed(s) and {page_total:,} page(s). "
+        "Zero means `crawl --discovery-only` never ran, or failed part way",
     )
     counts = {
         row["category"]: row["count"]
@@ -128,8 +135,9 @@ def validate_contract(
             "SELECT category, COUNT(*) AS count FROM pages GROUP BY category"
         )
     }
-    # 配置声明了一个分类，却一页都没枚举到，几乎总是分类规则写错了——
-    # 这种错不会报异常，只会让整整一类文档静静地缺席。
+    # A category declared in config that enumerated no pages is nearly always a
+    # mistaken category rule — an error that raises nothing and merely leaves a
+    # whole class of documentation quietly absent.
     required = [
         key
         for key in active().dataset.categories
@@ -139,13 +147,13 @@ def validate_contract(
     add(
         "declared_categories_have_pages",
         len(empty),
-        "配置声明的每个分类都要枚举到页面："
+        "every category declared in config must enumerate pages: "
         + (
-            "、".join(f"{key} 为 0" for key in empty)
-            + "（确实可能为空的分类请写进 optional_categories）"
+            ", ".join(f"{key} is 0" for key in empty)
+            + " (list genuinely-empty categories in optional_categories)"
             if empty
-            else "、".join(f"{key}×{counts.get(key, 0):,}" for key in required)
-            or "（没有声明任何分类）"
+            else ", ".join(f"{key}x{counts.get(key, 0):,}" for key in required)
+            or "(no categories declared)"
         ),
     )
     add(
@@ -158,11 +166,12 @@ def validate_contract(
                OR route_depth IS NULL
             """
         ).fetchone()[0],
-        "页面必须具有路径、类型、版本和语言",
+        "pages must carry a path, category, version and language",
     )
-    # 来源清单入口刻意不在上面那条里：页面有两种来路，清单入口列出来的，
-    # 和范围内正文引用进来的（`coverage.admit_linked_targets`，`sitemap_url`
-    # 留空）。把"必须有站点地图"写成硬要求，等于禁止第二种来路存在。
+    # Inventory feeds are deliberately excluded from the check above: pages arrive
+    # by two routes, listed by a feed, or referenced by an in-scope body
+    # (`coverage.admit_linked_targets`, which leaves `sitemap_url` empty). Making
+    # "must have a sitemap" a hard requirement would forbid the second route.
     add(
         "page_provenance",
         connection.execute(
@@ -170,7 +179,7 @@ def validate_contract(
             " AND path NOT IN (SELECT target_path FROM page_links"
             "                  WHERE target_path IS NOT NULL)"
         ).fetchone()[0],
-        "没有来源清单入口的页面，必须是被正文引用进来的",
+        "a page with no inventory feed must have been referenced by a body",
     )
     duplicate_paths = connection.execute(
         """
@@ -179,7 +188,7 @@ def validate_contract(
         )
         """
     ).fetchone()[0]
-    add("unique_page_paths", duplicate_paths, "规范化页面路径必须唯一")
+    add("unique_page_paths", duplicate_paths, "normalized page paths must be unique")
     if phase == "content":
         add(
             "successful_page_raw_revision",
@@ -192,7 +201,7 @@ def validate_contract(
                   )
                 """
             ).fetchone()[0],
-            "每个成功页面必须有原始 JSON 修订",
+            "every successful page must have a stored raw revision",
         )
         add(
             "successful_page_entity",
@@ -205,7 +214,7 @@ def validate_contract(
                   )
                 """
             ).fetchone()[0],
-            "每个成功页面必须有主实体",
+            "every successful page must have a primary entity",
         )
         add(
             "chunk_required_fields",
@@ -218,14 +227,14 @@ def validate_contract(
                    OR token_estimate <= 0
                 """
             ).fetchone()[0],
-            "知识块的标题、层级、正文、类型、来源和 token 必须完整",
+            "chunks need a title, level, body, type, source and token estimate",
         )
         add(
             "chunk_size_limit",
             connection.execute(
                 "SELECT COUNT(*) FROM chunks WHERE token_estimate > 900"
             ).fetchone()[0],
-            "知识块估算不得超过 900 tokens",
+            "a chunk must not be estimated above 900 tokens",
         )
         add(
             "relation_evidence",
@@ -236,7 +245,7 @@ def validate_contract(
                    OR confidence < 0 OR confidence > 1
                 """
             ).fetchone()[0],
-            "关系必须有证据、来源和合法置信度",
+            "relations need evidence, a source and a valid confidence",
         )
         add(
             "chunk_parser_version",
@@ -245,7 +254,7 @@ def validate_contract(
                 " AND COALESCE(parser_version,'')!=?",
                 (CHUNKER_VERSION,),
             ).fetchone()[0],
-            f"每个成功页面都应已按当前切分规则（{CHUNKER_VERSION}）加工",
+            f"every successful page must be processed by chunker {CHUNKER_VERSION}",
         )
         add(
             "chunk_neighbour_pointers",
@@ -259,10 +268,11 @@ def validate_contract(
                   )
                 """
             ).fetchone()[0],
-            "相邻块指针必须指向同一页里真实存在的块",
+            "neighbour pointers must reference real chunks on the same page",
         )
-        # 加工规则一改就可能把某类证据整类做没——只看"跑完没报错"发现不了，
-        # 得盯着每类证据的产出量。曾经就因为丢掉一类小节，让一整类关系归零。
+        # A processing change can wipe out an entire kind of evidence, which
+        # "it ran without error" will never reveal; only the per-kind output counts
+        # will. Dropping one kind of section once zeroed a whole class of relations.
         expected = expected_evidence_kinds()
         missing = [
             kind
@@ -275,19 +285,20 @@ def validate_contract(
         add(
             "relation_evidence_coverage",
             len(missing),
-            "本应产出的每类关系证据都要真的有："
-            + ("、".join(missing) + " 一条都没有" if missing else "、".join(expected)),
+            "every expected kind of relation evidence must actually be present: "
+            + (", ".join(missing) + " has none" if missing else ", ".join(expected)),
         )
-        # 语言是**选的**不是猜的，所以没法自动填；但"选的有没有生效"能自动查。
+        # Language is **chosen**, not guessed, so it cannot be filled in
+        # automatically; but whether the choice took effect can be checked.
         locales = fetched_locales(connection)
         language = active().language
         wrong = sum(n for code, n in locales.items() if code != language.lower())
         add(
             "fetched_language_matches_declaration",
             wrong,
-            f"抓回来的正文应当都是声明的 {language}"
+            f"fetched bodies should all be in the declared {language}"
             + (
-                "，实际抽到：" + "、".join(f"{c}×{n}" for c, n in locales.most_common())
+                ", sampled: " + ", ".join(f"{c}x{n}" for c, n in locales.most_common())
                 if wrong
                 else ""
             ),
@@ -300,6 +311,7 @@ def validate_contract(
         "checks": checks,
     }
     if phase == "content":
-        # 观察项不参与 pass/fail：它们是"值得知道"，不是"违反了合同"。
+        # Observations take no part in pass/fail: they are worth knowing, not
+        # contract violations.
         report["observations"] = [link_coverage_observation(connection)]
     return report

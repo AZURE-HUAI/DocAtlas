@@ -1,24 +1,29 @@
-"""页面成员实体。
+"""Page member entities.
 
-一页文档不一定只讲一个东西。类型页会用表格列出它的属性和方法，而这些成员
-**大多没有自己的页面**——Unreal 的 `TargetArmLength`、`CrouchedHalfHeight`
-只存在于 `USpringArmComponent` / `UCharacterMovementComponent` 的成员表里。
-以前"一页 = 一个实体"，于是这些名字在库里根本不存在：搜得到正文，
-`related` 却只会回 `entity_not_found`。
+A document page does not always describe only one thing. Type pages list their
+properties and methods in tables, and most of those members **have no page of
+their own**: a property may exist only inside the member table of the type that
+owns it. Treat one page as exactly one entity and those names do not exist in the
+library at all — the body text is searchable, but `related` can only answer
+`entity_not_found`.
 
-这里做的事只有一件：**把成员表里的成员提升为实体**。怎么认出成员表是站点
-知识，归来源适配器（`page_members`）；成员在领域里还能叫什么名字是领域知识，
-归知识包（`member_aliases`）；这个文件只负责规范化、定身份、去重和落库形状。
+This module does one thing: **promote the members of a member table into
+entities**. Recognizing a member table is site knowledge and belongs to the
+source adapter (`page_members`); what a member may also be called within its
+domain is domain knowledge and belongs to the knowledge pack (`member_aliases`).
+This file only handles normalization, identity, deduplication and storage shape.
 
-三条不变量，后面所有代码都靠它们成立：
+Three invariants everything below relies on:
 
-* **成员实体永远和它的所有者在同一页。** 于是 `DELETE FROM entities
-  WHERE page_id=?` 重新加工一页时会连成员一起删干净，不需要额外的清理代码。
-* **身份带所有者**：`qualified_name` 是 `USpringArmComponent::ClientLoc`。
-  `ACharacter` 和 `UCharacterMovementComponent` 各有一个 `ClientLoc`，
-  30 个这样的同名属性不能串成一个。
-* **有自己页面的成员不在这里出现。** 成员表里带链接的那一行说明官方给它出了
-  页面，那一页本身就是实体，再提升一次就是同一个东西存两份。
+* **A member entity always lives on the same page as its owner.** So
+  `DELETE FROM entities WHERE page_id=?` when reprocessing a page removes its
+  members along with it, requiring no extra cleanup code.
+* **Identity includes the owner**: `qualified_name` is `Owner::member`. Two
+  unrelated types may each declare a member of the same name, and those must
+  not collapse into one entity.
+* **Members that have their own page never appear here.** A linked row in a
+  member table means the site published a page for it, and that page is already
+  the entity; promoting it again would store one thing twice.
 """
 
 from __future__ import annotations
@@ -31,13 +36,14 @@ from .runtime import active
 from .text import normalize_name
 
 
-# 改了成员识别规则就 +1：已抓页面会整批重算一次，
-# 否则新规则只对以后抓的页面生效，同一个库里两套成员。
+# Bump on any change to member recognition rules: already-fetched pages are then
+# recomputed in bulk. Otherwise new rules apply only to future pages and one
+# library ends up holding two generations of members.
 MEMBERS_VERSION = "1"
 
 
 def supported() -> bool:
-    """当前数据集的来源适配器认不认成员表。"""
+    """Whether the current dataset's source adapter recognizes member tables."""
     return active().extension("page_members") is not None
 
 
@@ -50,11 +56,12 @@ def collect(
     sections: list[dict[str, Any]],
     module: str | None,
 ) -> list[dict[str, Any]]:
-    """把适配器认出的成员规范化成实体描述。
+    """Normalize adapter-reported members into entity descriptions.
 
-    适配器只报告事实（叫什么、是哪一类、签名、摘要、原样的修饰符），
-    起限定名、定别名、去重都在这里——这样接一个新站点只要会读它自己的表格，
-    不必知道实体长什么样。
+    The adapter reports facts only (name, kind, signature, summary, modifiers as
+    written); qualified names, aliases and deduplication happen here. That way
+    supporting a new site needs only the ability to read its own tables, without
+    knowing what an entity looks like.
     """
     reader = active().extension("page_members")
     if reader is None:
@@ -76,8 +83,9 @@ def collect(
         normalized = normalize_name(name)
         if not name or not entity_type or not normalized:
             continue
-        # 同一页上同名同类的成员只留第一条：重载和被覆盖的虚函数会在
-        # 好几个小节里重复出现，它们是同一个成员的不同签名。
+        # Keep only the first same-name, same-kind member on a page: overloads
+        # and overridden virtuals recur across several sections, and those are
+        # different signatures of one member.
         if (entity_type, normalized) in seen:
             continue
         seen.add((entity_type, normalized))
@@ -115,11 +123,12 @@ def collect(
 
 
 def backfill(connection: sqlite3.Connection) -> int:
-    """对已抓正文重跑一遍成员识别。纯本地计算，不联网。
+    """Re-run member recognition over already-fetched bodies. Local, no network.
 
-    加了成员能力（或改了识别规则）的时候，库里已有的页面不该为此重抓一遍——
-    小节正文都还在，重新读一次表格就够了。适配器不认成员表的数据集直接跳过，
-    一条 SQL 都不会发。
+    When member support is added, or its rules change, pages already in the
+    library should not be refetched for it: the section bodies are still there, so
+    rereading the tables is enough. Datasets whose adapter does not recognize
+    member tables are skipped without issuing a single SQL statement.
     """
     if not supported():
         return 0
@@ -129,7 +138,7 @@ def backfill(connection: sqlite3.Connection) -> int:
     if stored and stored[0] == MEMBERS_VERSION:
         return 0
 
-    # 重算前先清掉上一轮的成员，否则改名后的旧成员会永远留在库里。
+    # Clear the previous pass's members first, or renamed ones linger forever.
     connection.execute("DELETE FROM entities WHERE member_of_id IS NOT NULL")
     created = 0
     owners = list(

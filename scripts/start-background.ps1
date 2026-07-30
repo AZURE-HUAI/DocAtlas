@@ -14,19 +14,19 @@ $inventorySummaryPath = $InventorySummaryPath
 
 if ($Mode -eq 'content') {
     if (-not (Test-Path -LiteralPath $inventorySummaryPath)) {
-        throw '尚未生成完整页面清单，拒绝启动正文阶段。'
+        throw 'No complete page inventory yet; refusing to start the body phase.'
     }
     $inventory = Get-Content -LiteralPath $inventorySummaryPath -Raw |
         ConvertFrom-Json
     if ($inventory.status -ne 'complete' -or $inventory.failed_sitemaps -ne 0) {
-        throw '页面清单尚未达到 complete，拒绝启动正文阶段。'
+        throw 'The page inventory is not complete; refusing to start the body phase.'
     }
 }
 
 if (Test-Path -LiteralPath $pidPath) {
     $existingPid = [int](Get-Content -LiteralPath $pidPath -Raw)
     if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) {
-        Write-Host "后台任务已经在运行，PID：$existingPid"
+        Write-Host "A background task is already running, PID $existingPid"
         exit 0
     }
 }
@@ -48,5 +48,5 @@ $process = Start-Process -FilePath 'powershell.exe' `
     -PassThru
 
 $process.Id | Set-Content -LiteralPath $pidPath -Encoding ASCII
-Write-Host "后台 $Mode 阶段已排队，PID：$($process.Id)"
-Write-Host '查看进度：.\docatlas.ps1 status'
+Write-Host "Background $Mode phase queued, PID $($process.Id)"
+Write-Host 'Watch progress with: .\docatlas.ps1 status'

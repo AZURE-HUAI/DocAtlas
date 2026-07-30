@@ -1,36 +1,41 @@
-"""清单覆盖缺口：把范围内正文引用到、清单里却没有的页面收进来。
+"""Inventory coverage gaps: collect pages that in-scope bodies reference but the
+inventory does not list.
 
-来源清单是站点自己给的（站点地图、`searchindex.js`、目录页），而站点给的
-那份清单和"读懂这批内容需要哪些页"从来不是一回事：
+The source inventory is whatever the site itself provides (sitemap,
+`searchindex.js`, index pages), and that list has never been the same thing as
+"which pages are needed to understand this material":
 
-* Blender 数据集只枚举 `render/shader_nodes/` 和 `modeling/geometry_nodes/`，
-  但节点页正文一直在链 `modeling/modifiers/geometry_nodes`、
-  `interface/controls/nodes/groups`——学节点绕不开的基础页，一页都没有。
-* Unreal 的站点地图没有列 55 个目录，而已抓正文往那里指了 397 次。
+* A dataset enumerating only the directories that hold its main subject still
+  has bodies linking constantly to foundational pages kept elsewhere in the
+  site — pages you cannot follow the material without, none of them present.
+* A sitemap may omit whole directories that already-fetched bodies point into
+  hundreds of times.
 
-这两件事形状一样，所以处理它的机制也只该有一套。判据不是"我觉得这些页重要"，
-而是**范围内的正文自己指过去了**：一篇我们决定收录的文档说"细节见那一页"，
-那一页就是这批内容的一部分。这是站点自己写的事实，不是猜测。
+Both have the same shape, so there should be only one mechanism for them. The
+criterion is not "these pages look important" but **an in-scope body pointed at
+them**: when a document we chose to include says "see that page for details",
+that page is part of this material. That is a fact the site wrote, not a guess.
 
-边界也从这里来，一共两层：
+The boundary comes from the same place, in two layers:
 
-* **只走一跳。** 收进来的页面处于 `pending`，它们自己的链接不会继续展开。
-  想再往外一层就再跑一次，那是一个明确的决定，不是无声的雪球。
-* **只收范围内页面引用的目标。** 起点必须是已经抓过正文的页。
+* **One hop only.** Collected pages are `pending`, and their own links are not
+  expanded further. Going one layer out means running again, which is an explicit
+  decision rather than a silent snowball.
+* **Only targets referenced by in-scope pages.** The starting point must be a
+  page whose body was already fetched.
 
-收进来的页面归哪一类，分两步问，各有各的负责人：
+Which category a collected page belongs to is asked in two steps, each with its
+own owner:
 
-    1. 问适配器（`categorize_path`）：这条路径在本站属于哪一类？
-       Unreal 的 `/API/…` 是 C++ API，Blender 的 `render/shader_nodes/…`
-       是着色器节点——这是站点布局，只有适配器知道。
-    2. 适配器认不出来，说明它落在数据集声明的目录之外。收不收由**数据集**
-       表态（`[inventory] referenced_category`），没表态就不收。
+    1. Ask the adapter (`categorize_path`): which category does this path belong
+       to on this site? That is site layout, and only the adapter knows it.
+    2. If the adapter cannot say, the path lies outside the directories the
+       dataset declared. Whether to collect it is the **dataset's** call
+       (`[inventory] referenced_category`); silence means do not collect.
 
-核心因此不认识任何一个具体目录，也不去猜。曾经试过"跟着相邻目录的分类走"
-这种零配置的猜法，在真实数据上两边都翻车：Blender 的
-`/render/eevee/material_settings` 会被判成着色器节点（`/render/` 底下确实
-只有 shader_nodes），Unreal 的一篇 Android 入门教程会被判成 C++ API
-（文档根底下 C++ API 页最多）。猜得看起来像，恰恰最难发现是错的。
+The core therefore knows no specific directory and does not guess. Inferring a
+category from neighbouring directories misclassifies on real data, and a wrong
+guess that looks plausible is the hardest kind to notice.
 """
 
 from __future__ import annotations
@@ -43,16 +48,18 @@ from .runtime import active
 from .util import utc_now
 
 
-# 改了"哪条链接算站内文档"的规则就 +1：已存链接会整批重判一次，
-# 否则新规则只对以后抓的页面生效，同一个库里两套判断。
+# Bump on any change to "which links count as in-site documents": stored links are
+# then re-judged in bulk. Otherwise new rules apply only to future pages and one
+# library holds two generations of judgements.
 LINK_TARGET_VERSION = "2"
 
 
 def reclassify_links(connection: sqlite3.Connection) -> int:
-    """对已存链接重跑一遍"这是不是站内文档"，不联网。
+    """Re-judge "is this an in-site document" over stored links, offline.
 
-    判断规则收在适配器里，规则一改，之前抓的页面就带着旧结论。重抓一遍代价
-    太大而且完全没必要——`page_links.target_url` 原样存着，重判即可。
+    The rule lives in the adapter, so when it changes, previously fetched pages
+    carry the old conclusion. Refetching would be expensive and pointless:
+    `page_links.target_url` is stored verbatim, so re-judging is enough.
     """
     stored = connection.execute(
         "SELECT value FROM metadata WHERE key='link_targets'"
@@ -61,16 +68,17 @@ def reclassify_links(connection: sqlite3.Connection) -> int:
         return 0
     normalize = getattr(active().source, "normalize_link_target", None)
     if normalize is None:
-        return 0  # 这个来源不认站内链接，没有可重判的东西
+        return 0  # this source has no notion of in-site links; nothing to redo
     dataset = active().dataset
     changed = 0
     for row in connection.execute("SELECT id, target_url, target_path FROM page_links"):
         target_path = normalize(dataset, row["target_url"])
         if target_path == row["target_path"]:
             continue
-        # 目标路径变了，之前解析出来的页面 id 就是旧结论——必须一并清掉，
-        # 否则这条链接会一直指着重判之前认定的那一页。清空之后由下面的
-        # resolve_link_targets 按新路径重新解析。
+        # A changed target path makes the previously resolved page id a stale
+        # conclusion, so it must be cleared too, or the link keeps pointing at
+        # the page chosen before re-judging. Once cleared, resolve_link_targets
+        # below resolves it again from the new path.
         connection.execute(
             "UPDATE page_links SET target_path=?, evidence_kind=?,"
             " target_page_id=NULL WHERE id=?",
@@ -87,19 +95,25 @@ def reclassify_links(connection: sqlite3.Connection) -> int:
 
 
 def referenced_category() -> str:
-    """整个目录都没被枚举过的引用目标归哪一类。空字符串表示不收。"""
+    """Category for referenced targets whose directory was never enumerated.
+
+    An empty string means do not collect them.
+    """
     return str(active().dataset.inventory_option("referenced_category", "") or "")
 
 
 def path_category(path: str) -> str | None:
-    """适配器认不认得这条路径属于本数据集的哪一类。没有这个能力就返回 None。"""
+    """Which category the adapter assigns this path, or None if it cannot say."""
     workspace = active()
     classify = getattr(workspace.source, "categorize_path", None)
     return classify(workspace.dataset, path) if classify else None
 
 
 def linked_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
-    """已抓正文链到了本站文档，而那一页不在清单里。按被引用次数排。"""
+    """In-site targets linked from fetched bodies but absent from the inventory.
+
+    Ordered by how often they are referenced.
+    """
     return list(
         connection.execute(
             """
@@ -125,15 +139,17 @@ def admit_linked_targets(
     min_links: int = 1,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """把被引用的清单外页面收进清单，状态 `pending`。
+    """Collect referenced out-of-inventory pages, with status `pending`.
 
-    收进来的页面 `sitemap_url` 留空——它们不是任何清单入口列出来的，
-    这一点必须在库里看得出来，否则下次重新枚举时会以为站点地图变了。
+    Collected pages leave `sitemap_url` empty: they were not listed by any
+    inventory feed, and that has to be visible in the database, or the next
+    enumeration would conclude the sitemap had changed.
 
-    地址一律由适配器按路径重新拼（`canonical_url`），**不用链接里那一串**。
-    正文里的链接常带着自己的包袱：Unreal 的链接会带 `application_version=5.5`
-    （5.8 的库里存一条 5.5 的地址，引用给用户就是错的），Blender 的会带
-    `#term-Alpha-Channel` 这样的片段。路径已经规范化过了，地址就该跟着它重算。
+    URLs are always rebuilt by the adapter from the path (`canonical_url`) rather
+    than taken from the link. Links in bodies carry their own baggage: a query
+    string pinning a different version (storing a 5.5 URL in a 5.8 library would
+    cite the wrong thing), or a fragment such as `#term-Alpha-Channel`. The path
+    is already normalized, so the URL should be recomputed from it.
     """
     fallback = referenced_category()
     workspace = active()
@@ -146,7 +162,8 @@ def admit_linked_targets(
             break
         category = path_category(row["path"]) or fallback
         if not category:
-            # 适配器不认得，数据集也没说要收——这不是漏网，是范围之外。
+            # Adapter cannot place it and the dataset did not ask for it: this is
+            # out of scope, not an oversight.
             skipped_no_area += 1
             continue
         depth, parent = route_metadata(row["path"])
@@ -175,7 +192,7 @@ def admit_linked_targets(
             {"path": row["path"], "category": category, "links": row["links"]}
         )
     if not dry_run and admitted:
-        # 新页面进来之后，指向它们的链接才解析得出目标 id。
+        # Only once the new pages exist can links to them resolve to a target id.
         connection.execute(
             """
             UPDATE page_links
