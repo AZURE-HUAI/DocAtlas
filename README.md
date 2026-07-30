@@ -1,5 +1,7 @@
 # DocAtlas
 
+[![tests](https://github.com/AZURE-HUAI/DocAtlas/actions/workflows/tests.yml/badge.svg)](https://github.com/AZURE-HUAI/DocAtlas/actions/workflows/tests.yml)
+
 A local documentation knowledge base for AI agents. It crawls official technical
 docs, splits them into small chunks with a full-text index and cross-references,
 and hands the agent **just the few passages it needs** — each one carrying the
