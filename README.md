@@ -33,6 +33,12 @@ clients run `python install.py --print` and paste the snippet.
 Options: `--data-dir D:/DocAtlasData` puts the databases on another drive,
 `--dataset <id>` picks which library is the default.
 
+If you keep a client's configuration somewhere other than the default —
+`CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — DocAtlas follows
+it. Every run prints the directory it resolved for each one, because a Skill
+written where the client does not read it looks exactly like a successful
+install from both ends.
+
 **This step wires up your agent and collects no documentation.** None ships
 here, and which docs to collect is your call — that is the next section.
 

@@ -16,6 +16,7 @@ import dataclasses
 import io
 import json
 import os
+
 from pathlib import Path
 import re
 import shutil
@@ -40,9 +41,9 @@ os.environ["DOCATLAS_HOME"] = _TEMP_HOME
 os.environ["DOCATLAS_DATASET"] = "EXAMPLE"
 
 from docatlas import (  # noqa: E402
-    chunking, config, context, coverage, crawl, dataset, db, discover, doctor,
-    htmlmd, members, net, ondemand, constants, relations, runtime, search,
-    store, text, validate, versions,
+    chunking, clients, config, context, coverage, crawl, dataset, db, discover,
+    doctor, htmlmd, members, net, ondemand, constants, relations, runtime,
+    search, store, text, validate, versions,
 )
 from docatlas import mcpserver  # noqa: E402
 from docatlas.db import connect_db, initialize_db  # noqa: E402
@@ -1943,6 +1944,101 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(posix, "DOCATLAS_DATASET=some-docs ")
         self.assertTrue(powershell.startswith("$env:DOCATLAS_DATASET="))
         self.assertIn(";", powershell)
+
+
+class ClientLocationTests(unittest.TestCase):
+    """Both clients can be moved elsewhere by an environment variable.
+
+    Getting this wrong is silent at both ends: the Skill is written into a
+    directory the client never reads, the installer reports success, and the
+    client goes on knowing nothing. Nothing raises, so only these cases stand
+    between that and a user who thinks the install worked.
+    """
+
+    MOVEABLE = ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
+
+    def setUp(self):
+        self.saved = {key: os.environ.get(key) for key in self.MOVEABLE}
+        for key in self.MOVEABLE:
+            os.environ.pop(key, None)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_unset_means_the_documented_default(self):
+        self.assertEqual(clients.home("claude-code"), Path.home() / ".claude")
+        self.assertEqual(clients.home("codex"), Path.home() / ".codex")
+        self.assertIsNone(clients.override("claude-code"))
+
+    def test_setting_the_variable_moves_the_skill_directory(self):
+        for client, variable in (("claude-code", "CLAUDE_CONFIG_DIR"),
+                                 ("codex", "CODEX_HOME")):
+            os.environ[variable] = str(Path(tempfile.gettempdir()) / "moved")
+            self.assertEqual(
+                clients.skill_dir(client, "docatlas"),
+                Path(tempfile.gettempdir()) / "moved" / "skills" / "docatlas",
+                client,
+            )
+            self.assertEqual(clients.override(client), variable)
+            del os.environ[variable]
+
+    def test_claude_config_is_a_sibling_by_default_but_a_child_once_moved(self):
+        """The asymmetry that makes "default path plus filename" wrong.
+
+        Unset, Claude Code reads `~/.claude.json`, which sits *beside*
+        `~/.claude` rather than inside it. Set, the file moves *into* the
+        override directory. Verified by running the client itself with the
+        variable set and seeing where it wrote.
+        """
+        self.assertEqual(clients.mcp_config("claude-code"), Path.home() / ".claude.json")
+        moved = Path(tempfile.gettempdir()) / "moved-claude"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(moved)
+        self.assertEqual(clients.mcp_config("claude-code"), moved / ".claude.json")
+
+    def test_codex_config_follows_its_variable(self):
+        self.assertEqual(clients.mcp_config("codex"), Path.home() / ".codex" / "config.toml")
+        moved = Path(tempfile.gettempdir()) / "moved-codex"
+        os.environ["CODEX_HOME"] = str(moved)
+        self.assertEqual(clients.mcp_config("codex"), moved / "config.toml")
+
+
+class SkillRenderingIsReproducibleTests(unittest.TestCase):
+    """The rendered Skill must not depend on how Python was started."""
+
+    def test_the_program_path_is_spelled_the_same_from_every_shell(self):
+        """On Windows `str(Path)` follows the shell that launched Python.
+
+        PowerShell yields `C:\\Users\\...`, Git Bash `C:/Users/...`, for the
+        same directory. Rendering that into the Skill makes the document differ
+        byte for byte depending on where the installer was run from, which both
+        breaks idempotence and makes any comparison against a fresh rendering
+        report a permanent, unfixable "out of date".
+        """
+        from docatlas import cli
+
+        # A stand-in whose two spellings genuinely differ, so this fails on any
+        # platform and under any shell. Reading the real root instead would go
+        # green wherever the shell happens to hand back forward slashes, hiding
+        # the bug everywhere except the one place it shows.
+        class WindowsStylePath:
+            def __str__(self):
+                return r"C:\Users\someone\DocAtlas"
+
+            def as_posix(self):
+                return "C:/Users/someone/DocAtlas"
+
+        original = cli.REPO_ROOT
+        cli.REPO_ROOT = WindowsStylePath()
+        self.addCleanup(setattr, cli, "REPO_ROOT", original)
+
+        root = cli.skill_substitutions()["DOCATLAS_ROOT"]
+        self.assertNotIn("\\", root, "the program path must not carry backslashes")
+        self.assertEqual(root, "C:/Users/someone/DocAtlas")
 
 
 class RuntimeWorkspaceTests(unittest.TestCase):

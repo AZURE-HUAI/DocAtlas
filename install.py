@@ -37,17 +37,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from docatlas import clients
+
 REPO_ROOT = Path(__file__).resolve().parent
 LAUNCHER = REPO_ROOT / "mcp_server.py"
 SERVER_NAME = "docatlas"
 SKILL_NAME = "docatlas"
 MIN_PYTHON = (3, 11)
 
-# Skills install to <home>/<client>/skills/<skill>/. Add a client with a line.
-SKILL_CLIENTS = {
-    "claude-code": Path.home() / ".claude",
-    "codex": Path.home() / ".codex",
-}
+# Skills install to <client home>/skills/<skill>/. Where that home is — and the
+# environment variable that moves it — is decided in docatlas/clients.py, so
+# installing, uninstalling and `doctor` can never disagree about the location.
 
 
 class Failed(Exception):
@@ -175,7 +175,7 @@ def register_codex(python: str) -> str | None:
     that already exists would make Codex fail to parse it outright — that is
     breaking the user's config, not installing.
     """
-    config = Path.home() / ".codex" / "config.toml"
+    config = clients.mcp_config("codex")
     if not config.parent.exists():
         return None
     text = config.read_text(encoding="utf-8") if config.exists() else ""
@@ -224,12 +224,12 @@ def render_skill() -> dict[str, str]:
 
 def install_skill(rendered: dict[str, str]) -> list[str]:
     done = []
-    for client, home in SKILL_CLIENTS.items():
+    for client in clients.NAMES:
         # Only clients that actually exist: conjuring a directory just leaves
         # files nobody reads.
-        if not home.exists():
+        if not clients.home(client).exists():
             continue
-        target = home / "skills" / SKILL_NAME
+        target = clients.skill_dir(client, SKILL_NAME)
         target.mkdir(parents=True, exist_ok=True)
         for name, text in rendered.items():
             # Always UTF-8 without BOM: a BOM stops Codex recognising the
@@ -288,14 +288,14 @@ def plan_uninstall(purge_data: bool) -> list[tuple[str, Any]]:
     from docatlas.runtime import LOCAL_SETTINGS, local_settings
 
     steps: list[tuple[str, Any]] = []
-    for client, home in SKILL_CLIENTS.items():
-        target = home / "skills" / SKILL_NAME
+    for client in clients.NAMES:
+        target = clients.skill_dir(client, SKILL_NAME)
         if target.exists():
             steps.append((f"Skill for {client}: {target}",
                           lambda t=target: shutil.rmtree(t, ignore_errors=True)))
 
     claude = shutil.which("claude")
-    claude_config = Path.home() / ".claude.json"
+    claude_config = clients.mcp_config("claude-code")
     if claude and claude_config.exists() and SERVER_NAME in claude_config.read_text(
         encoding="utf-8", errors="replace"
     ):
@@ -307,7 +307,7 @@ def plan_uninstall(purge_data: bool) -> list[tuple[str, Any]]:
             ),
         ))
 
-    codex = Path.home() / ".codex" / "config.toml"
+    codex = clients.mcp_config("codex")
     if codex.exists() and f"[mcp_servers.{SERVER_NAME}]" in codex.read_text(
         encoding="utf-8", errors="replace"
     ):
@@ -405,7 +405,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Program: {REPO_ROOT}")
         print(f"Data:    {data_dir}")
         print(f"Default library: {dataset or 'none (choose per command, or set --dataset)'}")
-        print(f"Python:  {python}\n")
+        print(f"Python:  {python}")
+        # Always shown, not only when a variable moved something: writing into
+        # a directory the client does not read fails silently on both sides, so
+        # the one defence is that the destination is visible before it is used.
+        for client in clients.NAMES:
+            print(f"Client {client:12s} {clients.describe(client)}")
+        print()
 
         if not args.skip_mcp:
             print(f"✓ MCP handshake passed: {verify_handshake(python)}"
@@ -429,8 +435,10 @@ def main(argv: list[str] | None = None) -> int:
                     for line in installed:
                         print(f"    {line}")
                 else:
-                    print(f"\n  No client supporting skills was found"
-                          f" (looked for: {', '.join(SKILL_CLIENTS)}).")
+                    looked = "; ".join(
+                        f"{name} at {clients.home(name)}" for name in clients.NAMES
+                    )
+                    print(f"\n  No client supporting skills was found (looked in: {looked}).")
             except DatasetNotChosen:
                 # Unlike MCP, the Skill document says things like "the current
                 # default library is X", so one has to be chosen. Reached when

@@ -18,6 +18,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from . import clients
 from .constants import CHUNKER_VERSION
 from .runtime import (
     DATASET_CONFIG_DIR,
@@ -32,10 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # The adapter the shipped template names. A dataset built on it documents an
 # invented site, so it is a thing to copy rather than a thing to crawl.
 TEMPLATE_SOURCE = "example"
-SKILL_CLIENTS = {
-    "claude-code": Path.home() / ".claude",
-    "codex": Path.home() / ".codex",
-}
+SKILL_NAME = "docatlas"
 
 
 def _env_prefix(dataset_id: str, *, windows: bool | None = None) -> str:
@@ -172,11 +170,21 @@ def inspect_skill() -> dict[str, Any]:
     library became the default, or the repository moved on.
     """
     found = {
-        client: home / "skills" / "docatlas"
-        for client, home in SKILL_CLIENTS.items()
-        if (home / "skills" / "docatlas" / "SKILL.md").exists()
+        client: clients.skill_dir(client, SKILL_NAME)
+        for client in clients.NAMES
+        if (clients.skill_dir(client, SKILL_NAME) / "SKILL.md").exists()
     }
-    report: dict[str, Any] = {"installed": sorted(found)}
+    report: dict[str, Any] = {
+        "installed": sorted(found),
+        # Where each client was looked for, so a Skill written somewhere the
+        # client does not read is visible rather than reported as installed.
+        "looked_in": {client: str(clients.home(client)) for client in clients.NAMES},
+        "moved_by": {
+            client: variable
+            for client in clients.NAMES
+            if (variable := clients.override(client))
+        },
+    }
     if not found:
         report["state"] = "not installed"
         report["next"] = "python install.py"
@@ -219,7 +227,7 @@ def inspect_mcp() -> dict[str, Any]:
     some of them are not on PATH even when installed.
     """
     registered = []
-    claude = Path.home() / ".claude.json"
+    claude = clients.mcp_config("claude-code")
     if claude.exists():
         try:
             if "docatlas" in json.loads(claude.read_text(encoding="utf-8")).get(
@@ -228,7 +236,7 @@ def inspect_mcp() -> dict[str, Any]:
                 registered.append("claude-code")
         except (json.JSONDecodeError, OSError):
             pass
-    codex = Path.home() / ".codex" / "config.toml"
+    codex = clients.mcp_config("codex")
     if codex.exists() and "[mcp_servers.docatlas]" in codex.read_text(
         encoding="utf-8", errors="replace"
     ):
@@ -306,6 +314,12 @@ def _render(report: dict[str, Any]) -> str:
     lines.append(f"  MCP     {mcp['state']} ({', '.join(mcp['registered']) or 'nowhere'})")
     if mcp.get("next"):
         lines.append(f"          next: {mcp['next']}")
+    # Printed every time. A Skill written where the client does not read it
+    # looks identical to a working install from both sides, so the only
+    # defence is that the paths are on screen to be disagreed with.
+    for client, location in skill.get("looked_in", {}).items():
+        moved = skill.get("moved_by", {}).get(client)
+        lines.append(f"  {client:14s}{location}" + (f"  (via ${moved})" if moved else ""))
     lines.append("")
     return "\n".join(lines)
 
