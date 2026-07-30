@@ -1,19 +1,25 @@
-"""进程默认数据集的快捷名字。
+"""Shortcut names for the process's default dataset.
 
-真正的运行时在 `runtime.py`：一个 `Workspace` 把配置、来源适配器、领域知识包
-和数据目录捆在一起，`runtime.active()` 给出当前生效的那一个。
+The actual runtime lives in `runtime.py`: a `Workspace` bundles the config, the
+source adapter, the knowledge pack and the data directory, and `runtime.active()`
+returns whichever one is currently in effect.
 
-这个文件只是**默认那一个**的快捷方式，给命令行用——命令行一个进程只服务一个
-数据集，换库就换 `DOCATLAS_DATASET` 再跑一次，比让全套代码随时准备切换简单。
+This module is only a shortcut to **the default one**, for the CLI. The CLI
+serves a single dataset per process, so switching library means setting
+`DOCATLAS_DATASET` and running again — simpler than keeping the whole codebase
+ready to switch at any moment.
 
-检索路径（db / search / context / ondemand / relations …）**不要**从这里取值，
-要走 `runtime.active()`：MCP 会在一个进程里切换数据集，从这里取到的是启动时
-定下的那一个，切了也不会变。这个文件里再也不该出现任何具体产品或网站的名字。
+Retrieval paths (db / search / context / ondemand / relations ...) must **not**
+read values from here; they go through `runtime.active()`. MCP switches datasets
+inside one process, while anything read from here was fixed at startup and will
+not follow the switch.
+
+No specific product or site name belongs in this file.
 """
 
 from __future__ import annotations
 
-from .constants import (  # noqa: F401  （给老的 from .config import … 留着）
+from .constants import (  # noqa: F401  (kept for older `from .config import ...`)
     CHUNKER_VERSION,
     HEADING_RE,
     IMAGE_EXTENSIONS,
@@ -33,13 +39,16 @@ from .runtime import (  # noqa: F401
     active,
 )
 
-# 一个数据集 = 一个产品的一个版本，独占一个目录、一个数据库。
-# 不合并成大库：删除、备份、出问题时的隔离都简单得多。
+# One dataset = one version of one product, owning its own directory and its own
+# database. Deliberately not merged into one big library: deletion, backup and
+# fault isolation are all far simpler kept apart.
 #
-# 这些值全都从"当前生效的数据集"派生，所以**按需算**，不在导入时算。导入时算
-# 的话，一个还没选定数据集的进程连 `import docatlas.net` 都过不去——而程序不
-# 内置默认库（装什么是用户的选择），MCP 服务器更是完全可以不带默认库跑起来，
-# 每次调用自带 `dataset_id`。
+# Every value below derives from "the dataset currently in effect", so it is
+# computed **on demand** rather than at import time. Computed at import, a
+# process that has not chosen a dataset yet could not even `import docatlas.net`
+# — and the program ships no built-in default library (what to install is the
+# user's choice), while the MCP server may well run with no default at all, each
+# call carrying its own `dataset_id`.
 _FROM_WORKSPACE = {
     "DATASET_ID": lambda default: default.id,
     "DATA_DIR": lambda default: default.data_dir,
@@ -51,13 +60,15 @@ _FROM_WORKSPACE = {
     "KNOWLEDGE": lambda default: default.knowledge,
     "VERSION": lambda default: default.version,
     "LANGUAGE": lambda default: default.language,
-    # 页面可能带的分类全集。用的是 query_categories 而不是 categories：后者是
-    # "分类 → 路径前缀"的枚举规则，引用闭包收进来的那一类没有前缀，写不进去，
-    # 但它的页面照样落库。命令行选项、抽样配额、导出和报表要的都是"能落库的分类"。
+    # Every category a page may carry. Uses query_categories rather than
+    # categories: the latter is the "category -> path prefix" enumeration rule,
+    # and the category collected by the reference closure has no prefix to put
+    # there, yet its pages are stored all the same. CLI options, sampling
+    # quotas, exports and reports all want "categories that can be stored".
     "CATEGORY_IDS": lambda default: default.dataset.query_categories,
     "CATEGORY_LABELS": lambda default: default.category_labels,
     "ENTITY_TYPES": lambda default: default.dataset.entity_types,
-    # 路径前缀：什么样的路径才算"这个数据集的一篇文档"。
+    # Path prefix: what makes a path count as a document of this dataset.
     "DOC_PREFIX": lambda default: default.doc_prefix,
 }
 

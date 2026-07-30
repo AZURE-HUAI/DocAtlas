@@ -1,25 +1,26 @@
 <#
 .SYNOPSIS
-    DocAtlas 本地文档知识库 —— 唯一入口。
+    DocAtlas local documentation knowledge base -- the single entry point.
 
 .DESCRIPTION
-    不用记 Python 命令，所有事情都从这里做：
+    Everything happens from here, with no Python commands to remember:
 
-        .\docatlas.ps1                          打开交互式搜索（不带参数时）
-        .\docatlas.ps1 ask   "<要查的东西>"     直接给出可读的答案材料（推荐；
-                                                本地没有会自动去官网补抓那一页）
-        .\docatlas.ps1 get   "<页面名>"         只把指定的页面抓到本地
-        .\docatlas.ps1 find  "<关键词>"         只列标题和出处，不展开正文
-        .\docatlas.ps1 show  K9290              展开某一条知识
-        .\docatlas.ps1 links "<名称或 K 编号>"
-                                                看蓝图 / C++ / 类型的对应关系
-        .\docatlas.ps1 status                   看抓取进度
-        .\docatlas.ps1 start                    开始 / 继续抓取（可随时中断续传）
-        .\docatlas.ps1 stop                     停止抓取
-        .\docatlas.ps1 check                    数据质量验收
-        .\docatlas.ps1 where                    数据实际存在哪个目录
+        .\docatlas.ps1                          interactive search (no arguments)
+        .\docatlas.ps1 ask   "<what to look up>"  readable answer material
+                                                (recommended; a page missing
+                                                locally is fetched on demand)
+        .\docatlas.ps1 get   "<page name>"      fetch that page only
+        .\docatlas.ps1 find  "<keywords>"       titles and sources, no bodies
+        .\docatlas.ps1 show  K9290              expand one piece of knowledge
+        .\docatlas.ps1 links "<name or K id>"   how entities relate
+        .\docatlas.ps1 status                   crawl progress
+        .\docatlas.ps1 start                    start / resume crawling
+        .\docatlas.ps1 stop                     stop crawling
+        .\docatlas.ps1 check                    data quality check
+        .\docatlas.ps1 where                    where the data actually lives
 
-    换数据集：先设 $env:DOCATLAS_DATASET = 'epic-ue-5.9'，再照常用。
+    To switch library: set $env:DOCATLAS_DATASET = '<dataset-id>' first, then
+    carry on as usual.
 #>
 
 [CmdletBinding()]
@@ -33,8 +34,9 @@ param(
 
     [int]$Limit = 10,
     [int]$TokenBudget = 3000,
-    # 分类名由数据集决定，这里不写死——写死了换个数据集就会拒绝合法的分类。
-    # 合不合法交给 Python 那一层判断，它认识当前数据集。
+    # Category names come from the dataset and are deliberately not listed here:
+    # a hardcoded list would reject a legitimate category after switching
+    # dataset. Validity is decided by the Python layer, which knows the dataset.
     [string]$Category
 )
 
@@ -51,7 +53,7 @@ function Invoke-Kb {
 function Require-Subject {
     param([string]$Hint)
     if ([string]::IsNullOrWhiteSpace($subject)) {
-        Write-Host "需要一个查询内容，例如：$Hint" -ForegroundColor Yellow
+        Write-Host "A query is required, for example: $Hint" -ForegroundColor Yellow
         exit 2
     }
 }
@@ -61,20 +63,20 @@ function Show-Menu {
     Write-Host '========================================'
     Write-Host "  DocAtlas — $DatasetId"
     Write-Host '========================================'
-    Write-Host '直接输入要查的东西；回车留空退出。'
-    Write-Host "用原文语言（$DatasetLanguage）里的官方写法命中率最高。"
+    Write-Host 'Type what to look up; press Enter on an empty line to quit.'
+    Write-Host "Official wording in the source language ($DatasetLanguage) hits best."
     Write-Host ''
 
     while ($true) {
-        $query = Read-Host '查什么'
+        $query = Read-Host 'Look up'
         if ([string]::IsNullOrWhiteSpace($query)) { break }
 
         Invoke-Kb @('search', $query, '--limit', $Limit)
         if ($LASTEXITCODE -ne 0) { continue }
 
         Write-Host ''
-        Write-Host '输入知识 ID（如 K9290）看全文；输入 a 看整理好的答案；回车继续搜索。'
-        $choice = Read-Host '下一步'
+        Write-Host 'Enter a knowledge ID (e.g. K9290) for the full text, a for a prepared answer, or Enter to search again.'
+        $choice = Read-Host 'Next'
         if ($choice -match '^[Kk]?\d+$') {
             Write-Host ''
             Invoke-Kb @('show', $choice)
@@ -85,28 +87,28 @@ function Show-Menu {
         }
         Write-Host ''
     }
-    Write-Host '已退出。'
+    Write-Host 'Done.'
 }
 
 switch ($Action) {
     'menu' { Show-Menu }
 
     'ask' {
-        Require-Subject '.\docatlas.ps1 ask "<要查的东西>"'
+        Require-Subject '.\docatlas.ps1 ask "<what to look up>"'
         $kbArgs = @('ask', $subject, '--token-budget', $TokenBudget)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
     }
 
     'get' {
-        Require-Subject '.\docatlas.ps1 get "<页面名>"'
+        Require-Subject '.\docatlas.ps1 get "<page name>"'
         $kbArgs = @('get', $subject, '--limit', $Limit)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
     }
 
     'find' {
-        Require-Subject '.\docatlas.ps1 find "<关键词>"'
+        Require-Subject '.\docatlas.ps1 find "<keywords>"'
         $kbArgs = @('search', $subject, '--limit', $Limit)
         if ($Category) { $kbArgs += @('--category', $Category) }
         Invoke-Kb $kbArgs
@@ -118,7 +120,7 @@ switch ($Action) {
     }
 
     'links' {
-        Require-Subject '.\docatlas.ps1 links "<名称或 K 编号>"'
+        Require-Subject '.\docatlas.ps1 links "<name or K id>"'
         Invoke-Kb @('related', $subject)
     }
 
@@ -128,10 +130,10 @@ switch ($Action) {
 
     'watch' {
         if (-not (Test-Path -LiteralPath $LogPath)) {
-            Write-Host '还没有抓取日志。先运行 .\docatlas.ps1 start'
+            Write-Host 'No crawl log yet. Run .\docatlas.ps1 start first.'
             exit 1
         }
-        Write-Host '实时进度（按 Ctrl+C 退出，退出不会影响后台抓取）：' -ForegroundColor Cyan
+        Write-Host 'Live progress (Ctrl+C to leave; the background crawl keeps running):' -ForegroundColor Cyan
         Write-Host ''
         Get-Content -LiteralPath $LogPath -Tail 15 -Wait
     }
@@ -152,10 +154,10 @@ switch ($Action) {
             Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
         }
         if ($stopped) {
-            Write-Host '已停止。进度都在数据库里，下次 .\docatlas.ps1 start 会从断点继续。'
+            Write-Host 'Stopped. Progress lives in the database; .\docatlas.ps1 start resumes from there.'
         }
         else {
-            Write-Host '当前没有在跑的抓取任务。'
+            Write-Host 'No crawl is running.'
         }
     }
 

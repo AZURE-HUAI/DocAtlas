@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 先阅读问题管理流程
+  - name: Read the issue process first
     url: https://github.com/AZURE-HUAI/DocAtlas/blob/main/issues/README.md
-    about: 了解 GitHub Issues 与仓库内长期档案如何配合。
+    about: How GitHub Issues and the long-lived records in this repository fit together (the records themselves are written in Chinese).

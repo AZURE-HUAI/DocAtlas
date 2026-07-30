@@ -1,4 +1,4 @@
-"""时间戳与日志。"""
+"""Timestamps and logging."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ _LOG_FILE_PATH: Path | None = None
 
 
 def set_log_file(path: str | Path | None) -> None:
-    """把每行日志同时写进一个 UTF-8 文件（长时间抓取时用来事后翻查）。"""
+    """Mirror every log line into a UTF-8 file, for reviewing long crawls."""
     global _LOG_FILE_PATH
     _LOG_FILE_PATH = Path(path).resolve() if path else None
 

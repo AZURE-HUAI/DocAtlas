@@ -1,14 +1,19 @@
-"""数据集配置：把 datasets/*.toml 读成一个对象，并挂上对应的适配器。
+"""Dataset configuration: read datasets/*.toml into an object, attach adapters.
 
-三层分工：
+Three layers:
 
-    core（本包其余模块）  只懂通用的事：HTTP、SQLite、切块、检索、上下文预算。
-                          不知道 Epic 是谁，也不知道 Unreal 是什么。
-    sources/<name>.py     懂一个站点：怎么列出全部页面、怎么把它的返回解析成文档。
-    knowledge/<name>.py   懂一个领域：Unreal 的 K2_ 前缀、蓝图↔C++ 的对应关系。
-                          可选，留空也能跑，只是少了这些额外线索。
+    core (rest of this package)  Generic concerns only: HTTP, SQLite, chunking,
+                                 retrieval, context budget. Knows no vendor
+                                 and no product.
+    sources/<name>.py            One site: how to list all its pages, how to
+                                 parse its responses into documents.
+    knowledge/<name>.py          One domain: its naming conventions, and which
+                                 of its APIs are two faces of one thing.
+                                 Optional; without one everything still runs,
+                                 just with fewer clues.
 
-加一个版本改 toml；加一个站点写一个 sources 模块。两件事互不影响。
+Adding a version means editing a toml. Adding a site means writing one sources
+module. Neither affects the other.
 """
 
 from __future__ import annotations
@@ -23,7 +28,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Dataset:
-    """一个数据集的全部配置。适配器拿它当上下文，不再自己写死版本号和网址。"""
+    """All configuration for one dataset.
+
+    Adapters take this as their context instead of hardcoding version numbers and
+    URLs of their own.
+    """
 
     id: str
     name: str
@@ -36,23 +45,28 @@ class Dataset:
     categories: dict[str, str] = field(default_factory=dict)
     category_labels: dict[str, str] = field(default_factory=dict)
     entity_types: dict[str, str] = field(default_factory=dict)
-    # 哪些分类是 API 参考（影响首段该算"摘要"还是"概述"，以及检索偏好）。
+    # Which categories are API reference. Affects whether a first paragraph reads
+    # as a summary or an overview, and biases retrieval towards signatures.
     api_categories: tuple[str, ...] = ()
-    # 哪些分类爱出大段罗列，检索时要压一压。
+    # Categories prone to long member listings; pushed down when ranking.
     verbose_categories: tuple[str, ...] = ()
-    # 概念性提问时各分类的加减分。没配就是 0，检索照常工作，只是没针对性调优。
+    # Per-category score adjustment for concept questions. Unset means 0:
+    # retrieval works as usual, just without this tuning.
     concept_category_bonus: dict[str, float] = field(default_factory=dict)
-    # 同名候选优先抓哪一类。数字越小越优先。
+    # Which category to fetch first among same-named candidates. Lower wins.
     category_priority: dict[str, int] = field(default_factory=dict)
-    # 允许一页都没有的分类。默认所有声明的分类都必须枚举到页面——
-    # 一个分类空着，几乎总是分类规则写错了，而不是官方真的没有这类文档。
+    # Categories permitted to hold no pages. By default every declared category
+    # must enumerate some: an empty one is nearly always a mistaken category rule
+    # rather than the site genuinely lacking that kind of documentation.
     optional_categories: tuple[str, ...] = ()
-    # 用户问题里出现哪些词，AI 就该想到查这个库。纯数据，没有逻辑——
-    # 装技能时填进技能描述，Claude Code 靠它决定要不要唤起这个技能。
+    # Words in a user's question that should bring this library to mind. Pure
+    # data with no logic: filled into the skill description at install time, and
+    # the client uses it to decide whether to invoke the skill at all.
     skill_triggers: tuple[str, ...] = ()
-    # 清单范围策略。目前只有一项：范围内正文引用到、但整个目录都没被枚举过的
-    # 页面归哪一类。不配就不收——一个数据集要不要越出自己声明的目录，
-    # 是它自己的决定，核心不替它拿主意。
+    # Inventory scope policy. One entry so far: which category to file pages that
+    # in-scope bodies reference but whose directory was never enumerated. Unset
+    # collects nothing — whether a dataset steps outside its own declared
+    # directories is its decision, not the core's.
     inventory: dict[str, Any] = field(default_factory=dict)
 
     def option(self, key: str, default: Any = None) -> Any:
@@ -63,15 +77,20 @@ class Dataset:
 
     @property
     def query_categories(self) -> tuple[str, ...]:
-        """检索时可以合法用来过滤的分类全集。
+        """Every category that may legitimately be used as a retrieval filter.
 
-        跟 `categories` 是两件事，不能共用一个：`categories` 是"分类 → 路径前缀"
-        的**枚举规则**，只有声明了目录的分类才写得进去；而引用闭包收进来的那一类
-        按定义没有固定前缀（它收的正是"散落在声明目录之外、被正文引用到"的页面）。
+        Distinct from `categories`, and the two cannot be the same value.
+        `categories` is the **enumeration rule** mapping a category to a path
+        prefix, so only categories with a declared directory can appear in it,
+        whereas the category collected by the reference closure has no fixed
+        prefix by definition: it collects precisely those pages that sit outside
+        the declared directories and are referenced by page bodies.
 
-        但这些页面确实带着这个分类落进了库。拿枚举规则当"合法分类的全集"用，
-        库里就会有一整类内容既不出现在能力清单里、传进来还被当成拼错拒掉——
-        AI 按手册"知道分类就传 category"照做，反而把最相关的那一页滤掉了。
+        Those pages nevertheless land in the database carrying that category.
+        Using the enumeration rule as "the set of legal categories" would leave a
+        whole class of content absent from the capability listing and rejected as
+        a typo when passed in, so an AI following the manual's "pass category
+        when you know it" would filter out the most relevant page.
         """
         referenced = str(self.inventory.get("referenced_category") or "")
         if not referenced or referenced in self.categories:
@@ -88,18 +107,18 @@ def load_dataset(dataset_id: str, config_dir: Path) -> Dataset:
     if not path.exists():
         available = sorted(p.stem for p in config_dir.glob("*.toml"))
         raise SystemExit(
-            f"找不到数据集配置 {path}。\n"
-            f"现有数据集：{'、'.join(available) or '（一个都没有）'}\n"
-            f"换数据集请设环境变量 DOCATLAS_DATASET。"
+            f"Dataset config not found: {path}.\n"
+            f"Existing datasets: {', '.join(available) or '(none)'}\n"
+            f"Set the DOCATLAS_DATASET environment variable to switch dataset."
         )
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     missing = [k for k in ("id", "version", "source") if not raw.get(k)]
     if missing:
-        raise SystemExit(f"{path} 缺少必填项：{'、'.join(missing)}")
+        raise SystemExit(f"{path} is missing required keys: {', '.join(missing)}")
     if raw["id"] != dataset_id:
         raise SystemExit(
-            f"{path} 里的 id 是 {raw['id']!r}，和文件名 {dataset_id!r} 不一致。"
-            f"两者必须相同，否则数据目录会对不上。"
+            f"id in {path} is {raw['id']!r} but the file is named {dataset_id!r}. "
+            f"They must match, otherwise the data directory will not line up."
         )
     search = raw.get("search") or {}
     return Dataset(
@@ -133,7 +152,8 @@ def _load_module(package: str, name: str, kind: str) -> ModuleType:
     try:
         return importlib.import_module(f"docatlas.{package}.{name}")
     except ModuleNotFoundError as exc:
-        # 只有确实缺这个模块才报配置错；模块里自己 import 挂了要如实抛出。
+        # Only report a config error when this module is genuinely absent; an
+        # import failure inside the module itself must propagate unchanged.
         if exc.name not in (f"docatlas.{package}.{name}", name):
             raise
         available = sorted(
@@ -142,27 +162,30 @@ def _load_module(package: str, name: str, kind: str) -> ModuleType:
             if not p.stem.startswith("_")
         )
         raise SystemExit(
-            f"找不到{kind} {name!r}（应为 docatlas/{package}/{name}.py）。\n"
-            f"现有的有：{'、'.join(available) or '（一个都没有）'}"
+            f"{kind} {name!r} not found (expected docatlas/{package}/{name}.py).\n"
+            f"Available: {', '.join(available) or '(none)'}"
         ) from exc
 
 
 def load_source(dataset: Dataset) -> ModuleType:
-    return _load_module("sources", dataset.source, "来源适配器")
+    return _load_module("sources", dataset.source, "source adapter")
 
 
 def load_knowledge(dataset: Dataset) -> ModuleType | None:
-    """领域知识包是可选的：没有它一样能抓能搜，只是少了领域特有的线索。"""
+    """Knowledge packs are optional: crawl and search work fine without one,
+    only with fewer domain-specific clues.
+    """
     if not dataset.knowledge:
         return None
-    return _load_module("knowledge", dataset.knowledge, "领域知识包")
+    return _load_module("knowledge", dataset.knowledge, "knowledge pack")
 
 
 def knowledge_hook(pack: ModuleType | None, name: str, default: Any = None) -> Any:
-    """按名字取领域知识包提供的能力；没挂包、或包没实现这一项，就用默认值。
+    """Look up a capability by name from the knowledge pack, else the default.
 
-    刻意不用抽象基类：知识包只是一个模块，实现哪几个函数就提供哪几项能力，
-    不必为了满足接口去写一堆空方法。
+    Deliberately not an abstract base class: a knowledge pack is just a module and
+    offers exactly the functions it implements, with no empty methods written
+    purely to satisfy an interface.
     """
     if pack is None:
         return default

@@ -1,4 +1,4 @@
-"""把正文切成带标题层级的小节与知识块。"""
+"""Split a body into heading-scoped sections and knowledge chunks."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from .constants import (
 )
 from .runtime import active
 from .htmlmd import plain_text
-# 这几个小工具搬到 text.py 了（适配器和知识包要用，不能绕回 config）；
-# 这里继续导出，老的 from .chunking import normalize_name 照常可用。
+# These helpers live in text.py (adapters and knowledge packs need them and must
+# not route back through config); re-exported here so existing
+# `from .chunking import normalize_name` keeps working.
 from .text import heading_anchor, humanize_cpp_identifier, normalize_name  # noqa: F401
 
 
@@ -29,7 +30,8 @@ def classify_knowledge_type(
         if pattern.search(heading):
             return knowledge_type
     if position == 0:
-        # API 参考的开头是"这个函数干嘛"的摘要；教程的开头是全篇概述。
+        # An API reference page opens with a summary of what the function does;
+        # a guide opens with an overview of the whole article.
         if category in active().dataset.api_categories:
             return "summary"
         return "overview"
@@ -214,16 +216,18 @@ def markdown_units(markdown: str, max_chars: int) -> list[str]:
     return units
 
 
-# 有些小节的标题名对不上它的内容，不能拿标题名当结论。
+# Some sections have a heading that misdescribes their content, so the heading
+# name cannot be taken as the conclusion.
 #
-# 典型例子是 Epic 蓝图页的 `Navigation`：名字像面包屑，实际上除了面包屑，
-# 还装着**这个节点是干嘛的**那句描述，以及 `Target is X`——全页最有用的信息
-# 都在里面。所以这类小节不能丢，但也不该由它来决定合并后那一块算什么类型，
-# 否则整块会被当成导航，在检索里被扣分扣到底。
+# The classic case is a `Navigation` section that, besides the breadcrumb, also
+# holds the sentence describing **what the node does** plus its `Target is X` —
+# the most useful information on the page. Such sections must not be dropped, but
+# neither should they decide the type of the merged chunk, or the whole chunk
+# counts as navigation and is penalized to the bottom of retrieval.
 WEAK_TYPE_LABELS = frozenset({"navigation"})
 
-# 面包屑：一整行里除了链接就只有分隔符。
-# 例：`[BlueprintAPI](…) > [BlueprintAPI/Camera](…)`
+# A breadcrumb: a whole line holding nothing but links and separators.
+# Example: `[Section](...) > [Section/Subsection](...)`
 _BREADCRUMB_RE = re.compile(
     r"^[ \t]*\[[^\]]*\]\([^)\s]*\)"
     r"(?:[ \t]*[>›»][ \t]*\[[^\]]*\]\([^)\s]*\))+[ \t]*$",
@@ -232,26 +236,29 @@ _BREADCRUMB_RE = re.compile(
 
 
 def strip_breadcrumbs(markdown: str) -> str:
-    """去掉导航面包屑那一行。
+    """Drop the navigation breadcrumb line.
 
-    面包屑是页面装饰，不是内容。留着它，整站的目录名和两三条 URL 会进到
-    **每一页**的全文索引里，于是"Blueprint Camera 怎么改视野"这样的查询会
-    命中该目录下的每一页——命中的全是面包屑，正文一个词都没对上。真正想要
-    的那一页反而被一堆同目录的兄弟页挤下去。
+    A breadcrumb is page decoration, not content. Kept, it puts the site's
+    directory names and two or three URLs into the full-text index of **every**
+    page, so a query naming a directory plus a feature matches every page in
+    that directory — all on breadcrumb text, with not one body word matching. The
+    page actually wanted is pushed down by a crowd of its own siblings.
 
-    页面在站点里的位置，`source_url` 和 `context_prefix` 已经各存了一份，
-    不需要第三份。
+    Where a page sits in the site is already recorded twice, in `source_url` and
+    `context_prefix`; a third copy is not needed.
 
-    只认"两个以上链接串成的一整行"：正文里孤零零的一个链接不会被误删。
+    Only "a whole line of two or more chained links" counts, so a lone link in a
+    body is never removed by mistake.
     """
     return _BREADCRUMB_RE.sub("", markdown)
 
-# 切分后剩下的尾巴短于这个字符数，就并回上一块，别留一条二十来字的孤块。
+# A trailing remainder shorter than this many characters merges back into the
+# previous chunk, rather than leaving a stub of a couple of dozen words.
 RUNT_TAIL_CHARS = 400
 
 
 def _parent_path(heading_path: str) -> str:
-    """`Page > A > x` → `Page > A`。用来判断两个小节是不是同一个话题下的。"""
+    """`Page > A > x` -> `Page > A`, to test whether two sections share a topic."""
     head, separator, _tail = heading_path.rpartition(" > ")
     return head if separator else heading_path
 
@@ -259,15 +266,17 @@ def _parent_path(heading_path: str) -> str:
 def group_sections_for_chunking(
     sections: list[dict[str, Any]], target_chars: int
 ) -> list[list[dict[str, Any]]]:
-    """把连续的小段落攒成一组，再去切块。
+    """Group consecutive small sections, then chunk the group.
 
-    为什么需要这一步：按标题切出来的小节里，有大量像 `Inputs` 这种
-    只有一行表头的段落。单独成块的话，一块只有二三十个 token，
-    既答不了问题又占检索名额。把同一个父标题下相邻的小段落攒到
-    目标大小，才是一条能用的知识。
+    Why this step exists: sections split by heading include many paragraphs like
+    `Inputs` that are one table header long. Chunked alone, each is twenty or
+    thirty tokens, too small to answer anything while still consuming a retrieval
+    slot. Accumulating adjacent small sections under the same parent heading up to
+    a target size is what produces a usable piece of knowledge.
 
-    只在两种情况下断开：换了父标题（话题变了），或者攒够了目标大小。
-    本来就超标的大段落自己单独一组，走原来的切分逻辑。
+    Breaks in only two cases: the parent heading changed (the topic changed), or
+    the target size was reached. A paragraph already over the target forms its own
+    group and goes through the ordinary splitting path.
     """
     groups: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -299,11 +308,12 @@ def group_sections_for_chunking(
 
 
 def _group_knowledge_type(group: list[dict[str, Any]]) -> str:
-    """合并后这一块算什么类型。
+    """Which type the merged chunk counts as.
 
-    取第一个"名副其实"的类型。像 `navigation` 这种标题名和内容对不上的，
-    不该代表整块——一块含着节点描述、参数和返回值的内容被标成"导航"，
-    检索时会被一路扣分扣到底。
+    Takes the first type that actually fits its content. One like `navigation`,
+    whose heading name does not match what it holds, must not represent the whole
+    chunk: content carrying a node description, its parameters and its return
+    value labelled "navigation" gets penalized all the way down in retrieval.
     """
     for section in group:
         if section["knowledge_type"] not in WEAK_TYPE_LABELS:
@@ -312,10 +322,10 @@ def _group_knowledge_type(group: list[dict[str, Any]]) -> str:
 
 
 def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
-    """把一组小节拼成一个"合成小节"，交给原来的切块逻辑处理。
+    """Join a group of sections into one synthetic section for the chunker.
 
-    子标题原样保留在正文里——合并是为了让一块内容足够完整，
-    不是把 `Inputs` / `Outputs` 这些标签抹掉。
+    Subheadings stay in the body verbatim: merging exists to make one chunk
+    complete enough, not to erase labels like `Inputs` / `Outputs`.
     """
     if len(group) == 1:
         return group[0]
@@ -325,11 +335,13 @@ def merge_sections(group: list[dict[str, Any]]) -> dict[str, Any]:
         heading = "#" * min(max(section["heading_level"], 1), 6)
         parts.append(f"{heading} {section['title']}\n\n{section['body_md']}".strip())
     parent = _parent_path(first["heading_path"])
-    # 明确列出每个字段，不用 **first：合成小节的正文已经不是第一个小节的了，
-    # 顺手继承过来的 content_hash / token_estimate 会是错的，留着迟早被人误用。
+    # Fields are listed explicitly rather than using **first: a synthetic
+    # section's body is no longer the first section's, so an inherited
+    # content_hash / token_estimate would be wrong and would eventually be
+    # trusted by someone.
     return {
-        # 归属到组里的第一个小节：chunks 表要求 section_id 非空，
-        # 而这一组在文档里本来就是从它开始的。
+        # Attributed to the group's first section: the chunks table requires a
+        # non-null section_id, and the group does begin there in the document.
         "position": first["position"],
         "heading_path": parent,
         "title": parent.rpartition(" > ")[2] or first["title"],
@@ -351,7 +363,7 @@ def chunk_sections(
     target_chars: int = 2200,
     max_chars: int = 3200,
 ) -> list[dict[str, Any]]:
-    """一整页的切块入口：先攒小的，再切大的。"""
+    """Chunking entry point for a whole page: group the small, split the large."""
     chunks: list[dict[str, Any]] = []
     for group in group_sections_for_chunking(sections, target_chars):
         chunks.extend(
@@ -398,8 +410,9 @@ def chunk_section(
             current_chars = 0
     if current:
         bodies.append("\n\n".join(current))
-    # 最后剩的一小截并回上一块：一条二十来字的孤块既答不了问题，
-    # 又白占一个检索名额。并回去顶多让上一块略超目标，仍在硬上限内。
+    # Merge a small trailing remainder back: a stub of a couple of dozen words
+    # answers nothing and still occupies a retrieval slot. Merging pushes the
+    # previous chunk slightly over target at worst, still inside the hard cap.
     if (
         len(bodies) > 1
         and len(bodies[-1]) < RUNT_TAIL_CHARS
@@ -416,7 +429,8 @@ def chunk_section(
     context_prefix = " | ".join(
         part
         for part in (
-            # 产品和版本都来自数据集：写死 "UE" 会让 Blender 的知识块也标成 UE。
+            # Product and version both come from the dataset: hardcoding either
+            # would stamp every other dataset's chunks with the wrong product.
             f"{workspace.dataset.product} {workspace.version}",
             label,
             document_type,
@@ -428,11 +442,11 @@ def chunk_section(
     )
     chunks: list[dict[str, Any]] = []
     for index, body in enumerate(bodies):
-        part_suffix = f"（{index + 1}/{chunk_count}）" if chunk_count > 1 else ""
+        part_suffix = f" ({index + 1}/{chunk_count})" if chunk_count > 1 else ""
         title = f"{section['title']}{part_suffix}"
         heading = "#" * min(max(section["heading_level"], 1), 6)
         source_line = (
-            f"> DOC 原出处：[{section['source_anchor']}]"
+            f"> DOC source: [{section['source_anchor']}]"
             f"({section['source_anchor']})"
         )
         content_md = f"{heading} {title}\n\n{body}\n\n{source_line}".strip()
@@ -461,14 +475,16 @@ def chunk_section(
 
 
 def fenced_line_numbers(lines: list[str]) -> set[int]:
-    """代码围栏内部的行号。只认成对出现的围栏。
+    """Line numbers inside a code fence. Only paired fences count.
 
-    围栏里的 `# 注释` 不是标题。不排除掉，一段 bash / Python 示例会被当场拆成
-    好几节，`heading_path` 上挂着 `# Use the draftHash from the previous step`
-    这种东西——代码块碎了，标题也是假的。
+    A `# comment` inside a fence is not a heading. Without excluding them, a bash
+    or Python example is split into several sections on the spot, with things like
+    `# Use the draftHash from the previous step` sitting in `heading_path` — the
+    code block is fragmented and the heading is fictional.
 
-    落单的围栏一律不算数：真实文档里确实存在（本地三份 Roblox 页面就是这样），
-    而按"从它开始到文末都是代码"处理，会把后面所有真标题一起吞掉，比不管更糟。
+    An unpaired fence never counts. Real documents do contain them, and treating
+    "from here to end of file is code" would swallow every genuine heading after
+    it, which is worse than ignoring the fence.
     """
     opened: int | None = None
     inside: set[int] = set()
@@ -484,10 +500,12 @@ def fenced_line_numbers(lines: list[str]) -> set[int]:
 
 
 def heading_at(line: str) -> tuple[str, int, str] | None:
-    """这一行是不是标题：返回（标题前面的正文, 层级, 标题文字），不是就 None。
+    """Whether this line is a heading: returns (text before it, level, title),
+    or None.
 
-    整行都是标题时，前面的正文是空串；标题挤在行内元素后面时，前半行是正文，
-    后半截才是标题（见 `TRAILING_HEADING_RE`）。
+    When the whole line is a heading the preceding text is empty; when the heading
+    trails an inline element, the first half of the line is body and only the tail
+    is the heading (see `TRAILING_HEADING_RE`).
     """
     if match := HEADING_RE.match(line):
         return "", len(match["hashes"]), match["title"]
@@ -499,31 +517,35 @@ def heading_at(line: str) -> tuple[str, int, str] | None:
 def description_repeats_lead(
     description: str, lines: list[str], fenced: set[int]
 ) -> bool:
-    """正文开头是不是已经把摘要那句话说过了。
+    """Whether the body already opens with the summary sentence.
 
-    多数站点的"摘要"就是正文第一句：cppreference 和 Blender 直接取 markdown
-    的第一行，Roblox 取不到 front matter 时也这么退。把它原样再插回正文前面，
-    用户读到的就是同一句话连着出现两遍（BUG-022）。
+    On most sites the "summary" *is* the body's first sentence, so re-inserting it
+    ahead of the body shows the reader the same sentence twice in a row.
 
-    比的是"这段开场白里有没有这句话"，既不是相等，也不是"开头就是它"：
+    The test is "does this opening contain that sentence", which is neither
+    equality nor "starts with":
 
-    - 摘要常常是正文首句的截断版，正文那句还带着 `**加粗**` 和后半截——
-      "…a light-weight physics simulation solution" 之后还接着 ", built from
-      the ground up…"，按相等判断照样重复。
-    - 摘要那句也未必排在最前面。cppreference 的 `/cpp/compiler_support`
-      开头是一张"本页可能滞后"的提示表格，正文首句排在表格后面，而适配器挑
-      摘要时跳过了表格行——按"开头就是它"判断同样会漏掉。
+    - A summary is often a truncated version of the first body sentence, where the
+      body version still carries `**bold**` and a continuation, so comparing for
+      equality would still duplicate.
+    - The summary sentence is not necessarily first either. A page may open with a
+      notice table, putting the first body sentence after it, while the adapter
+      skipped table rows when choosing the summary; "starts with" would miss that
+      too.
 
-    只看第一个标题之前的那几行：重复只可能发生在这里，摘要正是插在它们前面
-    的。这也保证了摘要被跳过时正文一定不空——匹配得上就说明这段正文里本来
-    就有这句话。Epic 和 Roblox 那种摘要来自元数据、正文里根本没有的页面，
-    走不到这一步，照旧补进去。
+    Only the lines before the first heading are examined: duplication can only
+    happen there, since that is exactly where the summary gets inserted. This also
+    guarantees the body is never left empty when the summary is skipped — a match
+    means the sentence was already in that body. Pages whose summary comes from
+    metadata and appears nowhere in the body never reach this point and still get
+    it prepended.
     """
     lead: list[str] = []
     for index, line in enumerate(lines):
         found = heading_at(line) if index not in fenced else None
         if found is not None:
-            # 标题前面那半行仍是正文（`TRAILING_HEADING_RE`），要算进来。
+            # The half-line before a heading is still body
+            # (`TRAILING_HEADING_RE`) and has to be counted.
             lead.append(found[0])
             break
         lead.append(line)
@@ -575,7 +597,8 @@ def split_sections(
             continue
         lead, level, heading = found
         if lead:
-            # 标题前面那半行是上一节的正文，不能跟着标题一起走。
+            # The half-line before a heading belongs to the previous section's
+            # body and must not travel with the heading.
             current["lines"].append(lead)
         finish()
         heading = heading.strip()
@@ -620,11 +643,11 @@ def split_sections(
             if position == 0
             else f"{source_url}#{base_anchor}{duplicate_suffix}"
         )
-        source_line = f"> DOC 原出处：[{source_anchor}]({source_anchor})"
+        source_line = f"> DOC source: [{source_anchor}]({source_anchor})"
         heading = "#" * min(max(section["heading_level"], 1), 6)
         content_md = f"{heading} {section['title']}\n\n{body}\n\n{source_line}".strip()
         text = plain_text(body)
-        # 有正文、且出处是官方地址，才算满分。
+        # Full marks only with a body and an official source URL.
         quality_score = (
             1.0
             if text and (ws := active()).source.is_official_url(ws.dataset, source_url)

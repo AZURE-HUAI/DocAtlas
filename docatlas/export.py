@@ -1,4 +1,4 @@
-"""Markdown 分片导出。"""
+"""Sharded Markdown export."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def export_markdown(
                     output_file = output_path.open("w", encoding="utf-8", newline="\n")
                     output_file.write(
                         f"# {DATASET.name} — {CATEGORY_LABELS[category]} — "
-                        f"分片 {shard_number}\n\n"
+                        f"shard {shard_number}\n\n"
                     )
                     current_size = output_file.tell()
                     shard_number += 1
@@ -85,22 +85,22 @@ def export_markdown(
                     pieces.append(
                         "\n\n---\n\n"
                         f"# {row['title']}\n\n"
-                        # 产品名来自数据集。写死 "UE" 会让 Blender 导出的
-                        # 分片每一页都标着 "UE 版本：5.2"（BUG-009 同类，
-                        # 当时漏扫了导出层）。
-                        f"- {DATASET.product} 版本：{VERSION}\n"
-                        f"- 分类：{CATEGORY_LABELS[category]}\n"
-                        f"- 更新时间：{row['updated_at'] or '未知'}\n"
-                        f"- DOC 原出处：[{row['url']}]({row['url']})\n"
+                        # Product name comes from the dataset: hardcoding one
+                        # would stamp every page of every other dataset's
+                        # export with the wrong product.
+                        f"- {DATASET.product} version: {VERSION}\n"
+                        f"- Category: {CATEGORY_LABELS[category]}\n"
+                        f"- Updated: {row['updated_at'] or 'unknown'}\n"
+                        f"- DOC source: [{row['url']}]({row['url']})\n"
                     )
                     if row["description"]:
                         pieces.append(f"\n{row['description']}\n")
                     current_page_id = row["id"]
                 pieces.append(
                     "\n\n"
-                    f"> 知识 ID：K{row['knowledge_id']}  \n"
-                    f"> 知识类型：{row['knowledge_type']}  \n"
-                    f"> 检索上下文：{row['context_prefix']}\n\n"
+                    f"> Knowledge ID: K{row['knowledge_id']}  \n"
+                    f"> Knowledge type: {row['knowledge_type']}  \n"
+                    f"> Retrieval context: {row['context_prefix']}\n\n"
                     + row["content_md"]
                     + "\n"
                 )
@@ -111,4 +111,4 @@ def export_markdown(
         finally:
             if output_file:
                 output_file.close()
-        log(f"已导出 {CATEGORY_LABELS[category]}：{max(0, shard_number - 1)} 个分片")
+        log(f"Exported {CATEGORY_LABELS[category]}: {max(0, shard_number - 1)} shard(s)")

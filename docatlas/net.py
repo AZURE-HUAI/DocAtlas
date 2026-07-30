@@ -1,11 +1,13 @@
-"""HTTP 抓取层。
+"""The HTTP fetching layer.
 
-三件事决定了整库的抓取速度，都在这个文件里：
+Three things decide the crawl speed of an entire library, all of them here:
 
-1. **连接复用**：每个线程对每个主机保持一条长连接。原来每抓一页都要重新
-   做一次 TLS 握手，握手本身比取数据还慢。
-2. **限速**：只在服务器真的回 429/403 时才全局冷却，其余时间不人为设上限。
-3. **有界重试**：网络抖动会重试，但不会无限等下去。
+1. **Connection reuse**: each thread keeps one long-lived connection per host.
+   Re-doing a TLS handshake per page costs more than fetching the data.
+2. **Rate limiting**: a global cooldown only when the server actually answers
+   429/403; no artificial ceiling the rest of the time.
+3. **Bounded retries**: network flakiness is retried, but never waited on
+   forever.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from .config import RETRYABLE_HTTP_CODES, USER_AGENT
 
 _thread_local = threading.local()
 
-# 每个线程最多同时保持几个主机的长连接（图片可能来自多个 CDN 域名）。
+# Long-lived connections per thread, at most one per host (images may come from
+# several CDN domains).
 MAX_POOLED_HOSTS = 6
 MAX_REDIRECTS = 5
 
@@ -38,30 +41,38 @@ DEFAULT_HEADERS = {
 
 
 class GlobalRateLimiter:
-    """跨线程共享的自适应节流器。
+    """Adaptive throttle shared across threads.
 
-    Epic 会对文档接口限流（回 429），而具体阈值没有公开、也会随时间变化，
-    所以这里不写死速率，用和 TCP 拥塞控制一样的 AIMD 策略自己找上限：
+    Documentation endpoints rate-limit (answering 429) without publishing the
+    threshold, and the threshold moves over time, so no fixed rate is hardcoded.
+    It finds the ceiling itself with the same AIMD strategy as TCP congestion
+    control:
 
-    * 连续成功 → 每 `PROBE_EVERY` 次成功把速率**加**一点（加性增长）
-    * 撞上 429/403 → 速率**减半**并全局冷却（乘性下降）
+    * a run of successes -> **add** a little rate every `PROBE_EVERY` successes
+      (additive increase)
+    * hitting 429/403 -> **halve** the rate and cool down globally
+      (multiplicative decrease)
 
-    结果是速率会稳定在服务器当下能接受的水平附近，人不用调参。
-    `configure(N)`（N > 0）可以关掉自适应、锁定固定速率。
+    The rate therefore settles near whatever the server currently tolerates, with
+    nothing to tune by hand. `configure(N)` with N > 0 disables adaptation and
+    locks a fixed rate.
     """
 
-    # 实测 Epic 的可持续上限在每秒 8~10 个请求附近。上限设得比它高太多，
-    # 只会不停冲顶再被打回，平均反而更慢——所以顶到 10 就不再往上试。
+    # Measured sustainable ceilings sit near 8-10 requests per second. Setting the
+    # cap far above that only means repeatedly overshooting and being pushed back,
+    # which lowers the average, so probing stops at 10.
     MIN_RATE = 1.0
     MAX_RATE = 10.0
     INITIAL_RATE = 3.0
     INCREASE_STEP = 0.3
     PROBE_EVERY = 12
-    # 每次退让只减 25%：减太狠要花很久才爬回来，平均吞吐会掉。
-    # 短时间内反复被拒时，连乘 0.75 依然能快速把速率压下去。
+    # Back off by only 25% each time: cutting harder takes a long time to climb
+    # back and lowers average throughput. Repeated refusals still compound
+    # quickly, since 0.75 multiplies.
     BACKOFF_FACTOR = 0.75
 
-    # 第一次被拒只停一小会儿；短时间内反复被拒才逐级加长。
+    # A first refusal pauses only briefly; repeats within a short window lengthen
+    # it step by step.
     BASE_COOLDOWN = 4.0
     MAX_COOLDOWN = 45.0
     ESCALATION_WINDOW = 90.0
@@ -78,7 +89,7 @@ class GlobalRateLimiter:
         self.consecutive_throttles = 0
 
     def configure(self, requests_per_second: float) -> None:
-        """`0` 表示自适应；正数表示锁定该速率。"""
+        """`0` selects adaptive behaviour; a positive value locks that rate."""
         with self.lock:
             if requests_per_second and requests_per_second > 0:
                 self.adaptive = False
@@ -113,16 +124,18 @@ class GlobalRateLimiter:
                 )
 
     def penalize(self, seconds: float) -> None:
-        """服务器回了 429/403：全局冷却，并把速率降一档。
+        """The server answered 429/403: cool down globally and drop a rate step.
 
-        一次限流"事件"通常会让所有在途请求同时失败。如果每个失败都降一次速，
-        速率会在一瞬间跌到地板上再也回不来——这正是第一版慢到 0.5 页/秒的原因。
-        所以：**已经在冷却中就只延长冷却，不再重复降速**。
+        One throttling *event* usually fails every in-flight request at once. If
+        each failure dropped the rate again, the rate would hit the floor
+        instantly and never recover. So: **while already cooling down, only extend
+        the cooldown, never drop the rate again**.
         """
         with self.lock:
             now = time.monotonic()
             if now < self.cooldown_until:
-                # 同一次事件的其他失败请求：不重复降速，也不叠加冷却。
+                # Another failure from the same event: no extra rate drop, and no
+                # stacked cooldown.
                 return
             self.throttle_events += 1
             if now - self.last_throttle_at <= self.ESCALATION_WINDOW:
@@ -158,7 +171,7 @@ REQUEST_LIMITER = GlobalRateLimiter()
 
 
 class HTTPResponseError(urllib.error.HTTPError):
-    """保持与原有调用方一致的异常类型（调用方只看 .code）。"""
+    """Exception type kept as callers expect it (they only read .code)."""
 
 
 def _pool() -> dict[tuple[str, str], http.client.HTTPConnection]:
@@ -220,7 +233,7 @@ def retry_after_seconds(value: str | None, default: float) -> float:
 
 
 def _request_once(url: str, timeout: int) -> tuple[bytes, str, str | None]:
-    """发一次请求并跟随重定向，返回正文、最终 URL、Content-Type。"""
+    """Make one request, following redirects; returns body, final URL, type."""
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         parsed = urllib.parse.urlsplit(current)
@@ -235,7 +248,8 @@ def _request_once(url: str, timeout: int) -> tuple[bytes, str, str | None]:
             response = connection.getresponse()
             raw = response.read()
         except Exception:
-            # 长连接可能被服务器静默关掉；丢弃它，让上层重试时重新建立。
+            # The server may silently close a pooled connection; drop it so the
+            # retry above rebuilds one.
             _drop_connection(scheme, host)
             raise
         status = response.status
@@ -244,8 +258,9 @@ def _request_once(url: str, timeout: int) -> tuple[bytes, str, str | None]:
             if location:
                 current = urllib.parse.urljoin(current, location)
                 continue
-            # Epic 的文档接口用"302 + 没有 Location + 正文里写 redirect_url"
-            # 来表示页面搬家了。这不是错误，把正文交给上层去解释。
+            # Some documentation endpoints signal "this page moved" with a 302
+            # carrying no Location and a redirect_url in the body. Not an error;
+            # hand the body up for the caller to interpret.
             if raw:
                 body = _decode_body(
                     raw, response.headers.get("Content-Encoding", "")
@@ -270,7 +285,7 @@ def fetch_bytes(
     retries: int = 5,
     delay: float = 0.0,
 ) -> tuple[bytes, str, str | None]:
-    """抓一个 URL，返回正文、最终 URL、Content-Type。"""
+    """Fetch one URL; returns body, final URL and Content-Type."""
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         REQUEST_LIMITER.wait()
@@ -285,14 +300,16 @@ def fetch_bytes(
             if exc.code not in RETRYABLE_HTTP_CODES or attempt == retries:
                 raise
             throttled = exc.code in {403, 429}
-            # 没有 Retry-After 时交给限速器自己决定停多久（会逐级加长）。
+            # With no Retry-After, let the limiter decide the pause (it lengthens
+            # step by step).
             default_wait = 0.0 if throttled else min(2**attempt, 20)
             wait_seconds = retry_after_seconds(
                 exc.headers.get("Retry-After") if exc.headers else None,
                 default_wait,
             )
             if throttled:
-                # 服务器在推我们走：让所有线程一起退让，而不是各自空转。
+                # The server is pushing back: make every thread yield together
+                # rather than each spinning on its own.
                 REQUEST_LIMITER.penalize(wait_seconds)
             else:
                 time.sleep(min(wait_seconds, 20.0))

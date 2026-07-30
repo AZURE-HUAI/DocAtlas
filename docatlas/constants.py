@@ -1,7 +1,8 @@
-"""跟任何站点、任何产品都无关的常量。
+"""Constants that belong to no particular site or product.
 
-单独一个文件是为了断开循环引用：config.py 在启动时要加载来源适配器，
-而适配器也需要这些常量——它们从这里拿，就不必回头去 import 半成品的 config。
+Kept in its own module to break a circular import: config.py loads source
+adapters at startup, and those adapters need these constants. Taking them from
+here means they never have to reach back into a half-initialised config.
 """
 
 from __future__ import annotations
@@ -9,9 +10,10 @@ from __future__ import annotations
 import re
 
 
-# 切块规则的版本号。规则一改就要 +1，chunks.parser_version 记录每块由哪版产出，
-# 中途换规则时才分得清哪些块是旧的、需要重切。
-CHUNKER_VERSION = "v8"
+# Version of the chunking rules. Bump it on every rule change;
+# chunks.parser_version records which version produced each chunk, which is what
+# makes stale chunks identifiable when the rules move on.
+CHUNKER_VERSION = "v9"
 USER_AGENT = "DocAtlas/1.0 (+local educational archive)"
 
 RETRYABLE_HTTP_CODES = {403, 408, 425, 429, 500, 502, 503, 504}
@@ -27,10 +29,12 @@ IMAGE_EXTENSIONS = {
 URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+", re.IGNORECASE)
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
 CODE_FENCE_RE = re.compile(r"^\s{0,3}(?:`{3,}|~{3,})")
-# 标题标记挂在行内元素后面、不独占一行：`![图](地址) ## Edit tab`。官方
-# Markdown 导出少一个换行就长这样，而漏认一个标题，它后面所有小节都会挂到
-# 上一节名下。必须紧跟着闭合的链接/图片括号才算——汇编注释
-# `movl input(%rip), %eax # eax = input` 的 `#` 同样在行尾，那不是标题。
+# A heading marker trailing an inline element instead of owning its own line:
+# `![img](url) ## Edit tab`. Official Markdown exports look like this whenever a
+# newline is missing, and a missed heading drags every section after it under the
+# previous heading. The marker must follow a closed link/image bracket to count:
+# an assembly comment such as `movl input(%rip), %eax # eax = input` also ends
+# with a `#`, and that is not a heading.
 TRAILING_HEADING_RE = re.compile(
     r"^(?P<lead>.*\]\([^)\s]*\))\s+(?P<hashes>#{1,6})\s+(?P<title>\S.*?)\s*$"
 )
@@ -42,8 +46,9 @@ MARKDOWN_TARGET_RE = re.compile(
 MARKDOWN_MARKUP_RE = re.compile(r"[`*_>#|~]+")
 WHITESPACE_RE = re.compile(r"[ \t]+")
 
-# 小节标题长什么样，就大致知道这段是干嘛的。跟具体产品无关：
-# 任何技术文档都有"参数""返回值""示例""注意事项"这些段落。
+# A section's heading shape says roughly what the section is for. Independent of
+# any product: every technical document has "parameters", "return value",
+# "examples" and "notes" sections.
 KNOWLEDGE_TYPE_RULES = (
     ("parameters", re.compile(r"\b(inputs?|parameters?|arguments?|properties)\b", re.I)),
     ("returns", re.compile(r"\b(outputs?|returns?|return value|results?)\b", re.I)),

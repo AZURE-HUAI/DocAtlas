@@ -1,4 +1,4 @@
-"""把一页的解析结果写进数据库（小节、知识块、实体、链接、图片）。"""
+"""Persist a parsed page: sections, chunks, entities, links and images."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from .versions import store_marks
 from .chunking import normalize_name
 
 
-# 这些错误说明"服务器现在不想理我们"，而不是"这一页有问题"。
+# These errors mean "the server will not talk to us right now", not "this page
+# is broken".
 THROTTLE_MARKERS = ("HTTP 429", "HTTP 403", "HTTP 503", "HTTP 502", "HTTP 504")
 
 
@@ -29,10 +30,10 @@ def _store_entity(
     stored_at: str,
     member_of_id: int | None = None,
 ) -> int | None:
-    """写一个实体和它的别名。返回实体 id；被去重挡下时返回 None。
+    """Write an entity and its aliases. Returns the entity id, None if deduped.
 
-    页面主体和页面上的成员走同一段代码——两条路各写一遍，迟早会在别名、
-    版本或属性上分叉。
+    Page bodies and on-page members share this one path deliberately: written
+    twice, the two would eventually diverge on aliases, versions or attributes.
     """
     cursor = connection.execute(
         """
@@ -60,8 +61,9 @@ def _store_entity(
         ),
     )
     if not cursor.rowcount:
-        # UNIQUE(page_id, entity_type, normalized_name) 挡下的：成员名撞上了
-        # 页面主体（构造函数与类同名就是这样）。这不是错误，是同一个东西。
+        # Blocked by UNIQUE(page_id, entity_type, normalized_name): a member
+        # name collided with the page body, which is what happens when a
+        # constructor shares its class name. Not an error, the same thing.
         return None
     entity_id = cursor.lastrowid
     connection.executemany(
@@ -85,7 +87,7 @@ def store_members(
     owner_entity_id: int | None,
     members: list[dict[str, Any]],
 ) -> int:
-    """写这一页上的成员实体，全部挂在页面主体实体下。"""
+    """Write this page's member entities, all owned by the page body entity."""
     if not owner_entity_id:
         return 0
     return sum(
@@ -105,8 +107,9 @@ def store_document_result(
     if not result["ok"]:
         error = result["error"]
         if _is_throttled(error):
-            # 被限流不是这一页的错：留在 pending，也不消耗重试次数，
-            # 否则一次限流风暴就会把几千页永久判死。
+            # Being throttled is not this page's fault: leave it pending and
+            # do not spend a retry, or one throttling storm would permanently
+            # kill thousands of pages.
             connection.execute(
                 "UPDATE pages SET status='pending', error=?, fetched_at=? WHERE id=?",
                 (error[:2000], stored_at, page_id),
@@ -299,8 +302,9 @@ def store_document_result(
         )
         chunk_id = chunk_cursor.lastrowid
         page_chunk_ids.append(chunk_id)
-        # 标题和正文分开传：`Annotations (since C++26)` 这种写在标题上的限定
-        # 管整段，正文里某一行的标记只管那一行，两者不能混为一谈。
+        # Title and body are passed separately: a qualifier written on the
+        # heading, such as `Annotations (since C++26)`, governs the whole
+        # section, while a mark on a body line governs only that line.
         store_marks(
             connection,
             chunk_id,
@@ -357,7 +361,8 @@ def store_document_result(
                 "INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_id) VALUES(?, ?)",
                 (chunk_id, tag_id),
             )
-    # 把同一页的块按顺序串起来，需要更多上下文时可以往前后取一块。
+    # Chain a page's chunks in order, so a neighbour can be pulled in when more
+    # context is needed.
     for position, chunk_id in enumerate(page_chunk_ids):
         connection.execute(
             "UPDATE chunks SET prev_chunk_id=?, next_chunk_id=? WHERE id=?",

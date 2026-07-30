@@ -1,0 +1,95 @@
+# Template dataset — copy this file to collect a documentation site of your own.
+#
+# A dataset is one library: one site, at one version, in one language. Its id is
+# the filename, and that is what you pass as DOCATLAS_DATASET.
+#
+# This template pairs with docatlas/sources/example.py, which implements the
+# invented site it describes. Its host uses .invalid, the TLD reserved for
+# examples, so nothing here can reach a real server. The test suite runs against this pair, so both
+# stay working.
+#
+# Adding a *version* of a site you already collect means copying a toml and
+# changing `id` and `version`. Adding a *site* means also writing one adapter.
+
+# ── Identity ───────────────────────────────────────────────────────────────
+# `id` must equal the filename, or the data directory and the configuration
+# disagree and the wrong library gets written. Startup refuses rather than guess.
+id = "EXAMPLE"
+# Shown to people, and used as the export heading.
+name = "Exampleware Docs (template)"
+# The product this documents. Appears on every chunk so an answer says what it
+# is about. Keep it a short slug.
+product = "exampleware"
+# Which release of the docs. Goes into canonical URLs, so citations stay pinned.
+version = "2.0"
+# The language to *request*. An instruction, not a fact: the adapter reports
+# what the server actually returned, and a mismatch is flagged.
+language = "en"
+# The module under docatlas/sources/ that understands this site.
+source = "example"
+# Optional module under docatlas/knowledge/ holding domain knowledge (which two
+# APIs are the same thing, what a naming convention means). Everything works
+# without one — you just get fewer cross-references.
+# knowledge = "exampleware"
+
+# Which categories are API reference. Biases retrieval towards signatures and
+# parameters, and makes a first paragraph read as a summary rather than an
+# overview. Also gates member-table extraction.
+api_categories = ["reference"]
+
+# ── Adapter settings ───────────────────────────────────────────────────────
+# Read by the adapter through `dataset.option(...)`. Keep every URL here rather
+# than in code, so one adapter can serve every version of the site.
+[source_options]
+base_url = "https://example.invalid"
+sitemap_index = "https://example.invalid/sitemap.xml"
+document_api = "https://example.invalid/api/doc"
+doc_prefix = "/docs/"
+
+# ── Categories ─────────────────────────────────────────────────────────────
+# category id -> the path prefix that identifies it. The keys define which
+# category names are legal anywhere else in this file, and the values are what
+# `categorize_sitemap` matches sitemap URLs against.
+#
+# Declare the smallest scope that works. A category may list several
+# directories, to pick up pages that are scattered but belong together:
+#
+#     tutorials = ["/docs/tutorials", "/docs/walkthroughs"]
+[categories]
+reference = "/docs/reference"
+guides = "/docs/guides"
+
+# Human-readable names. These reach the user, so write them as a person would.
+[category_labels]
+reference = "API Reference"
+guides = "Guides"
+
+# What kind of thing a page in each category documents. Used when building
+# entities and relations.
+[entity_types]
+reference = "api_symbol"
+guides = "guide"
+
+# Which category to fetch first when several pages share a name. Lower wins.
+[category_priority]
+reference = 1
+guides = 2
+
+# ── Skill ──────────────────────────────────────────────────────────────────
+# Words that should make an agent reach for this library. Write the terms users
+# actually type, in the language of the documentation.
+[skill]
+triggers = ["exampleware", "example docs", "template dataset"]
+
+# ── Retrieval tuning (optional) ────────────────────────────────────────────
+# Everything below can be left out; retrieval then works without this tuning.
+[search]
+# Categories prone to long member listings, pushed down when the question is
+# conceptual rather than a lookup. A member table answers "what are its
+# properties", not "what is this".
+verbose_categories = ["reference"]
+
+# Score adjustment per category for concept questions. Unset means 0.
+[search.concept_category_bonus]
+guides = 2.0
+reference = 0.0

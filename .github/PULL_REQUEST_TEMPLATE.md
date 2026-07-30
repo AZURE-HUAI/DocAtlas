@@ -1,25 +1,30 @@
-## 改动说明
+## What changed
 
-<!-- 说明改了什么，以及为什么要改。 -->
+<!-- What this changes, and why. -->
 
-## 关联事项
+## Related
 
-<!-- 有 GitHub Issue 时使用“Closes #编号”；有本地档案时写 BUG-xxx 或 ENH-xxx。 -->
+<!-- With a GitHub Issue, use "Closes #<number>"; with a local record, write
+     BUG-xxx or ENH-xxx. -->
 
-- GitHub Issue：
-- 本地档案：
+- GitHub Issue:
+- Local record:
 
-## 验证
+## Verification
 
-<!-- 列出实际运行的命令和结果；没有自动测试时说明人工核对内容。 -->
+<!-- The commands actually run and their results. Where there is no automated
+     test, say what was checked by hand. -->
 
 ```powershell
-# 验证命令
+# verification commands
 ```
 
-## 上下文与封存
+## Context and archiving
 
-- [ ] 已更新相关 `issues/` 档案，或本次改动不需要档案。
-- [ ] 若事项已完成，档案已补充解决记录、验证结果和关联 PR。
-- [ ] 若事项已完成，档案已移入相应的 `resolved/` 目录。
-- [ ] 没有提交密钥、Token、私人数据或本地生成的大型数据文件。
+- [ ] The relevant `issues/` record is updated, or this change needs none.
+- [ ] If the item is done, its record carries the resolution, the verification
+      result and the related PR.
+- [ ] If the item is done, its record has moved into the matching `resolved/`
+      directory.
+- [ ] No keys, tokens, personal data or locally generated data files are
+      committed.
