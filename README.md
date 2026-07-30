@@ -124,3 +124,8 @@ python -m docatlas ask "<an official term from your docs>"
   library, adding a site, reprocessing, health checks
 - [Issue log](issues/README.md) — past bug and enhancement records (written in
   Chinese)
+
+## Licence
+
+[MIT](LICENSE). The documentation you crawl stays under whatever terms its
+publisher sets — this licence covers the code here, nothing it fetches.
