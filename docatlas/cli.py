@@ -466,7 +466,14 @@ def skill_substitutions() -> dict[str, str]:
         # a tool that does not exist.
         "DOCATLAS_MCP_TOOLS": ", ".join(f"`{tool['name']}`" for tool in TOOLS),
         "DOCATLAS_DATASETS": ", ".join(f"`{key}`" for key in available_dataset_ids()),
-        "DOCATLAS_ROOT": str(REPO_ROOT),
+        # `as_posix`, not `str`: on Windows the spelling of this path follows
+        # whichever shell started Python — PowerShell yields backslashes, Git
+        # Bash forward slashes — so `str` makes the rendered document depend on
+        # how the installer happened to be launched. Two installs from two
+        # shells would then differ byte for byte, and any check comparing the
+        # installed copy against a fresh rendering reports a permanent false
+        # "out of date". Forward slashes are valid in every shell here.
+        "DOCATLAS_ROOT": REPO_ROOT.as_posix(),
         "DATASET_ID": DATASET_ID,
         "DATASET_NAME": DATASET.name,
         "DATASET_LANGUAGE": LANGUAGE,
