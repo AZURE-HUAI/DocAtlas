@@ -142,6 +142,3 @@ programs talking across a protocol, and your agent is unaffected.
 
 The documentation you crawl stays under whatever terms its publisher sets; this
 licence covers the code here, nothing it fetches.
-
-Releases up to and including commit `56cf781` were published under MIT and
-remain available under those terms.
