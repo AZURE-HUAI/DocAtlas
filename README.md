@@ -129,5 +129,19 @@ python -m docatlas ask "<an official term from your docs>"
 
 ## Licence
 
-[MIT](LICENSE). The documentation you crawl stays under whatever terms its
-publisher sets — this licence covers the code here, nothing it fetches.
+Copyright (C) 2026 AZURE-HUAI. [GNU AGPL v3](LICENSE) or later.
+
+Use it, sell it, build on it. The one condition: if you hand a modified version
+to anyone — shipped as a copy **or reachable over a network** — the source of
+your version has to be available to them too. Running it privately, modified or
+not, carries no obligation.
+
+Site adapters are loaded into the program and count as part of it, so they carry
+the same terms. An AI client that connects over MCP does not — that is two
+programs talking across a protocol, and your agent is unaffected.
+
+The documentation you crawl stays under whatever terms its publisher sets; this
+licence covers the code here, nothing it fetches.
+
+Releases up to and including commit `56cf781` were published under MIT and
+remain available under those terms.
