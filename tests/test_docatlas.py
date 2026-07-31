@@ -1905,6 +1905,91 @@ class UninstallCodexEntryTests(unittest.TestCase):
         self.assertEqual(stripped, text)
 
 
+class RelocatingDataTests(unittest.TestCase):
+    """Changing the data location must not quietly abandon what is already built.
+
+    A library costs hours of crawling; the program is seconds. Repointing the
+    data directory leaves the libraries behind, and from there every exit the
+    program offers agrees they were never built: `doctor` reports "not built"
+    and hands back a crawl command. A missing database would at least announce
+    itself — being told with confidence to redo finished work does not.
+    """
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "docatlas_install_relocate_test", runtime.REPO_ROOT / "install.py"
+        )
+        self.installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.installer)
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.old, self.new = root / "old", root / "new"
+        original = runtime.LOCAL_SETTINGS
+        runtime.LOCAL_SETTINGS = root / ".docatlas-local.toml"
+        runtime.LOCAL_SETTINGS.write_text(
+            f"home = {json.dumps(str(self.old))}\n", encoding="utf-8"
+        )
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original)
+
+    def build(self, name):
+        """A library as it sits on disk: a database plus its companions."""
+        folder = self.old / name
+        folder.mkdir(parents=True)
+        (folder / "knowledge.sqlite3").write_bytes(b"x" * 2048)
+        (folder / "ROUTER.md").write_text("carried too", encoding="utf-8")
+        return folder
+
+    def test_a_move_that_would_strand_libraries_stops_and_names_both_ways_out(self):
+        self.build("epic-ue-5.8")
+        with self.assertRaises(self.installer.Failed) as caught:
+            self.installer.save_choices(str(self.new), None)
+        message = str(caught.exception)
+        self.assertIn("epic-ue-5.8", message)
+        for flag in ("--move-data", "--leave-data"):
+            self.assertIn(flag, message)
+        # Refusing means refusing: neither location was touched on the way out.
+        self.assertTrue((self.old / "epic-ue-5.8" / "knowledge.sqlite3").exists())
+        self.assertFalse(self.new.exists())
+
+    def test_move_data_carries_the_whole_library_not_just_the_database(self):
+        self.build("epic-ue-5.8")
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            self.installer.save_choices(str(self.new), None, move_data=True)
+        # Moving gigabytes on someone's behalf is not something to do in silence.
+        self.assertIn(str(self.old), said.getvalue())
+        moved = self.new / "epic-ue-5.8"
+        self.assertEqual((moved / "knowledge.sqlite3").read_bytes(), b"x" * 2048)
+        self.assertEqual((moved / "ROUTER.md").read_text(encoding="utf-8"), "carried too")
+        self.assertFalse((self.old / "epic-ue-5.8").exists())
+
+    def test_leave_data_goes_ahead_without_disturbing_the_old_copy(self):
+        self.build("epic-ue-5.8")
+        target, _ = self.installer.save_choices(str(self.new), None, leave_data=True)
+        self.assertEqual(target, self.new.resolve())
+        self.assertTrue((self.old / "epic-ue-5.8" / "knowledge.sqlite3").exists())
+
+    def test_a_name_already_taken_at_the_destination_survives(self):
+        self.build("epic-ue-5.8")
+        (self.new / "epic-ue-5.8").mkdir(parents=True)
+        (self.new / "epic-ue-5.8" / "knowledge.sqlite3").write_bytes(b"newer")
+        with self.assertRaises(self.installer.Failed):
+            self.installer.save_choices(str(self.new), None, move_data=True)
+        self.assertEqual(
+            (self.new / "epic-ue-5.8" / "knowledge.sqlite3").read_bytes(), b"newer"
+        )
+        self.assertTrue((self.old / "epic-ue-5.8").exists())
+
+    def test_with_nothing_built_yet_the_move_is_nobody_s_business(self):
+        self.old.mkdir(parents=True)
+        target, _ = self.installer.save_choices(str(self.new), None)
+        self.assertEqual(target, self.new.resolve())
+
+
 class DoctorTests(unittest.TestCase):
     """`doctor` has to answer in the states where nothing else will."""
 

@@ -32,8 +32,13 @@ that server once to confirm it connects — nothing is written to your config if
 that check fails. Claude Code and Codex are registered automatically; for other
 clients run `python install.py --print` and paste the snippet.
 
-Options: `--data-dir D:/DocAtlasData` puts the databases on another drive,
-`--dataset <id>` picks which library is the default.
+Options: `--dataset <id>` picks which library is the default, and `--data-dir
+D:/DocAtlasData` puts the crawled libraries somewhere other than `data/` inside
+this folder. The second is worth a thought before you crawl rather than after: a
+large documentation set runs to hundreds of megabytes, several of them to a few
+gigabytes. Changing your mind later is safe — the installer stops rather than
+repoint the directory out from under libraries already built, and `--move-data`
+takes them along.
 
 If you keep a client's configuration somewhere other than the default —
 `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — DocAtlas follows

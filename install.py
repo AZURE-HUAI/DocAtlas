@@ -4,6 +4,8 @@ register the MCP server, and verify itself when done.
     python install.py                      # everything, data in <repo>/data
     python install.py --data-dir D:/Docs    # data elsewhere (program and data
                                             # need not live together)
+    python install.py --data-dir D:/Docs --move-data   # ...taking the libraries
+                                                       # already built along
     python install.py --print               # print the MCP snippet only
     python install.py --skip-skill          # register MCP only
     python install.py --skip-mcp            # install the Skill only
@@ -59,7 +61,65 @@ class Failed(Exception):
 # --------------------------------------------------------------------------
 
 
-def save_choices(data_dir: str | None, dataset: str | None) -> tuple[Path, str | None]:
+def stored_libraries(root: Path) -> list[tuple[str, int]]:
+    """Every built library under `root`, as (dataset id, bytes on disk).
+
+    A library is a directory holding a knowledge database. Each is a handful of
+    large files rather than a deep tree, so measuring them all costs nothing.
+    """
+    libraries = []
+    for database in sorted(root.glob("*/knowledge.sqlite3")):
+        folder = database.parent
+        size = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+        libraries.append((folder.name, size))
+    return libraries
+
+
+def relocate(old: Path, new: Path, *, move_data: bool, leave_data: bool) -> None:
+    """Refuse to change the data location out from under libraries already built.
+
+    Repointing the data directory does not carry them across, and a library the
+    program cannot find is indistinguishable from one that was never built:
+    `doctor` reports "not built" and offers to crawl it again — hours of work,
+    to rebuild something still sitting on the disk. Rather than let a silent
+    default decide, stop and make the caller say which they meant.
+    """
+    libraries = stored_libraries(old)
+    if not libraries or leave_data:
+        return
+
+    plural = "y" if len(libraries) == 1 else "ies"
+    listing = "\n".join(f"    {name}  ({size / 1_000_000:,.1f} MB)"
+                        for name, size in libraries)
+    if not move_data:
+        raise Failed(
+            f"{len(libraries)} built librar{plural} already live in {old}:\n"
+            f"{listing}\n"
+            "  Changing the data location does not take them along, and left "
+            "behind they read as never built: you would be told to crawl them "
+            "again.\n"
+            f"  Add --move-data to move them to {new}, or --leave-data to go "
+            "ahead without them."
+        )
+
+    if clashes := [name for name, _ in libraries if (new / name).exists()]:
+        raise Failed(
+            f"{new} already holds: {', '.join(clashes)}. Moving would put one "
+            "copy on top of the other; decide by hand which to keep."
+        )
+    new.mkdir(parents=True, exist_ok=True)
+    for name, _ in libraries:
+        shutil.move(str(old / name), str(new / name))
+    print(f"Moved {len(libraries)} librar{plural} out of {old}")
+
+
+def save_choices(
+    data_dir: str | None,
+    dataset: str | None,
+    *,
+    move_data: bool = False,
+    leave_data: bool = False,
+) -> tuple[Path, str | None]:
     """Record where the data lives and which library is the default, in
     `.docatlas-local.toml`.
 
@@ -74,11 +134,14 @@ def save_choices(data_dir: str | None, dataset: str | None) -> tuple[Path, str |
 
     settings = local_settings()
     default_dir = REPO_ROOT / "data"
+    current = Path(settings.get("home") or default_dir).resolve()
     if data_dir:
         target = Path(data_dir).expanduser().resolve()
+        if target != current:
+            relocate(current, target, move_data=move_data, leave_data=leave_data)
         settings["home"] = str(target)
     else:
-        target = Path(settings.get("home") or default_dir).resolve()
+        target = current
     target.mkdir(parents=True, exist_ok=True)
     if target == default_dir.resolve():
         settings.pop("home", None)
@@ -370,6 +433,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--data-dir", help="where the data goes (default <repo>/data)")
     parser.add_argument("--dataset", help="default library (otherwise chosen per command)")
+    # Only consulted when --data-dir names somewhere new and libraries are
+    # already built at the old one. Exclusive because they answer the same
+    # question, so passing both says nothing.
+    existing = parser.add_mutually_exclusive_group()
+    existing.add_argument("--move-data", action="store_true",
+                          help="with --data-dir, move built libraries to the new location")
+    existing.add_argument("--leave-data", action="store_true",
+                          help="with --data-dir, leave built libraries where they are")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the MCP snippet only, touch no files")
     parser.add_argument("--skip-mcp", action="store_true", help="do not register MCP")
@@ -401,7 +472,10 @@ def main(argv: list[str] | None = None) -> int:
         return uninstall(confirmed=args.yes, purge_data=args.purge_data)
 
     try:
-        data_dir, dataset = save_choices(args.data_dir, args.dataset)
+        data_dir, dataset = save_choices(
+            args.data_dir, args.dataset,
+            move_data=args.move_data, leave_data=args.leave_data,
+        )
         print(f"Program: {REPO_ROOT}")
         print(f"Data:    {data_dir}")
         print(f"Default library: {dataset or 'none (choose per command, or set --dataset)'}")

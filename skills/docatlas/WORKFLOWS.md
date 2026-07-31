@@ -213,6 +213,11 @@ python install.py
 it compares the installed copy against a fresh rendering, so it catches both a
 changed default library and a moved-on repository.
 
+Moving the data to another drive is the same command with `--data-dir`. It
+refuses rather than strand libraries already built at the old location: add
+`--move-data` to carry them across, or `--leave-data` to start empty at the new
+one. Neither deletes anything.
+
 After a `git pull`, also run `python -m docatlas validate --phase content`: when
 the chunking rules changed, stored chunks are still on the old ones and
 [Reprocessing](#reprocessing) applies.
