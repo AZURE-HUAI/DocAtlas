@@ -2020,6 +2020,43 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["state"], "broken config")
         self.assertIn("wrecked.toml", report["next"])
 
+    def test_the_reported_location_is_where_libraries_are_actually_read_from(self):
+        """The top line has to name the directory `inspect_dataset` actually
+        reads, not one recomputed from the settings file alone.
+
+        `DATA_ROOT` (env var > settings file > repository default) is decided
+        once in runtime.py so every consumer agrees; recomputing it here from
+        `settings.get("home")` skips the environment step; whenever
+        `DOCATLAS_HOME` was the reason the location differed from the settings
+        file, `doctor` would report one path while quietly reading another —
+        exactly the moment someone relocating data most needs the two to
+        agree.
+        """
+        empty = Path(tempfile.mkdtemp(prefix="docatlas_no_datasets_"))
+        self.addCleanup(shutil.rmtree, empty, True)
+        original_datasets = runtime.DATASET_CONFIG_DIR
+        runtime.DATASET_CONFIG_DIR = empty
+        self.addCleanup(setattr, runtime, "DATASET_CONFIG_DIR", original_datasets)
+        doctor.DATASET_CONFIG_DIR = empty
+        self.addCleanup(setattr, doctor, "DATASET_CONFIG_DIR", original_datasets)
+
+        original_settings = runtime.LOCAL_SETTINGS
+        settings_file = Path(self.enterContext(tempfile.TemporaryDirectory())) / "s.toml"
+        settings_file.write_text('home = "/wherever/the/settings/file/says"\n',
+                                  encoding="utf-8")
+        runtime.LOCAL_SETTINGS = settings_file
+        self.addCleanup(setattr, runtime, "LOCAL_SETTINGS", original_settings)
+
+        # Stand-in for what an env-var override does to DATA_ROOT, without the
+        # awkwardness of unsetting it again across every OS this test runs on.
+        overridden = Path("/env/var/won/this/one")
+        original_root = doctor.DATA_ROOT
+        doctor.DATA_ROOT = overridden
+        self.addCleanup(setattr, doctor, "DATA_ROOT", original_root)
+
+        report = doctor.collect()
+        self.assertEqual(report["data_root"], str(overridden))
+
     def test_each_shell_is_given_a_line_it_can_actually_run(self):
         """`VAR=value command` is not a thing in PowerShell.
 

@@ -21,6 +21,7 @@ from typing import Any
 from . import clients
 from .constants import CHUNKER_VERSION
 from .runtime import (
+    DATA_ROOT,
     DATASET_CONFIG_DIR,
     DatasetNotChosen,
     available_dataset_ids,
@@ -258,7 +259,11 @@ def collect() -> dict[str, Any]:
     return {
         "program": str(REPO_ROOT),
         "datasets_dir": str(DATASET_CONFIG_DIR),
-        "data_root": str(settings.get("home") or REPO_ROOT / "data"),
+        # DATA_ROOT, not settings.get("home"): every dataset below is read from
+        # there via workspace(), and DOCATLAS_HOME can override the settings
+        # file. Recomputing the location here from settings alone would show
+        # one path while quietly reading from another.
+        "data_root": str(DATA_ROOT),
         "default_dataset": chosen,
         "default_pinned": bool(settings.get("dataset")),
         "libraries": [
